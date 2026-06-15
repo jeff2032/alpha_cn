@@ -1,0 +1,126 @@
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
+
+from quant_a_stock.config import DEFAULT_PATHS
+
+
+def save_research_candidates_markdown(
+    candidates: pd.DataFrame,
+    *,
+    meta: dict | None = None,
+) -> Path:
+    DEFAULT_PATHS.reports.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = DEFAULT_PATHS.reports / f"research_candidates_{stamp}.md"
+    meta = meta or {}
+
+    lines = [
+        "# 全市场潜力股研究候选池",
+        "",
+        f"- 目标日期：{meta.get('target_date', '')}",
+        f"- 形态报告：{meta.get('scan_report', '')}",
+        f"- 情绪报告：{meta.get('sentiment_report', '')}",
+        f"- 市场主线报告：{meta.get('theme_report', '')}",
+        f"- 候选数量：{len(candidates)}",
+        "",
+        "## 评分口径",
+        "",
+        "研究分 = 形态分 * 0.65 + 情绪分 * 0.35 + 阶段加分 + 主线加分 + 行业同涨加分 - 扣分项。",
+        "",
+        "扣分项包括近 20 日涨幅过热、量能过热、次新样本不足和风险公告命中。研究分只用于观察池排序，不是买卖信号。",
+        "",
+        "## 候选分层",
+        "",
+    ]
+
+    if candidates.empty:
+        lines.append("没有可展示的候选。")
+    else:
+        display_cols = [
+            "symbol",
+            "name",
+            "research_tier",
+            "research_score",
+            "stage",
+            "setup_phase",
+            "score",
+            "mtf_score",
+            "monthly_position_pct",
+            "weekly_trend_slope_pct",
+            "sentiment_score",
+            "matched_theme",
+            "co_rise_count",
+            "total_penalty",
+        ]
+        existing_cols = [column for column in display_cols if column in candidates.columns]
+        lines.extend(
+            [
+                _markdown_table(candidates.loc[:, existing_cols].head(50)),
+                "",
+            ]
+        )
+
+        for tier in ["A", "B", "C", "观察"]:
+            subset = candidates[candidates["research_tier"] == tier]
+            if subset.empty:
+                continue
+            lines.extend([f"## {tier} 级候选", ""])
+            for _, row in subset.head(20).iterrows():
+                lines.extend(_candidate_lines(row))
+
+    errors = meta.get("errors") or []
+    if errors:
+        lines.extend(["## 数据源提示", ""])
+        for error in errors[:30]:
+            lines.append(f"- {error}")
+        if len(errors) > 30:
+            lines.append(f"- 还有 {len(errors) - 30} 条提示未展开。")
+
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def _candidate_lines(row: pd.Series) -> list[str]:
+    symbol = row.get("symbol", "")
+    name = row.get("name", "")
+    lines = [
+        f"### {symbol} {name}",
+        "",
+        f"- 研究分：{row.get('research_score', '')}",
+        f"- 形态：{row.get('stage', '')}，节奏 {row.get('setup_phase', '') or '未标注'}，形态分 {row.get('score', '')}",
+        f"- 多周期：月线位置 {row.get('monthly_position_pct', '')}，"
+        f"周线趋势 {row.get('weekly_trend_slope_pct', '')}，"
+        f"多周期分 {row.get('mtf_score', '')}",
+        f"- 情绪分：{row.get('sentiment_score', '')}，人气排名 {row.get('hot_rank', '')}",
+        f"- 主线命中：{row.get('matched_theme', '') or '未命中'}，主线加分 {row.get('theme_bonus', '')}",
+        f"- 行业同涨：{row.get('co_rise_count', 0)}，同涨加分 {row.get('co_rise_bonus', '')}",
+        f"- 上市天数：{row.get('listing_days', '')}，样本类型 {row.get('age_bucket', '') or '未知'}",
+        f"- 扣分：总扣分 {row.get('total_penalty', '')}，"
+        f"量能过热 {row.get('volume_overheat_penalty', '')}，"
+        f"涨幅过热 {row.get('ret20_overheat_penalty', '')}，"
+        f"公告风险 {row.get('risk_notice_penalty', '')}",
+        f"- 热门关键词：{row.get('top_keywords', '') or '无'}",
+    ]
+    risk_titles = str(row.get("risk_notice_titles", "") or "")
+    if risk_titles:
+        lines.append(f"- 风险公告命中：{risk_titles}")
+    lines.append("")
+    return lines
+
+
+def _markdown_table(frame: pd.DataFrame) -> str:
+    if frame.empty:
+        return ""
+    headers = [str(column) for column in frame.columns]
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    for _, row in frame.iterrows():
+        values = [str(row.get(column, "")).replace("|", "/") for column in frame.columns]
+        lines.append("| " + " | ".join(values) + " |")
+    return "\n".join(lines)

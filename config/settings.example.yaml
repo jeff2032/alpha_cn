@@ -1,0 +1,20 @@
+data:
+  source: akshare
+  cache_dir: data/cache
+  adjust: qfq
+
+backtest:
+  initial_cash: 1000000
+  buy_commission_rate: 0.0003
+  sell_commission_rate: 0.0003
+  stamp_tax_rate: 0.0005
+  transfer_fee_rate: 0.0
+  trade_on_next_bar: true
+  t_plus_1: true
+
+strategy:
+  name: sma_trend_filter
+  fast_window: 20
+  slow_window: 60
+  trend_window: 120
+
