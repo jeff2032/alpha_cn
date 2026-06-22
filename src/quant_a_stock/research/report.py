@@ -31,7 +31,9 @@ def save_research_candidates_markdown(
         "",
         "研究分 = 形态分 * 0.65 + 情绪分 * 0.35 + 阶段加分 + 主线加分 + 行业同涨加分 - 扣分项。",
         "",
-        "扣分项包括近 20 日涨幅过热、量能过热、次新样本不足和风险公告命中。研究分只用于观察池排序，不是买卖信号。",
+        "分层含义：A1=早期潜伏，A2=启动确认，A3=强趋势回踩/再启动，B1=观察主池，B2/C=备选观察。研究分只用于观察池排序，不是买卖信号。",
+        "",
+        "扣分项包括近 20 日涨幅过热、量能过热、量价同时过热、月线/区间位置偏高、次新样本不足和风险公告命中。",
         "",
         "## 候选分层",
         "",
@@ -64,7 +66,7 @@ def save_research_candidates_markdown(
             ]
         )
 
-        for tier in ["A", "B", "C", "观察"]:
+        for tier in ["A1", "A2", "A3", "B1", "B2", "C", "观察"]:
             subset = candidates[candidates["research_tier"] == tier]
             if subset.empty:
                 continue
@@ -102,9 +104,18 @@ def _candidate_lines(row: pd.Series) -> list[str]:
         f"- 扣分：总扣分 {row.get('total_penalty', '')}，"
         f"量能过热 {row.get('volume_overheat_penalty', '')}，"
         f"涨幅过热 {row.get('ret20_overheat_penalty', '')}，"
+        f"量价共振过热 {row.get('combined_overheat_penalty', '')}，"
+        f"位置偏高 {row.get('position_overhead_penalty', '')}，"
         f"公告风险 {row.get('risk_notice_penalty', '')}",
         f"- 热门关键词：{row.get('top_keywords', '') or '无'}",
     ]
+    if str(row.get("stage", "")) in {"trend_pullback", "trend_resume"}:
+        lines.append(
+            f"- 趋势回踩：60 日涨幅 {row.get('ret_60_pct', '')}，"
+            f"离 60 日高点 {row.get('drawdown_from_high_pct', '')}，"
+            f"趋势/回踩/再启动分 {row.get('trend_score', '')}/"
+            f"{row.get('pullback_score', '')}/{row.get('resume_score', '')}"
+        )
     risk_titles = str(row.get("risk_notice_titles", "") or "")
     if risk_titles:
         lines.append(f"- 风险公告命中：{risk_titles}")

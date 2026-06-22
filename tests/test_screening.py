@@ -5,6 +5,7 @@ import pandas as pd
 
 from quant_a_stock.screening.patterns import scan_accumulation_setups
 from quant_a_stock.screening.patterns import scan_base_breakout_setups
+from quant_a_stock.screening.patterns import scan_trend_pullback_setups
 
 
 def test_base_breakout_scanner_penalizes_extended_moves() -> None:
@@ -131,3 +132,44 @@ def test_accumulation_scanner_filters_near_high_as_not_early() -> None:
     )
 
     assert result.empty
+
+
+def test_trend_pullback_scanner_finds_strong_trend_resume() -> None:
+    calm = np.linspace(10, 12, 180)
+    impulse = np.linspace(12, 22, 50)
+    pullback = np.linspace(22, 18, 20)
+    resume = np.linspace(18, 20, 10)
+    close = pd.Series(np.concatenate([calm, impulse, pullback, resume]))
+    days = len(close)
+    volume = pd.Series(np.full(days, 2_000_000.0))
+    volume.iloc[-1] = 2_500_000
+    candles = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=days, freq="B"),
+            "open": close,
+            "high": close * 1.02,
+            "low": close * 0.98,
+            "close": close,
+            "volume": volume,
+            "amount": close * volume * 100,
+            "symbol": "300548",
+        }
+    )
+
+    result = scan_trend_pullback_setups(
+        {"300548": candles},
+        min_score=40,
+        stages={"trend_pullback", "trend_resume"},
+        min_amount_ma20=100_000_000,
+        min_ret_60=0.18,
+        max_ret_20=0.18,
+        max_close_vs_trend=0.65,
+        max_drawdown_from_high=0.32,
+        max_volume_ratio=3.20,
+    )
+
+    assert not result.empty
+    assert result.loc[0, "stage"] in {"trend_pullback", "trend_resume"}
+    assert result.loc[0, "ret_60_pct"] >= 0.18
+    assert result.loc[0, "ret_20_pct"] <= 0.18
+    assert result.loc[0, "drawdown_from_high_pct"] >= -0.32

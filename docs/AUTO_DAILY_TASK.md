@@ -1,37 +1,83 @@
-# Windows 自动运行每日选股任务
+# Windows 自动运行每日数据任务
 
-当前推荐时间：每天 16:30。
+当前推荐时间：
+
+- 每天 16:30 自动连续跑夜间准备：先补日线行情，再跑形态扫描、情绪、市场主线、公司资料、公告风险、快照、日报、滚动复盘、行情仓库同步和研究结果入库。
+- 每天早上 7 点左右手动和 Codex 一起跑快决策、荐股结果与策略反思。
 
 原因：
 
 - A 股 15:00 收盘后，日线数据和新闻/研报数据通常需要一点时间同步。
 - 16:30 比 15:10 更稳，能减少因为数据源未更新导致的空跑。
-- 任务会先用 `000001` 做探针；如果数据源还没更新到当天，就跳过全市场更新。
+- 16:30 自动任务做完整夜间准备，所有漫长的数据准备都放在这里连续跑。
+- 如果行情补数后仍有大量标的没到目标交易日，脚本会在同一个 16:30 任务内等待并重试，默认最多 6 轮、每轮间隔 30 分钟。
+- 多轮重试后仍未达标时，脚本才会跳过后续慢分析，直接写运维报告，避免用不完整行情生成结论。
+- 日常补数使用增量模式，只刷新过期标的最近一段数据，不会每天从 2020 年全量重拉。
+- 默认用 `sina` 数据源补数；由于 `sina` 在高并发下可能触发 AKShare 依赖崩溃，脚本会自动把 Sina 的有效并发保护到 2。
+- 目标日期按 A 股真实交易日处理，不只看工作日；节假日会自动回退到本地最近一个已缓存交易日。
+- 早上手动跑荐股时，默认数据目标日取上一个交易日，Obsidian 输出目录取当天计划日期；报告内容会注明数据截至日。
 
-## 自动任务执行内容
+## 16:30 夜间连续准备任务
 
 任务计划程序会调用：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "G:\OwnProject\alpha_cn\scripts\run_daily_research.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "G:\OwnProject\alpha_cn\scripts\run_nightly_research_prep.ps1"
 ```
 
 脚本顺序：
 
 1. 周末自动跳过。
-2. 用 `000001` 检查当天日线是否已可用。
-3. 补充过期股票缓存。
-4. 扫描突破确认池。
-5. 扫描低位潜伏池。
-6. 生成情绪面报告。
-7. 生成市场主线报告。
-8. 合成最终研究候选池。
-9. 归档到 `data/snapshots/research/YYYY-MM-DD/`。
-10. 生成每日中文复盘报告 `daily_research_summary_*.md`。
+2. 增量补充过期股票缓存，默认 `Workers=6`，回看 60 个自然日。
+3. 复查缓存是否到目标交易日，生成 `data/universe/stale_after_nightly.csv`。
+4. 如果过期标的数超过阈值，默认 30 只，等待 30 分钟后重试补数。
+5. 默认最多重试 6 轮；仍未达标时，跳过后续慢分析，只输出运维报告。
+6. 扫描突破确认池。
+7. 扫描低位潜伏池。
+8. 扫描强趋势回踩/再启动池。
+9. 生成情绪面缓存，默认扩到前 180 个候选。
+10. 生成市场主线。
+11. 合成最终研究候选池，并抓公司资料、公告风险等慢数据。
+12. 归档到 `data/snapshots/research/YYYY-MM-DD/`。
+13. 生成每日中文复盘报告。
+14. 生成近两周候选池滚动复盘报告。
+15. 写入股票池维表。
+16. 把本地日线 CSV 缓存增量同步到 Parquet。
+17. 回填当天研究快照。
+18. 写入最新研究报告和复盘结果。
+19. 输出夜间准备报告。
 
-## 每天看什么
+日志和状态报告：
 
-优先看：
+- 行情补数日志：`logs/data_sync/`
+- 日志：`logs/nightly_prep/`
+- 状态报告：`reports/ops/nightly_prep_*.md`
+
+如果早上发现报告里有失败步骤，可以先看最新的 `reports/ops/nightly_prep_*.md`，再决定是否手动补跑。
+
+## 7 点手动荐股
+
+早上打开 Codex 后说“跑荐股和复盘”，执行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_research.ps1
+```
+
+脚本顺序：
+
+1. 检查目标数据日是否已经准备好。
+2. 必要时补少量过期行情。
+3. 扫描三类形态池。
+4. 生成情绪面报告。
+5. 生成市场主线报告。
+6. 快速合成最终研究候选池，默认跳过公司资料和公告风险联网请求。
+7. 归档到 `data/snapshots/research/YYYY-MM-DD/`。
+8. 生成每日中文复盘报告 `daily_research_summary_*.md`。
+9. 复制 Markdown 报告到 Obsidian：`G:\Program Files (x86)\Obsidian_base\中国A股荐股\计划日期\`。
+
+早上脚本的重点是快，不把慢接口放进决策链路；夜间准备成功时，早上主要是刷新和确认。
+
+项目内优先看：
 
 - `reports/daily_research_summary_*.md`
 - `reports/research_candidates_*.md`
@@ -42,14 +88,50 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "G:\OwnProject\alpha_cn\
 
 - `logs/daily_research/`
 
-## 手动跑一次
+Obsidian 同步位置：
+
+- `G:\Program Files (x86)\Obsidian_base\中国A股荐股\`
+- 每个计划日期一个目录，包含 `每日推荐复盘.md`、`最终候选池.md`、`市场主线.md`、`情绪观察.md`、`策略反思.md`。
+- 同一个计划日期重复运行会覆盖自动生成的报告文件，但不会覆盖已经存在的 `策略反思.md`。
+
+## 手动跑荐股
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_research.ps1
+```
+
+如果想明确指定“数据截至日”和“计划日期”，例如 2026-06-18 开盘前基于 2026-06-17 数据做计划：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_research.ps1 -TargetDate 2026-06-17 -PlanDate 2026-06-18
+```
+
+如果只想生成项目内报告，不想同步到 Obsidian：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_research.ps1 -NoObsidianExport
+```
+
+如果数据源不稳定、失败数变多，可以临时降低并行数：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_research.ps1 -Workers 4
 ```
 
 如果想周末或节假日强制跑一次：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_research.ps1 -Force
+```
+
+如果周末或月末需要更稳地刷新 250 日平台指标和最近复权，可以临时拉长回看窗口：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_research.ps1 -Force -LookbackDays 450
+```
+
+如果需要更严格地重算月线三年结构，可以用深刷新：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_research.ps1 -Force -LookbackDays 1200
 ```

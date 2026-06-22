@@ -4,6 +4,13 @@
 
 ## 每天固定流程
 
+现在分成两段：
+
+- 晚上慢准备：16:30 由一个定时任务连续跑，适合放所有耗时、可能卡接口的事情，包括行情补数、全市场形态扫描、情绪、市场主线、公司资料和公告风险。
+- 早上快决策：不再逐只联网查公告/公司资料，只用昨晚准备好的缓存和报告，快速生成计划、复盘和策略反思。
+
+## 晚上慢准备
+
 先确认数据是否更新到最近交易日：
 
 ```powershell
@@ -13,7 +20,7 @@ python -m quant_a_stock.cli cache-date-status --universe-file data/universe/a_st
 如果有过期标的，只补过期标的：
 
 ```powershell
-python -m quant_a_stock.cli sync-stock-universe --universe-file data/universe/stale.csv --since 2020-01-01 --stock-provider sina --adjust qfq --sleep 1.5 --no-skip-existing
+python -m quant_a_stock.cli sync-stock-universe --universe-file data/universe/stale.csv --since 2020-01-01 --stock-provider sina --adjust qfq --incremental --lookback-days 60 --workers 6 --sleep 0.05 --no-skip-existing
 ```
 
 扫描全市场突破确认池：
@@ -35,10 +42,18 @@ python -m quant_a_stock.cli scan-pattern --pattern accumulation_setup --top 120 
 - 日线触发 45%：看 250 日平台位置、长期成本偏离、日线温和放量和近 20/60 日涨幅。
 - `setup_phase` 会标注为长期低位蓄势、周线右侧启动、日线触发观察、低位潜伏观察、接近突破确认或已过热。
 
+扫描全市场强趋势回踩/再启动池：
+
+```powershell
+python -m quant_a_stock.cli scan-pattern --pattern trend_pullback_setup --top 120 --min-score 50 --stages trend_pullback trend_resume --min-amount-ma20 100000000 --min-ret-60 0.18 --filter-max-ret-20 0.18 --max-volume-ratio 3.20 --max-close-vs-trend 0.65 --max-drawdown-from-high 0.32
+```
+
+趋势回踩池对应日报里的 A3：它用于捕捉已经有 60 日趋势、近 20 日不过热、回撤后重新企稳的候选。
+
 给形态候选池做情绪评分：
 
 ```powershell
-python -m quant_a_stock.cli sentiment-score --latest-scan --target-date 2026-06-12 --top 50 --display-top 30 --news-days 7
+python -m quant_a_stock.cli sentiment-score --latest-scan --target-date 2026-06-12 --top 90 --display-top 30 --news-days 7
 ```
 
 生成市场主线：
@@ -53,6 +68,12 @@ python -m quant_a_stock.cli market-theme --target-date 2026-06-12 --top 20
 python -m quant_a_stock.cli research-candidates --target-date 2026-06-12 --top 30
 ```
 
+夜间版本会抓公司资料和公告风险，允许慢慢跑。它会先补基础行情；如果补完后过期标的超过阈值，默认 30 只，会在同一个任务里等待并重试，默认最多 6 轮、每轮间隔 30 分钟；仍未达标时才跳过后续慢分析并写运维报告。手动执行完整夜间准备：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_nightly_research_prep.ps1
+```
+
 归档当天快照：
 
 ```powershell
@@ -65,12 +86,89 @@ python -m quant_a_stock.cli snapshot-research --target-date 2026-06-12
 python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --top 30
 ```
 
+生成候选池滚动复盘报告：
+
+```powershell
+python -m quant_a_stock.cli research-review --since 2026-05-29 --until 2026-06-12 --top-movers 20
+```
+
+这个报告会把近两周快照里的候选池和 1/3/5 个交易日表现对齐，重点看 A2、A3、B1/B2 各自是否有效，以及全市场次日强票有没有被候选池捕获。A2 主要看 3/5 日是否从潜伏转强，A3 主要看 1/3 日趋势是否延续。
+
+复盘报告里的“明显错过样本和风险提示”要分开看：
+
+- `次日涨幅超常规涨跌幅`：优先按复权、除权或特殊事件样本处理，不拿来直接优化选股规则。
+- `未做公告风险核验`：说明该票没有进入最终候选池，尚未检查公告、质押、减持、问询等风险，不能因为次日大涨就追高。
+- `120 日区间位置偏高`、`前 20 日涨幅偏高`、`信号日放量过猛`：更偏右侧追涨风险，只能放主线补票观察。
+- `20 日成交额偏低`、`次新或历史样本不足`：流动性和样本可靠性不足，原则上不纳入常规补票池。
+
+把当晚最新报告写入研究仓库：
+
+```powershell
+python -m quant_a_stock.cli warehouse-ingest --target-date 2026-06-12
+```
+
+仓库采用 DuckDB + Parquet，落在 `data/warehouse/`，这个目录不提交 git。当前持久化每日研究结果、历史研究快照、复盘明细、错过样本、报告索引、股票池维表和日线行情 Parquet。
+
+把股票池写入维表：
+
+```powershell
+python -m quant_a_stock.cli warehouse-sync-universe --universe-file data/universe/a_stock.csv --target-date 2026-06-12
+```
+
+把本地日线 CSV 缓存同步成 Parquet：
+
+```powershell
+python -m quant_a_stock.cli warehouse-sync-candles --universe-file data/universe/a_stock.csv --target-date 2026-06-12
+```
+
+日线行情同步是增量式的：如果某只股票 Parquet 里已经到达 CSV 的最后日期，会标记为 `skipped`，不会每天重写全量历史。第一次初始化会比较慢，后面夜间同步会轻很多。
+
+回填历史研究快照：
+
+```powershell
+python -m quant_a_stock.cli warehouse-backfill-snapshots --since 2026-06-12 --until 2026-06-18
+```
+
+查看仓库覆盖：
+
+```powershell
+python -m quant_a_stock.cli warehouse-status
+```
+
+按日期区间汇总复盘：
+
+```powershell
+python -m quant_a_stock.cli warehouse-review --since 2026-06-12 --until 2026-06-18
+```
+
+夜间准备状态会写到：
+
+- `reports/ops/nightly_prep_*.md`
+- `logs/nightly_prep/`
+
+## 早上快决策
+
+早上不跑慢公告/资料接口，直接执行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_research.ps1
+```
+
+早上脚本会做一次快速刷新和报告导出，并把 Markdown 同步到 Obsidian 的 `中国A股荐股/YYYY-MM-DD/` 目录。它默认使用：
+
+```powershell
+python -m quant_a_stock.cli research-candidates --target-date 目标日期 --top 30 --no-fetch-profiles --no-fetch-notices
+```
+
+这样即使慢接口不稳定，也不会卡住早上的荐股和复盘。
+
 ## 每天主要看哪些报告
 
 优先看：
 
 - `daily_research_summary_*.md`：每日主报告，综合市场温度、主线、候选分层、持续性和风险提醒。
 - `research_candidates_*.md`：最终候选池，主要看 A/B 级。
+- `research_review_*.md`：滚动策略复盘，重点看 A2/A3/B 池近期命中、错过和亏损样本。
 - `market_theme_*.md`：当天市场主线。
 - `sentiment_watchlist_*.md`：候选股情绪细节。
 
@@ -78,6 +176,7 @@ python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --to
 
 - `scan_accumulation_setup_*.csv`：潜伏池形态候选。
 - `scan_base_breakout_setup_*.csv`：纯形态候选。
+- `scan_trend_pullback_setup_*.csv`：强趋势回踩/再启动候选。
 - `research_candidates_*.csv`：需要排序、筛选、做表格时看。
 
 不需要每天看：
@@ -96,7 +195,7 @@ python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --to
 
 优先人工复盘：
 
-- `research_tier = A`
+- `research_tier` 属于 `A1`、`A2`、`A3` 或 `B1`
 - `research_score` 靠前
 - `stage = accumulation`
 - `setup_phase` 属于长期低位蓄势、周线右侧启动或日线触发观察
@@ -142,11 +241,13 @@ python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --to
 
 - 最新一组 `scan_accumulation_setup_*.csv`
 - 最新一组 `scan_base_breakout_setup_*.csv`
+- 最新一组 `scan_trend_pullback_setup_*.csv`
 - 最新一组 `sentiment_watchlist_*.md/.csv`
 - 最新一组 `market_theme_*.md/.csv`
 - 最新一组 `research_candidates_*.md/.csv`
 - 最新一组 `daily_research_summary_*.md`
 - 最新一组 `daily_research_candidates_*.csv`
+- 最新一组 `research_review_*.md/.csv`
 - 最新一组 `research_backtest_*.csv`
 - 最新一组 `research_optimize_*.csv`
 

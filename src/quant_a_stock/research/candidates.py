@@ -41,14 +41,18 @@ class ResearchCandidateConfig:
     pre_breakout_bonus: float = 1.0
     near_breakout_bonus: float = 2.0
     breakout_bonus: float = 1.0
+    trend_pullback_bonus: float = 1.5
+    trend_resume_bonus: float = 2.5
     theme_bonus_max: float = 8.0
     co_rise_bonus_max: float = 5.0
     risk_notice_penalty_per_hit: float = 5.0
     risk_notice_penalty_max: float = 20.0
-    ret20_hot_threshold: float = 0.20
+    ret20_hot_threshold: float = 0.15
     ret20_extreme_threshold: float = 0.30
-    volume_hot_threshold: float = 2.50
+    volume_hot_threshold: float = 2.20
     volume_extreme_threshold: float = 4.00
+    monthly_high_position_threshold: float = 0.70
+    price_high_position_threshold: float = 0.78
     new_stock_days: int = 250
     recent_stock_days: int = 500
 
@@ -205,12 +209,42 @@ def build_research_candidates(
             "amount_ma20",
             "trend_slope_20_pct",
             "distance_to_high_pct",
+            "price_position_pct",
+            "monthly_position_pct",
+            "weekly_trend_slope_pct",
+            "close_vs_trend_pct",
+            "close_vs_cost_pct",
+            "ret_60_pct",
+            "ret_120_pct",
+            "ret_5_pct",
+            "mtf_score",
+            "daily_score",
+            "weekly_score",
+            "monthly_score",
+            "early_trigger_score",
+            "trend_score",
+            "pullback_score",
+            "resume_score",
+            "close_vs_fast_pct",
+            "fast_slope_10_pct",
+            "drawdown_from_high_pct",
+            "pullback_depth_pct",
+            "range_position_60_pct",
             "risk_notice_count",
             "cache_age_days",
         ],
     )
-    for column in ["listing_date", "cache_first_date", "industry", "risk_notice_titles"]:
+    for column in [
+        "listing_date",
+        "cache_first_date",
+        "industry",
+        "risk_notice_titles",
+        "stage",
+        "setup_phase",
+        "scan_source",
+    ]:
         output = _ensure_text_column(output, column)
+    output["setup_phase"] = output.apply(_fill_setup_phase, axis=1)
 
     target = _target_date_from_frame(output, target_date)
     output["listing_date_final"] = output.apply(
@@ -245,6 +279,8 @@ def build_research_candidates(
             "pre_breakout": config.pre_breakout_bonus,
             "near_breakout": config.near_breakout_bonus,
             "breakout": config.breakout_bonus,
+            "trend_pullback": config.trend_pullback_bonus,
+            "trend_resume": config.trend_resume_bonus,
         }
     ).fillna(0.0)
     output["volume_overheat_penalty"] = output["volume_ratio"].map(
@@ -252,6 +288,14 @@ def build_research_candidates(
     )
     output["ret20_overheat_penalty"] = output["ret_20_pct"].map(
         lambda value: _ret20_overheat_penalty(value, config)
+    )
+    output["combined_overheat_penalty"] = output.apply(
+        lambda row: _combined_overheat_penalty(row["ret_20_pct"], row["volume_ratio"]),
+        axis=1,
+    )
+    output["position_overhead_penalty"] = output.apply(
+        lambda row: _position_overhead_penalty(row, config),
+        axis=1,
     )
     output["new_stock_penalty"] = output["listing_days"].map(
         lambda days: 5.0 if days and days < config.new_stock_days else 0.0
@@ -262,6 +306,8 @@ def build_research_candidates(
     output["total_penalty"] = (
         output["volume_overheat_penalty"]
         + output["ret20_overheat_penalty"]
+        + output["combined_overheat_penalty"]
+        + output["position_overhead_penalty"]
         + output["new_stock_penalty"]
         + output["risk_notice_penalty"]
     )
@@ -273,11 +319,12 @@ def build_research_candidates(
         + output["co_rise_bonus"]
         - output["total_penalty"]
     ).clip(lower=0, upper=100).round(2)
-    output["research_tier"] = output["research_score"].map(_tier)
+    output["research_tier"] = output.apply(_tier, axis=1)
+    output["research_tier_rank"] = output["research_tier"].map(_tier_rank)
 
     return output.sort_values(
-        ["research_score", "score", "sentiment_score"],
-        ascending=[False, False, False],
+        ["research_tier_rank", "research_score", "score", "sentiment_score"],
+        ascending=[True, False, False, False],
     ).reset_index(drop=True)
 
 
@@ -295,7 +342,28 @@ def _ensure_text_column(frame: pd.DataFrame, column: str) -> pd.DataFrame:
     if column not in output.columns:
         output[column] = ""
     output[column] = output[column].fillna("").astype(str)
+    output[column] = output[column].replace({"nan": "", "NaN": "", "None": ""})
     return output
+
+
+def _fill_setup_phase(row: pd.Series) -> str:
+    phase = str(row.get("setup_phase", "") or "").strip()
+    if phase:
+        return phase
+    stage = str(row.get("stage", "") or "")
+    if stage == "near_breakout":
+        return "接近突破确认"
+    if stage == "breakout":
+        return "突破确认"
+    if stage == "watch":
+        return "突破观察"
+    if stage == "pre_breakout":
+        return "接近突破确认"
+    if stage == "trend_pullback":
+        return "强趋势回踩"
+    if stage == "trend_resume":
+        return "强趋势再启动"
+    return ""
 
 
 def _target_date_from_frame(frame: pd.DataFrame, target_date: str | None) -> pd.Timestamp:
@@ -357,6 +425,116 @@ def _ret20_overheat_penalty(value: float, config: ResearchCandidateConfig) -> fl
     return 0.0
 
 
+def _combined_overheat_penalty(ret20: float, volume_ratio: float) -> float:
+    if ret20 > 0.20 and volume_ratio > 2.50:
+        return 8.0
+    if ret20 > 0.15 and volume_ratio > 2.20:
+        return 4.0
+    return 0.0
+
+
+def _position_overhead_penalty(row: pd.Series, config: ResearchCandidateConfig) -> float:
+    penalty = 0.0
+    monthly_position = float(row.get("monthly_position_pct", 0.0) or 0.0)
+    price_position = float(row.get("price_position_pct", 0.0) or 0.0)
+    if monthly_position > config.monthly_high_position_threshold:
+        penalty += min(8.0, (monthly_position - config.monthly_high_position_threshold) / 0.18 * 8)
+    if price_position > config.price_high_position_threshold:
+        penalty += min(6.0, (price_position - config.price_high_position_threshold) / 0.16 * 6)
+    return round(penalty, 2)
+
+
+def _has_mainline_confirmation(row: pd.Series) -> bool:
+    return bool(str(row.get("matched_theme", "") or "").strip()) or int(
+        _safe_number(row.get("co_rise_count", 0))
+    ) >= 2
+
+
+def _has_any_confirmation(row: pd.Series) -> bool:
+    return _has_mainline_confirmation(row) or int(_safe_number(row.get("core_news_count", 0))) > 0
+
+
+def _is_early_accumulation(row: pd.Series) -> bool:
+    if str(row.get("stage", "")) != "accumulation":
+        return False
+    price_position = _safe_number(row.get("price_position_pct", 0.0))
+    ret20 = _safe_number(row.get("ret_20_pct", 0.0))
+    volume_ratio = _safe_number(row.get("volume_ratio", 0.0))
+    return 0.35 <= price_position <= 0.72 and ret20 <= 0.16 and volume_ratio <= 2.25
+
+
+def _is_launch_confirmation(row: pd.Series) -> bool:
+    stage = str(row.get("stage", ""))
+    phase = str(row.get("setup_phase", "") or "")
+    return stage in {"pre_breakout", "near_breakout", "breakout"} or phase in {
+        "接近突破确认",
+        "周线右侧启动",
+        "日线触发观察",
+    }
+
+
+def _is_trend_pullback(row: pd.Series) -> bool:
+    stage = str(row.get("stage", ""))
+    ret60 = _safe_number(row.get("ret_60_pct", 0.0))
+    ret20 = _safe_number(row.get("ret_20_pct", 0.0))
+    drawdown = _safe_number(row.get("drawdown_from_high_pct", 0.0))
+    close_vs_trend = _safe_number(row.get("close_vs_trend_pct", 0.0))
+    volume_ratio = _safe_number(row.get("volume_ratio", 0.0))
+    return (
+        stage in {"trend_pullback", "trend_resume"}
+        and ret60 >= 0.18
+        and ret20 <= 0.24
+        and drawdown >= -0.35
+        and close_vs_trend <= 0.70
+        and volume_ratio <= 3.30
+    )
+
+
+def _tier(row: pd.Series) -> str:
+    score = _safe_number(row.get("research_score", 0.0))
+    total_penalty = _safe_number(row.get("total_penalty", 0.0))
+    ret20 = _safe_number(row.get("ret_20_pct", 0.0))
+
+    early = _is_early_accumulation(row)
+    launch = _is_launch_confirmation(row)
+    trend_pullback = _is_trend_pullback(row)
+    mainline_confirmed = _has_mainline_confirmation(row)
+    any_confirmed = _has_any_confirmation(row)
+
+    if score >= 60 and early and mainline_confirmed and total_penalty <= 8:
+        return "A1"
+    if score >= 60 and launch and any_confirmed and ret20 <= 0.24 and total_penalty <= 10:
+        return "A2"
+    if score >= 60 and trend_pullback and any_confirmed and total_penalty <= 10:
+        return "A3"
+    if score >= 55 and total_penalty <= 10:
+        return "B1"
+    if score >= 50:
+        return "B2"
+    if score >= 45:
+        return "C"
+    return "观察"
+
+
+def _tier_rank(tier: str) -> int:
+    return {
+        "A1": 1,
+        "A2": 2,
+        "A3": 3,
+        "B1": 4,
+        "B2": 5,
+        "C": 6,
+        "观察": 7,
+    }.get(tier, 9)
+
+
+def _safe_number(value: object, default: float = 0.0) -> float:
+    parsed = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.isna(parsed):
+        return default
+    return float(parsed)
+
+
 def _age_bucket(days: int, config: ResearchCandidateConfig) -> str:
     if days <= 0:
         return ""
@@ -379,13 +557,3 @@ def _date_text(value) -> str:
     if pd.isna(parsed):
         return ""
     return parsed.date().isoformat()
-
-
-def _tier(score: float) -> str:
-    if score >= 65:
-        return "A"
-    if score >= 55:
-        return "B"
-    if score >= 45:
-        return "C"
-    return "观察"

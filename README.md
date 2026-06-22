@@ -42,7 +42,7 @@ python -m quant_a_stock.cli sync-daily --symbols 510300 159915 510500 --since 20
 下载小股票池。Sina 个股接口支持 `qfq`，但不要无节制高频抓取：
 
 ```powershell
-python -m quant_a_stock.cli sync-daily --symbols 688146 600519 300750 --since 2020-01-01 --asset-type stock --stock-provider sina --adjust qfq
+python -m quant_a_stock.cli sync-daily --symbols 688146 600519 300750 --since 2020-01-01 --asset-type stock --stock-provider sina --adjust qfq --incremental --lookback-days 60
 ```
 
 如果上游股票列表接口可用，可以生成 A 股股票池：
@@ -51,16 +51,28 @@ python -m quant_a_stock.cli sync-daily --symbols 688146 600519 300750 --since 20
 python -m quant_a_stock.cli list-stock-universe --provider auto --markets sh sz --output data/universe/a_stock.csv
 ```
 
-批量下载股票池，支持断点续跑和限速：
+首次批量下载股票池，支持断点续跑、限速和并行下载：
 
 ```powershell
-python -m quant_a_stock.cli sync-stock-universe --universe-file data/universe/a_stock.csv --since 2020-01-01 --stock-provider sina --adjust qfq --sleep 1.5 --skip-existing
+python -m quant_a_stock.cli sync-stock-universe --universe-file data/universe/a_stock.csv --since 2020-01-01 --stock-provider sina --adjust qfq --workers 6 --sleep 0.05 --skip-existing
+```
+
+日常只补过期标的时使用增量模式，不要每天从 2020 年全量重拉：
+
+```powershell
+python -m quant_a_stock.cli sync-stock-universe --universe-file data/universe/stale.csv --since 2020-01-01 --stock-provider sina --adjust qfq --incremental --lookback-days 60 --workers 6 --sleep 0.05 --no-skip-existing
+```
+
+也可以用脚本自动检查过期标的并并行补数：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_data_sync.ps1
 ```
 
 小批量烟测：
 
 ```powershell
-python -m quant_a_stock.cli sync-stock-universe --symbols 688143 688146 600519 --since 2020-01-01 --stock-provider sina --adjust qfq --limit 3
+python -m quant_a_stock.cli sync-stock-universe --symbols 688143 688146 600519 --since 2020-01-01 --stock-provider sina --adjust qfq --incremental --lookback-days 60 --workers 3 --limit 3
 ```
 
 ## 数据运维
@@ -91,6 +103,7 @@ python -m quant_a_stock.cli backtest --from-cache --strategy sma_trend_filter --
 
 - `sma_trend_filter`：SMA 趋势过滤基线策略
 - `base_breakout_setup`：明显加速前的早期平台突破形态
+- `trend_pullback_setup`：强趋势里的回踩/再启动形态
 - `donchian_breakout`：前高突破并带长期趋势过滤
 - `rsi_reversion`：长期趋势内的 RSI 超跌反弹
 - `ema_pullback_trend`：EMA 多头趋势内的 RSI 回调
@@ -141,6 +154,14 @@ python -m quant_a_stock.cli scan-pattern --pattern accumulation_setup --top 120 
 
 `accumulation_setup` 会把月线位置、周线蓄势和日线触发合成多周期分，并输出 `setup_phase` 节奏标签。
 
+扫描全市场强趋势回踩/再启动候选：
+
+```powershell
+python -m quant_a_stock.cli scan-pattern --pattern trend_pullback_setup --top 120 --min-score 50 --stages trend_pullback trend_resume --min-amount-ma20 100000000 --min-ret-60 0.18 --filter-max-ret-20 0.18 --max-volume-ratio 3.20 --max-close-vs-trend 0.65 --max-drawdown-from-high 0.32
+```
+
+`trend_pullback_setup` 用来补充 A3 候选：它不强求低位平台，而是寻找 60 日趋势已经走强、近 20 日不过热、离前高有适度回撤并重新企稳的票。
+
 把早期形态当成策略回测：
 
 ```powershell
@@ -152,7 +173,7 @@ python -m quant_a_stock.cli backtest --from-cache --strategy base_breakout_setup
 对最新一份形态扫描报告里的候选股做情绪评分：
 
 ```powershell
-python -m quant_a_stock.cli sentiment-score --latest-scan --target-date 2026-06-12 --top 20 --display-top 20 --news-days 7
+python -m quant_a_stock.cli sentiment-score --latest-scan --target-date 2026-06-12 --top 90 --display-top 30 --news-days 7
 ```
 
 也可以直接传入自选股：

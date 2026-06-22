@@ -18,13 +18,19 @@ THEME_CLUSTERS: dict[str, list[str]] = {
         "芯片",
         "先进封装",
         "PCB",
+        "覆铜板",
+        "电子化学",
+        "电子材料",
+        "存储芯片",
+        "功率半导体",
         "中芯",
         "存储",
         "集成电路",
         "光刻",
         "MiniLED",
     ],
-    "AI硬件": ["液冷", "算力", "服务器", "CPO", "光模块", "人工智能", "数据中心"],
+    "AI硬件": ["液冷", "算力", "服务器", "CPO", "光模块", "人工智能", "数据中心", "高速连接"],
+    "消费电子": ["消费电子", "手机", "平板", "智能穿戴", "摄像头", "声学", "光学光电", "元件", "面板"],
     "电池链": ["电池", "锂电", "固态电池", "刀片电池", "储能", "新能源"],
     "化工材料": ["化工", "氟化工", "化学", "新材料", "工业气体", "制冷剂", "橡胶", "塑料"],
     "水利基建": ["地下管网", "水利", "海绵城市", "新型城镇化", "管业", "管网"],
@@ -35,9 +41,12 @@ THEME_CLUSTERS: dict[str, list[str]] = {
     "交通运输": ["铁路", "高速", "公路", "道路运输", "铁路运输", "铁路基建"],
     "通信设备": ["通信", "信创", "国产软件", "网络", "计算机", "电子设备制造"],
     "机器人设备": ["机器人", "通用设备", "自动化", "工业母机", "机床"],
+    "汽车链": ["汽车", "汽车零部件", "无人驾驶", "智能驾驶", "车联网", "新能源汽车"],
+    "低空经济": ["低空经济", "无人机", "eVTOL", "飞行汽车", "航空器"],
     "金融": ["银行", "证券", "券商", "互联金融", "保险", "金租", "货币金融", "金融服务", "融资租赁"],
-    "消费": ["啤酒", "食品", "饮料", "家电", "超级品牌", "体育产业"],
-    "医药": ["创新药", "医药", "医疗器械", "流感", "生物"],
+    "地产链": ["房地产", "装修", "装饰", "家居", "物业", "建筑装饰"],
+    "消费": ["啤酒", "食品", "饮料", "家电", "超级品牌", "体育产业", "旅游", "零售"],
+    "医药": ["创新药", "医药", "医疗器械", "流感", "生物", "中药", "化学制药", "CXO"],
     "电力能源": ["核电", "电力", "风能", "光伏", "中特估", "水电", "绿色电力", "能源"],
     "港口航运": ["港口", "航运", "物流", "水上运输", "港"],
 }
@@ -152,9 +161,11 @@ def build_daily_research_summary(
     lifecycle = build_candidate_lifecycle(candidates, target_date=target_date)
     if not lifecycle.empty:
         candidates = candidates.merge(lifecycle, on="symbol", how="left")
+    if "research_tier_rank" not in candidates.columns:
+        candidates["research_tier_rank"] = candidates["research_tier"].map(_tier_rank)
     candidates = candidates.sort_values(
-        ["research_score", "score", "sentiment_score"],
-        ascending=[False, False, False],
+        ["research_tier_rank", "research_score", "score", "sentiment_score"],
+        ascending=[True, False, False, False],
     ).reset_index(drop=True)
     market, components = build_market_temperature(target_date=target_date)
     return DailyResearchSummary(
@@ -249,7 +260,10 @@ def save_daily_research_summary_markdown(summary: DailyResearchSummary, *, top: 
         .agg(
             candidate_count=("symbol", "count"),
             avg_score=("research_score", "mean"),
-            a_b_count=("research_tier", lambda values: int(values.isin(["A", "B"]).sum())),
+            a_b_count=(
+                "research_tier",
+                lambda values: int(values.isin(["A1", "A2", "A3", "B1", "B2"]).sum()),
+            ),
         )
         .reset_index()
         .sort_values(["a_b_count", "avg_score"], ascending=[False, False])
@@ -257,7 +271,6 @@ def save_daily_research_summary_markdown(summary: DailyResearchSummary, *, top: 
     cluster["avg_score"] = cluster["avg_score"].round(2)
     lines.extend(["", "## 主题簇强度", "", _markdown_table(cluster), ""])
 
-    core = candidates[candidates["research_tier"].isin(["A", "B"])].head(top)
     display_cols = [
         "symbol",
         "name",
@@ -270,6 +283,8 @@ def save_daily_research_summary_markdown(summary: DailyResearchSummary, *, top: 
         "mtf_score",
         "monthly_position_pct",
         "weekly_trend_slope_pct",
+        "ret_60_pct",
+        "drawdown_from_high_pct",
         "sentiment_score",
         "core_news_count",
         "research_report_count",
@@ -277,17 +292,22 @@ def save_daily_research_summary_markdown(summary: DailyResearchSummary, *, top: 
         "days_seen",
         "score_delta",
     ]
-    lines.extend(["## A/B 级核心候选", "", _markdown_table(core[_existing(core, display_cols)]), ""])
+    core = candidates[candidates["research_tier"].isin(["A1", "A2", "A3", "B1"])].head(top)
+    lines.extend(["## A1/A2/A3/B1 核心候选", "", _markdown_table(core[_existing(core, display_cols)]), ""])
+
+    for title, note, frame in _candidate_bucket_sections(candidates, top=top):
+        lines.extend([f"## {title}", "", note, "", _markdown_table(frame[_existing(frame, display_cols)]), ""])
 
     lines.extend(["## 核心候选解读", ""])
     if core.empty:
-        lines.append("今天没有 A/B 级候选。")
+        lines.append("今天没有 A1/A2/A3/B1 级候选。")
     else:
         for _, row in core.iterrows():
             lines.extend(_candidate_reason_lines(row))
 
+    core_tiers = ["A1", "A2", "A3", "B1"]
     watch = candidates[
-        (~candidates["research_tier"].isin(["A", "B"]))
+        (~candidates["research_tier"].isin(core_tiers))
         | (candidates["total_penalty"].fillna(0) > 0)
         | (candidates["core_news_count"].fillna(0) == 0)
     ].head(12)
@@ -296,6 +316,29 @@ def save_daily_research_summary_markdown(summary: DailyResearchSummary, *, top: 
 
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
+
+
+def _candidate_bucket_sections(candidates: pd.DataFrame, *, top: int) -> list[tuple[str, str, pd.DataFrame]]:
+    early = candidates[candidates["research_tier"].isin(["A1", "A2"])].head(top)
+    trend = candidates[candidates["research_tier"].isin(["A3"])].head(top)
+    watch = candidates[candidates["research_tier"].isin(["B1", "B2"])].head(top)
+    return [
+        (
+            "A1/A2 低位潜伏与启动池",
+            "看 3-5 日是否转强，不用单日涨跌评价潜伏模型。",
+            early,
+        ),
+        (
+            "A3 主线趋势延续池",
+            "看 1-2 日趋势延续和回踩不破，避免高开过热追买。",
+            trend,
+        ),
+        (
+            "B1/B2 观察补票池",
+            "只做人工复盘和主线补票，不直接当作买点。",
+            watch,
+        ),
+    ]
 
 
 def _market_symbol_score(
@@ -362,8 +405,16 @@ def _candidate_reason_lines(row: pd.Series) -> list[str]:
         reasons.append(f"同主题/行业候选 {int(row.get('co_rise_count', 0))} 只")
     if row.get("total_penalty", 0) > 0:
         reasons.append(f"扣分 {row.get('total_penalty')}")
+    trend_line = ""
+    if str(row.get("stage", "")) in {"trend_pullback", "trend_resume"}:
+        trend_line = (
+            f"- 趋势回踩：60 日涨幅 {row.get('ret_60_pct', '')}，"
+            f"离 60 日高点 {row.get('drawdown_from_high_pct', '')}，"
+            f"趋势/回踩/再启动分 {row.get('trend_score', '')}/"
+            f"{row.get('pullback_score', '')}/{row.get('resume_score', '')}"
+        )
     reason_text = "；".join(reasons) if reasons else "形态和分层靠前，但缺少额外消息确认"
-    return [
+    lines = [
         f"### {row.get('symbol')} {row.get('name')}",
         "",
         f"- 分层：{row.get('research_tier')}，研究分 {row.get('research_score')}",
@@ -374,6 +425,21 @@ def _candidate_reason_lines(row: pd.Series) -> list[str]:
         f"- 最新研报：{latest_report or '无'}",
         "",
     ]
+    if trend_line:
+        lines.insert(5, trend_line)
+    return lines
+
+
+def _tier_rank(tier: str) -> int:
+    return {
+        "A1": 1,
+        "A2": 2,
+        "A3": 3,
+        "B1": 4,
+        "B2": 5,
+        "C": 6,
+        "观察": 7,
+    }.get(str(tier), 9)
 
 
 def _existing(frame: pd.DataFrame, columns: list[str]) -> list[str]:

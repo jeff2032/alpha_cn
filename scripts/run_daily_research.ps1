@@ -1,9 +1,17 @@
-param(
+﻿param(
     [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string]$UniverseFile = "data/universe/a_stock.csv",
     [string]$Since = "2020-01-01",
-    [double]$SleepSeconds = 1.0,
+    [string]$TargetDate = "",
+    [string]$PlanDate = "",
+    [string]$ReportCutoffTime = "15:30",
+    [double]$SleepSeconds = 0.2,
+    [int]$Workers = 6,
+    [int]$LookbackDays = 60,
     [string]$ProbeSymbol = "000001",
+    [string]$ObsidianVaultPath = "G:\Program Files (x86)\Obsidian_base",
+    [string]$ObsidianExportDir = "中国A股荐股",
+    [switch]$NoObsidianExport,
     [switch]$Force
 )
 
@@ -20,7 +28,7 @@ function Invoke-Quant {
     Write-Step ("python -m quant_a_stock.cli " + ($Arguments -join " "))
     & $script:PythonExe -m quant_a_stock.cli @Arguments
     if ($LASTEXITCODE -ne 0) {
-        throw "命令失败，退出码: $LASTEXITCODE"
+        throw "Command failed, exit code: $LASTEXITCODE"
     }
 }
 
@@ -78,6 +86,207 @@ function Get-CsvDataRowCount {
     return [Math]::Max(0, $lineCount - 1)
 }
 
+function Get-PreviousWeekday {
+    param([datetime]$Date)
+
+    $day = $Date.Date
+    while ($day.DayOfWeek -eq "Saturday" -or $day.DayOfWeek -eq "Sunday") {
+        $day = $day.AddDays(-1)
+    }
+    return $day
+}
+
+function Resolve-CachedTradingDate {
+    param([datetime]$Date)
+
+    $cacheDir = Join-Path $ProjectRoot "data/cache/akshare/daily"
+    if (-not (Test-Path $cacheDir)) {
+        return (Get-PreviousWeekday -Date $Date).ToString("yyyy-MM-dd")
+    }
+
+    $counts = @{}
+    Get-ChildItem -LiteralPath $cacheDir -Filter "*.csv" | ForEach-Object {
+        try {
+            $lastLine = Get-Content -LiteralPath $_.FullName -Tail 1
+            if ($lastLine) {
+                $dateText = ($lastLine -split ",")[0]
+                $date = ([datetime]$dateText).ToString("yyyy-MM-dd")
+                if (-not $counts.ContainsKey($date)) {
+                    $counts[$date] = 0
+                }
+                $counts[$date] += 1
+            }
+        } catch {
+        }
+    }
+
+    $target = $Date.Date
+    $latest = $null
+    foreach ($key in $counts.Keys) {
+        $candidate = [datetime]$key
+        if ($counts[$key] -ge 100 -and $candidate -le $target) {
+            if ($null -eq $latest -or $candidate -gt $latest) {
+                $latest = $candidate
+            }
+        }
+    }
+    if ($null -ne $latest) {
+        return $latest.ToString("yyyy-MM-dd")
+    }
+    return (Get-PreviousWeekday -Date $Date).ToString("yyyy-MM-dd")
+}
+
+function Get-DefaultTargetDate {
+    param([string]$CutoffTime)
+
+    $now = Get-Date
+    $day = $now.Date
+    $cutoff = [TimeSpan]::Parse($CutoffTime)
+    if ($now.TimeOfDay -lt $cutoff) {
+        $day = $day.AddDays(-1)
+    }
+    return (Get-PreviousWeekday -Date $day).ToString("yyyy-MM-dd")
+}
+
+function Resolve-DefaultDataDate {
+    param([string]$CutoffTime)
+
+    $candidate = Get-DefaultTargetDate -CutoffTime $CutoffTime
+    $resolved = Resolve-CachedTradingDate -Date ([datetime]$candidate)
+    if ($resolved -ne $candidate) {
+        Write-Step "Default target $candidate is not a cached trading date; use $resolved."
+    }
+    return $resolved
+}
+
+function Get-DefaultPlanDate {
+    param(
+        [string]$DataDate,
+        [string]$CutoffTime
+    )
+
+    $now = Get-Date
+    $cutoff = [TimeSpan]::Parse($CutoffTime)
+    if ($now.TimeOfDay -lt $cutoff) {
+        return (Get-PreviousWeekday -Date $now.Date).ToString("yyyy-MM-dd")
+    }
+    return $DataDate
+}
+
+function Normalize-DateString {
+    param([string]$Value)
+
+    try {
+        return ([datetime]$Value).ToString("yyyy-MM-dd")
+    } catch {
+        throw "Invalid date: $Value. Expected format like 2026-06-17."
+    }
+}
+
+function Resolve-TargetDateString {
+    param([string]$Value)
+
+    $normalized = Normalize-DateString -Value $Value
+    $resolved = Resolve-CachedTradingDate -Date ([datetime]$normalized)
+    if ($resolved -ne $normalized) {
+        Write-Step "Requested target $normalized is not a cached trading date; use $resolved."
+    }
+    return $resolved
+}
+
+function Copy-LatestMarkdownReport {
+    param(
+        [string]$Pattern,
+        [string]$DestinationName,
+        [string]$TargetDir
+    )
+
+    $reportsDir = Join-Path $ProjectRoot "reports"
+    $source = Get-ChildItem -LiteralPath $reportsDir -Filter $Pattern |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+    if ($null -eq $source) {
+        Write-Step "Obsidian export skipped, no report matched: $Pattern"
+        return
+    }
+
+    $destination = Join-Path $TargetDir $DestinationName
+    Copy-Item -LiteralPath $source.FullName -Destination $destination -Force
+    Write-Step "Obsidian export: $($source.Name) -> $destination"
+}
+
+function Export-DailyReportsToObsidian {
+    param(
+        [string]$ReportDate,
+        [string]$DataDate
+    )
+
+    if ($NoObsidianExport) {
+        Write-Step "Obsidian export skipped by -NoObsidianExport."
+        return
+    }
+    if (-not $ObsidianVaultPath) {
+        Write-Step "Obsidian export skipped, ObsidianVaultPath is empty."
+        return
+    }
+    if (-not (Test-Path -LiteralPath $ObsidianVaultPath)) {
+        Write-Step "Obsidian export skipped, vault not found: $ObsidianVaultPath"
+        return
+    }
+
+    $exportRoot = Join-Path $ObsidianVaultPath $ObsidianExportDir
+    $targetDir = Join-Path $exportRoot $ReportDate
+    New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+
+    $indexPath = Join-Path $exportRoot "README.md"
+    if (-not (Test-Path -LiteralPath $indexPath)) {
+        @"
+# 中国A股荐股
+
+这里由 alpha_cn 每日研究任务自动同步 Markdown 报告。
+
+每个计划日期一个目录，重点看：
+
+- 每日推荐复盘.md
+- 最终候选池.md
+- 市场主线.md
+- 情绪观察.md
+- 策略反思.md
+"@ | Set-Content -LiteralPath $indexPath -Encoding UTF8
+    }
+
+    Copy-LatestMarkdownReport -Pattern "daily_research_summary_*.md" -DestinationName "每日推荐复盘.md" -TargetDir $targetDir
+    Copy-LatestMarkdownReport -Pattern "research_candidates_*.md" -DestinationName "最终候选池.md" -TargetDir $targetDir
+    Copy-LatestMarkdownReport -Pattern "market_theme_*.md" -DestinationName "市场主线.md" -TargetDir $targetDir
+    Copy-LatestMarkdownReport -Pattern "sentiment_watchlist_*.md" -DestinationName "情绪观察.md" -TargetDir $targetDir
+    $reflectionPath = Join-Path $targetDir "策略反思.md"
+    if (-not (Test-Path -LiteralPath $reflectionPath)) {
+        @"
+# 策略反思
+
+计划日期：$ReportDate
+数据截至：$DataDate
+
+## 今日候选反馈
+
+- 
+
+## 命中与错过
+
+- 
+
+## 规则调整
+
+- 
+
+## 明日观察
+
+- 
+"@ | Set-Content -LiteralPath $reflectionPath -Encoding UTF8
+        Write-Step "Obsidian export: created reflection note -> $reflectionPath"
+    }
+}
+
 Set-Location $ProjectRoot
 
 $logDir = Join-Path $ProjectRoot "logs/daily_research"
@@ -86,11 +295,13 @@ $logPath = Join-Path $logDir ("daily_research_{0}.log" -f (Get-Date -Format "yyy
 Start-Transcript -Path $logPath -Append | Out-Null
 
 try {
-    Write-Step "每日研究任务开始，项目目录: $ProjectRoot"
+    Write-Step "Daily research task started. ProjectRoot: $ProjectRoot"
 
     $today = Get-Date
-    if (-not $Force -and ($today.DayOfWeek -eq "Saturday" -or $today.DayOfWeek -eq "Sunday")) {
-        Write-Step "今天是周末，跳过。"
+    $hasExplicitTargetDate = -not [string]::IsNullOrWhiteSpace($TargetDate)
+    $hasExplicitPlanDate = -not [string]::IsNullOrWhiteSpace($PlanDate)
+    if (-not $Force -and -not $hasExplicitTargetDate -and -not $hasExplicitPlanDate -and ($today.DayOfWeek -eq "Saturday" -or $today.DayOfWeek -eq "Sunday")) {
+        Write-Step "Weekend detected, skip."
         return
     }
 
@@ -104,26 +315,48 @@ try {
 
     $universePath = Join-Path $ProjectRoot $UniverseFile
     if (-not (Test-Path $universePath)) {
-        throw "股票池不存在: $universePath"
+        throw "Universe file not found: $universePath"
     }
 
-    $targetDate = $today.ToString("yyyy-MM-dd")
+    $targetDate = if ($hasExplicitTargetDate) {
+        Resolve-TargetDateString -Value $TargetDate
+    } else {
+        Resolve-DefaultDataDate -CutoffTime $ReportCutoffTime
+    }
+    $planDate = if ($hasExplicitPlanDate) {
+        Normalize-DateString -Value $PlanDate
+    } else {
+        Get-DefaultPlanDate -DataDate $targetDate -CutoffTime $ReportCutoffTime
+    }
+    Write-Step "Data target date: $targetDate"
+    Write-Step "Plan/output date: $planDate"
     $probeBefore = Get-CacheLastDate -Symbol $ProbeSymbol
-    Write-Step "探针标的 $ProbeSymbol 更新前最后日期: $probeBefore"
+    Write-Step "Probe $ProbeSymbol last date before sync: $probeBefore"
     Invoke-Quant @(
         "sync-daily",
         "--symbols", $ProbeSymbol,
         "--since", $Since,
         "--adjust", "qfq",
         "--asset-type", "stock",
-        "--stock-provider", "sina"
+        "--stock-provider", "sina",
+        "--incremental",
+        "--lookback-days", $LookbackDays.ToString([Globalization.CultureInfo]::InvariantCulture)
     )
     $probeAfter = Get-CacheLastDate -Symbol $ProbeSymbol
-    Write-Step "探针标的 $ProbeSymbol 更新后最后日期: $probeAfter"
+    Write-Step "Probe $ProbeSymbol last date after sync: $probeAfter"
 
-    if (-not $Force -and $probeAfter -lt $targetDate) {
-        Write-Step "数据源尚未更新到 $targetDate，跳过全市场同步和研究报告。"
-        return
+    if (-not $Force -and (-not $probeAfter -or ([datetime]$probeAfter) -lt ([datetime]$targetDate))) {
+        $latestCacheDate = Get-LatestCacheDate
+        if ($latestCacheDate -and ([datetime]$latestCacheDate) -lt ([datetime]$targetDate)) {
+            Write-Step "Data source is not updated to $targetDate. Fall back to latest cached trading date $latestCacheDate."
+            $targetDate = $latestCacheDate
+            if (-not $hasExplicitPlanDate) {
+                $planDate = Get-DefaultPlanDate -DataDate $targetDate -CutoffTime $ReportCutoffTime
+            }
+        } else {
+            Write-Step "Data source is not updated to $targetDate yet. Skip universe sync and research reports."
+            return
+        }
     }
 
     $stalePath = Join-Path $ProjectRoot "data/universe/stale.csv"
@@ -137,7 +370,7 @@ try {
     )
 
     $staleCount = Get-CsvDataRowCount -Path $stalePath
-    Write-Step "过期标的数量: $staleCount"
+    Write-Step "Stale symbols: $staleCount"
     if ($staleCount -gt 0) {
         Invoke-Quant @(
             "sync-stock-universe",
@@ -146,15 +379,22 @@ try {
             "--stock-provider", "sina",
             "--adjust", "qfq",
             "--sleep", $SleepSeconds.ToString([Globalization.CultureInfo]::InvariantCulture),
+            "--workers", $Workers.ToString([Globalization.CultureInfo]::InvariantCulture),
+            "--incremental",
+            "--lookback-days", $LookbackDays.ToString([Globalization.CultureInfo]::InvariantCulture),
             "--no-skip-existing"
         )
     }
 
     $latestCacheDate = Get-LatestCacheDate
     if (-not $latestCacheDate) {
-        throw "无法从缓存推断最新交易日。"
+        throw "Unable to infer latest trading date from cache."
     }
-    Write-Step "报告使用最新缓存交易日: $latestCacheDate"
+    if (-not $Force -and ([datetime]$latestCacheDate) -lt ([datetime]$targetDate)) {
+        Write-Step "Latest cache date $latestCacheDate is earlier than target date $targetDate. Skip research reports."
+        return
+    }
+    Write-Step "Latest cache date: $latestCacheDate"
 
     Invoke-Quant @(
         "scan-pattern",
@@ -186,37 +426,54 @@ try {
         "--max-price-position", "0.82"
     )
     Invoke-Quant @(
+        "scan-pattern",
+        "--pattern", "trend_pullback_setup",
+        "--top", "120",
+        "--min-score", "50",
+        "--stages", "trend_pullback", "trend_resume",
+        "--min-amount-ma20", "100000000",
+        "--min-ret-60", "0.18",
+        "--filter-max-ret-20", "0.18",
+        "--max-volume-ratio", "3.20",
+        "--max-close-vs-trend", "0.65",
+        "--max-drawdown-from-high", "0.32"
+    )
+    Invoke-Quant @(
         "sentiment-score",
         "--latest-scan",
-        "--target-date", $latestCacheDate,
-        "--top", "50",
+        "--target-date", $targetDate,
+        "--top", "90",
         "--display-top", "30",
         "--news-days", "7",
         "--research-days", "90"
     )
     Invoke-Quant @(
         "market-theme",
-        "--target-date", $latestCacheDate,
+        "--target-date", $targetDate,
         "--top", "20"
     )
     Invoke-Quant @(
         "research-candidates",
-        "--target-date", $latestCacheDate,
-        "--top", "30"
+        "--target-date", $targetDate,
+        "--top", "30",
+        "--no-fetch-profiles",
+        "--no-fetch-notices"
     )
     Invoke-Quant @(
         "snapshot-research",
-        "--target-date", $latestCacheDate
+        "--target-date", $targetDate
     )
     Invoke-Quant @(
         "daily-research-summary",
-        "--target-date", $latestCacheDate,
+        "--target-date", $targetDate,
         "--top", "30"
     )
 
-    Write-Step "每日研究任务完成。日志: $logPath"
+    Export-DailyReportsToObsidian -ReportDate $planDate -DataDate $targetDate
+
+    Write-Step "Daily research task completed. Log: $logPath"
 } catch {
-    Write-Step ("每日研究任务失败: " + $_.Exception.Message)
+    Write-Step ("Daily research task failed: " + $_.Exception.Message)
     throw
 } finally {
     Stop-Transcript | Out-Null

@@ -32,6 +32,9 @@ def test_classify_theme_cluster_names_common_low_level_sectors() -> None:
         ({"name": "江苏金租", "industry": "货币金融服务", "top_keywords": "机构重仓"}, "金融"),
         ({"name": "山西焦煤", "industry": "煤炭开采和洗选业"}, "煤炭资源"),
         ({"name": "广深铁路", "industry": "铁路运输业"}, "交通运输"),
+        ({"name": "长信科技", "industry": "计算机、通信和其他电子设备制造业", "top_keywords": "光学光电"}, "消费电子"),
+        ({"name": "香农芯创", "top_keywords": "存储芯片、电子化学品"}, "半导体链"),
+        ({"name": "永贵电器", "top_keywords": "汽车零部件、智能驾驶"}, "汽车链"),
         (
             {"name": "中国船舶", "industry": "铁路、船舶、航空航天和其他运输设备制造业"},
             "军工航天",

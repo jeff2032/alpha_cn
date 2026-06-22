@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from time import sleep
 
@@ -18,6 +19,7 @@ from quant_a_stock.cleaning.pipeline import clean_candles
 from quant_a_stock.config import DEFAULT_PATHS
 from quant_a_stock.data.akshare_client import fetch_daily
 from quant_a_stock.data.cache import daily_cache_path, load_daily_cache, save_daily_cache
+from quant_a_stock.data.calendar import resolve_cached_trading_date
 from quant_a_stock.data.universe import fetch_stock_universe
 from quant_a_stock.data.universe import filter_universe
 from quant_a_stock.data.universe import load_universe_file
@@ -29,13 +31,17 @@ from quant_a_stock.research.candidates import fetch_risk_notices
 from quant_a_stock.research.candidates import load_cache_listing_info
 from quant_a_stock.research.candidates import load_report
 from quant_a_stock.research.report import save_research_candidates_markdown
+from quant_a_stock.research.review import build_research_review
+from quant_a_stock.research.review import save_research_review_reports
 from quant_a_stock.research.snapshot import save_research_snapshot
 from quant_a_stock.research.summary import build_daily_research_summary
 from quant_a_stock.research.summary import save_daily_research_summary_markdown
 from quant_a_stock.screening.patterns import AccumulationSetupConfig
 from quant_a_stock.screening.patterns import BaseBreakoutSetupConfig
+from quant_a_stock.screening.patterns import TrendPullbackSetupConfig
 from quant_a_stock.screening.patterns import scan_accumulation_setups
 from quant_a_stock.screening.patterns import scan_base_breakout_setups
+from quant_a_stock.screening.patterns import scan_trend_pullback_setups
 from quant_a_stock.sentiment.report import save_market_theme_markdown
 from quant_a_stock.sentiment.report import save_sentiment_markdown
 from quant_a_stock.sentiment.score import SentimentConfig
@@ -46,6 +52,12 @@ from quant_a_stock.strategy.registry import available_strategy_names
 from quant_a_stock.strategy.registry import generate_strategy_signals
 from quant_a_stock.strategy.registry import get_strategy
 from quant_a_stock.strategy.sma_trend_filter import STRATEGY_NAME
+from quant_a_stock.warehouse import backfill_research_snapshots
+from quant_a_stock.warehouse import ingest_latest_reports
+from quant_a_stock.warehouse import sync_daily_candles_to_warehouse
+from quant_a_stock.warehouse import sync_stock_universe_to_warehouse
+from quant_a_stock.warehouse import warehouse_review as build_warehouse_review
+from quant_a_stock.warehouse import warehouse_status as build_warehouse_status
 
 
 def _parse_csv_ints(value: str) -> list[int]:
@@ -119,27 +131,115 @@ def _latest_scan_report() -> Path | None:
     if not reports_dir.exists():
         return None
     reports = []
-    for pattern in ("scan_accumulation_setup_*.csv", "scan_base_breakout_setup_*.csv"):
+    for pattern in (
+        "scan_accumulation_setup_*.csv",
+        "scan_base_breakout_setup_*.csv",
+        "scan_trend_pullback_setup_*.csv",
+    ):
         reports.extend(reports_dir.glob(pattern))
     reports = sorted(reports, key=lambda path: path.stat().st_mtime, reverse=True)
     return reports[0] if reports else None
 
 
-def _add_names_from_universe(frame: pd.DataFrame) -> pd.DataFrame:
-    if "name" in frame.columns and frame["name"].fillna("").astype(str).str.len().sum() > 0:
+def _latest_scan_reports() -> list[Path]:
+    reports_dir = DEFAULT_PATHS.reports
+    if not reports_dir.exists():
+        return []
+    paths = []
+    for pattern in (
+        "scan_base_breakout_setup_*.csv",
+        "scan_accumulation_setup_*.csv",
+        "scan_trend_pullback_setup_*.csv",
+    ):
+        matches = sorted(
+            reports_dir.glob(pattern),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        if matches:
+            paths.append(matches[0])
+    return paths
+
+
+def _load_latest_scan_reports() -> tuple[pd.DataFrame, list[Path]]:
+    paths = _latest_scan_reports()
+    frames = []
+    for path in paths:
+        frame = load_report(path)
+        frame["scan_source"] = path.stem
+        frames.append(frame)
+
+    if not frames:
+        return pd.DataFrame(), []
+
+    merged = pd.concat(frames, ignore_index=True, sort=False)
+    if "score" in merged.columns:
+        merged["score"] = pd.to_numeric(merged["score"], errors="coerce").fillna(0.0)
+        merged = merged.sort_values("score", ascending=False)
+    merged = merged.drop_duplicates(subset=["symbol"], keep="first").reset_index(drop=True)
+    return merged, paths
+
+
+def _balanced_scan_selection(frame: pd.DataFrame, top: int | None) -> pd.DataFrame:
+    if top is None or top <= 0 or len(frame) <= top or "scan_source" not in frame.columns:
         return frame
+
+    sources = [source for source in frame["scan_source"].dropna().astype(str).unique() if source]
+    if len(sources) <= 1:
+        return frame.head(top)
+
+    quota = max(1, top // len(sources))
+    selected = []
+    used_symbols: set[str] = set()
+    for source in sources:
+        subset = frame[frame["scan_source"] == source]
+        subset = subset[~subset["symbol"].isin(used_symbols)].head(quota)
+        if subset.empty:
+            continue
+        selected.append(subset)
+        used_symbols.update(subset["symbol"].astype(str).tolist())
+
+    selected_count = sum(len(part) for part in selected)
+    if selected_count < top:
+        remaining = frame[~frame["symbol"].isin(used_symbols)].head(top - selected_count)
+        if not remaining.empty:
+            selected.append(remaining)
+
+    if not selected:
+        return frame.head(top)
+    return pd.concat(selected, ignore_index=True, sort=False).head(top)
+
+
+def _add_names_from_universe(frame: pd.DataFrame) -> pd.DataFrame:
+    output = frame.copy()
+    if output.empty:
+        if "name" not in output.columns:
+            output["name"] = ""
+        return output
+    if "symbol" in output.columns:
+        output["symbol"] = output["symbol"].astype(str).str.zfill(6)
     universe_path = DEFAULT_PATHS.root / "data" / "universe" / "a_stock.csv"
     if not universe_path.exists():
-        if "name" not in frame.columns:
-            frame["name"] = ""
-        return frame
-    universe = load_universe_file(universe_path).loc[:, ["symbol", "name"]]
-    output = frame.drop(columns=["name"], errors="ignore").merge(
+        if "name" not in output.columns:
+            output["name"] = ""
+        return output
+    universe = load_universe_file(universe_path).loc[:, ["symbol", "name"]].copy()
+    universe["symbol"] = universe["symbol"].astype(str).str.zfill(6)
+    universe = universe.rename(columns={"name": "_universe_name"})
+    output = output.merge(
         universe,
         on="symbol",
         how="left",
     )
-    output["name"] = output["name"].fillna("")
+    if "name" not in output.columns:
+        output["name"] = output["_universe_name"].fillna("")
+    else:
+        current_name = output["name"].fillna("").astype(str)
+        output["name"] = current_name.mask(
+            current_name.str.strip().eq(""),
+            output["_universe_name"].fillna(""),
+        )
+    output = output.drop(columns=["_universe_name"], errors="ignore")
     return output
 
 
@@ -148,6 +248,74 @@ def _latest_weekday(value: str | None = None) -> pd.Timestamp:
     while day.weekday() >= 5:
         day -= pd.Timedelta(days=1)
     return day
+
+
+def _resolve_trading_date(value: str | None = None) -> pd.Timestamp:
+    return resolve_cached_trading_date(value, cache_dir=DEFAULT_PATHS.data_cache)
+
+
+def _announce_trading_date_resolution(requested: str | None, resolved: pd.Timestamp) -> None:
+    if not requested:
+        return
+    requested_date = pd.Timestamp(requested).normalize()
+    if requested_date != resolved:
+        print(
+            f"目标日期 {requested_date.date().isoformat()} 不是本地缓存中的交易日，"
+            f"已回退到 {resolved.date().isoformat()}。"
+        )
+
+
+def _cached_last_date(symbol: str) -> pd.Timestamp | None:
+    cache_path = daily_cache_path(symbol)
+    if not cache_path.exists():
+        return None
+    try:
+        timestamps = pd.read_csv(cache_path, usecols=["timestamp"])["timestamp"]
+    except Exception:
+        return None
+    dates = pd.to_datetime(timestamps, errors="coerce").dropna()
+    if dates.empty:
+        return None
+    return dates.iloc[-1].normalize()
+
+
+def _incremental_start_from_last(
+    last_date: pd.Timestamp,
+    *,
+    since: str | None,
+    lookback_days: int,
+) -> str:
+    start = last_date.normalize() - pd.Timedelta(days=max(0, lookback_days))
+    if since:
+        start = max(start, pd.Timestamp(since).normalize())
+    return start.date().isoformat()
+
+
+def _incremental_since(
+    symbol: str,
+    *,
+    since: str | None,
+    lookback_days: int,
+) -> str | None:
+    last_date = _cached_last_date(symbol)
+    if last_date is None:
+        return since
+
+    return _incremental_start_from_last(
+        last_date,
+        since=since,
+        lookback_days=lookback_days,
+    )
+
+
+def _merge_with_daily_cache(symbol: str, candles: pd.DataFrame) -> pd.DataFrame:
+    try:
+        cached = load_daily_cache(symbol)
+    except FileNotFoundError:
+        return candles
+
+    merged = pd.concat([cached, candles], ignore_index=True)
+    return clean_candles(merged, symbol=symbol)
 
 
 def _strategy_params(args: argparse.Namespace) -> dict[str, int | float]:
@@ -248,9 +416,18 @@ def sync_daily(args: argparse.Namespace) -> None:
     failures: list[str] = []
     for symbol in args.symbols:
         try:
+            since = (
+                _incremental_since(
+                    symbol,
+                    since=args.since,
+                    lookback_days=args.lookback_days,
+                )
+                if args.incremental
+                else args.since
+            )
             candles = fetch_daily(
                 symbol,
-                since=args.since,
+                since=since,
                 until=args.until,
                 adjust=args.adjust,
                 asset_type=args.asset_type,
@@ -259,8 +436,11 @@ def sync_daily(args: argparse.Namespace) -> None:
                 retries=args.retries,
                 retry_wait=args.retry_wait,
             )
+            if args.incremental:
+                candles = _merge_with_daily_cache(symbol, candles)
             path = save_daily_cache(candles, symbol)
-            print(f"{symbol}: 已保存 {len(candles)} 行 -> {path}")
+            prefix = "增量" if args.incremental else "全量"
+            print(f"{symbol}: {prefix}保存 {len(candles)} 行 -> {path}")
         except Exception as exc:
             failures.append(symbol)
             print(f"{symbol}: 下载失败: {exc}")
@@ -294,6 +474,71 @@ def _symbols_from_batch_args(args: argparse.Namespace) -> pd.DataFrame:
     return universe.frame
 
 
+def _sync_stock_universe_symbol(
+    idx: int,
+    total: int,
+    row: dict[str, object],
+    args: argparse.Namespace,
+) -> tuple[int, dict[str, object], str]:
+    symbol = str(row["symbol"])
+    name_value = row.get("name", "")
+    name = "" if pd.isna(name_value) else str(name_value)
+    prefix_text = f"[{idx + 1}/{total}] {symbol} {name}".rstrip()
+    cache_path = daily_cache_path(symbol)
+    if args.skip_existing and cache_path.exists() and not args.incremental:
+        return (
+            idx,
+            {"symbol": symbol, "name": name, "status": "已跳过", "rows": "", "error": ""},
+            f"{prefix_text}: 已存在，跳过",
+        )
+
+    try:
+        since = (
+            _incremental_since(
+                symbol,
+                since=args.since,
+                lookback_days=args.lookback_days,
+            )
+            if args.incremental
+            else args.since
+        )
+        candles = fetch_daily(
+            symbol,
+            since=since,
+            until=args.until,
+            adjust=args.adjust,
+            asset_type="stock",
+            stock_provider=args.stock_provider,
+            retries=args.retries,
+            retry_wait=args.retry_wait,
+        )
+        if args.incremental:
+            candles = _merge_with_daily_cache(symbol, candles)
+        path = save_daily_cache(candles, symbol)
+        status = "增量保存" if args.incremental else "已保存"
+        result = {
+            "symbol": symbol,
+            "name": name,
+            "status": status,
+            "rows": len(candles),
+            "error": "",
+        }
+        message = f"{prefix_text}: {status} {len(candles)} 行 -> {path}"
+    except Exception as exc:
+        result = {
+            "symbol": symbol,
+            "name": name,
+            "status": "失败",
+            "rows": 0,
+            "error": str(exc),
+        }
+        message = f"{prefix_text}: 下载失败: {exc}"
+
+    if args.sleep > 0:
+        sleep(args.sleep)
+    return idx, result, message
+
+
 def sync_stock_universe(args: argparse.Namespace) -> None:
     DEFAULT_PATHS.ensure()
     universe = _symbols_from_batch_args(args)
@@ -310,54 +555,33 @@ def sync_stock_universe(args: argparse.Namespace) -> None:
 
     rows = []
     total = len(universe)
-    for idx, row in universe.iterrows():
-        symbol = str(row["symbol"])
-        name = str(row.get("name", ""))
-        cache_path = daily_cache_path(symbol)
-        if args.skip_existing and cache_path.exists():
-            print(f"[{idx + 1}/{total}] {symbol} {name}: 已存在，跳过")
-            rows.append({"symbol": symbol, "name": name, "status": "已跳过", "error": ""})
-            continue
+    tasks = [(idx, total, row.to_dict()) for idx, row in universe.iterrows()]
+    workers = max(1, int(args.workers))
+    if workers > 1 and total:
+        print(f"并行下载: workers={workers}, sleep={args.sleep}, total={total}")
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [
+                executor.submit(_sync_stock_universe_symbol, idx, total, row, args)
+                for idx, total, row in tasks
+            ]
+            for completed, future in enumerate(as_completed(futures), start=1):
+                idx, result, message = future.result()
+                result["_order"] = idx
+                rows.append(result)
+                print(f"{message} (完成 {completed}/{total})")
+    else:
+        for idx, total, row in tasks:
+            idx, result, message = _sync_stock_universe_symbol(idx, total, row, args)
+            result["_order"] = idx
+            rows.append(result)
+            print(message)
 
-        try:
-            candles = fetch_daily(
-                symbol,
-                since=args.since,
-                until=args.until,
-                adjust=args.adjust,
-                asset_type="stock",
-                stock_provider=args.stock_provider,
-                retries=args.retries,
-                retry_wait=args.retry_wait,
-            )
-            path = save_daily_cache(candles, symbol)
-            print(f"[{idx + 1}/{total}] {symbol} {name}: 已保存 {len(candles)} 行 -> {path}")
-            rows.append(
-                {
-                    "symbol": symbol,
-                    "name": name,
-                    "status": "已保存",
-                    "rows": len(candles),
-                    "error": "",
-                }
-            )
-        except Exception as exc:
-            print(f"[{idx + 1}/{total}] {symbol} {name}: 下载失败: {exc}")
-            rows.append(
-                {
-                    "symbol": symbol,
-                    "name": name,
-                    "status": "失败",
-                    "rows": 0,
-                    "error": str(exc),
-                }
-            )
-
-        if args.sleep > 0 and idx < total - 1:
-            sleep(args.sleep)
-
-    report_path = save_report(rows, report_type="sync_stock_universe")
-    summary = pd.DataFrame(rows)["status"].value_counts().to_dict() if rows else {}
+    report_rows = [
+        {key: value for key, value in row.items() if key != "_order"}
+        for row in sorted(rows, key=lambda item: int(item["_order"]))
+    ]
+    report_path = save_report(report_rows, report_type="sync_stock_universe")
+    summary = pd.DataFrame(report_rows)["status"].value_counts().to_dict() if report_rows else {}
     print(f"汇总: {summary}")
     print(f"报告: {report_path}")
 
@@ -424,7 +648,11 @@ def cache_date_status(args: argparse.Namespace) -> None:
         markets=_parse_markets(args.markets),
         exclude_st=not args.include_st,
     )
-    target_date = _latest_weekday(args.target_date)
+    if args.exact_target_date and args.target_date:
+        target_date = pd.Timestamp(args.target_date).normalize()
+    else:
+        target_date = _resolve_trading_date(args.target_date)
+        _announce_trading_date_resolution(args.target_date, target_date)
 
     rows = []
     for _, row in universe.iterrows():
@@ -566,8 +794,10 @@ def compare(args: argparse.Namespace) -> None:
 
 
 def scan_pattern(args: argparse.Namespace) -> None:
-    if args.pattern not in {"base_breakout_setup", "accumulation_setup"}:
-        raise SystemExit("不支持的形态。目前可用: base_breakout_setup, accumulation_setup")
+    if args.pattern not in {"base_breakout_setup", "accumulation_setup", "trend_pullback_setup"}:
+        raise SystemExit(
+            "不支持的形态。目前可用: base_breakout_setup, accumulation_setup, trend_pullback_setup"
+        )
 
     symbols = args.symbols or _cached_symbols()
     if not symbols:
@@ -597,12 +827,18 @@ def scan_pattern(args: argparse.Namespace) -> None:
             require_positive_trend_slope=args.require_positive_trend_slope,
         )
         report_type = "scan_base_breakout_setup"
-    else:
+    elif args.pattern == "accumulation_setup":
         accumulation_min_volume_ratio = (
             args.min_volume_ratio if args.min_volume_ratio is not None else 1.05
         )
+        accumulation_max_volume_ratio = (
+            args.max_volume_ratio if args.max_volume_ratio is not None else 2.20
+        )
         accumulation_max_close_vs_trend = (
             args.max_close_vs_trend if args.max_close_vs_trend is not None else 0.12
+        )
+        accumulation_min_close_vs_trend = (
+            args.min_close_vs_trend if args.min_close_vs_trend is not None else -0.05
         )
         accumulation_max_ret_20 = args.filter_max_ret_20 if args.filter_max_ret_20 is not None else 0.15
         config = AccumulationSetupConfig(
@@ -614,11 +850,11 @@ def scan_pattern(args: argparse.Namespace) -> None:
             max_price_position=args.max_price_position,
             min_distance_to_high=args.min_distance_to_high,
             max_distance_to_high=args.max_distance_to_high,
-            min_close_vs_trend=args.min_close_vs_trend,
+            min_close_vs_trend=accumulation_min_close_vs_trend,
             max_close_vs_trend=accumulation_max_close_vs_trend,
             max_close_vs_cost=args.max_close_vs_cost,
             min_volume_ratio=accumulation_min_volume_ratio,
-            max_volume_ratio=args.max_volume_ratio,
+            max_volume_ratio=accumulation_max_volume_ratio,
             max_ret_20=accumulation_max_ret_20,
             max_ret_60=args.max_ret_60,
         )
@@ -629,7 +865,7 @@ def scan_pattern(args: argparse.Namespace) -> None:
             stages=set(args.stages) if args.stages else None,
             min_amount_ma20=args.min_amount_ma20,
             min_volume_ratio=args.min_volume_ratio,
-            max_volume_ratio=args.max_volume_ratio,
+            max_volume_ratio=accumulation_max_volume_ratio,
             max_close_vs_trend=args.max_close_vs_trend,
             max_close_vs_cost=args.max_close_vs_cost,
             max_ret_20=args.filter_max_ret_20,
@@ -638,6 +874,48 @@ def scan_pattern(args: argparse.Namespace) -> None:
             require_positive_trend_slope=args.require_positive_trend_slope,
         )
         report_type = "scan_accumulation_setup"
+    else:
+        trend_min_volume_ratio = args.min_volume_ratio if args.min_volume_ratio is not None else 0.65
+        trend_max_volume_ratio = args.max_volume_ratio if args.max_volume_ratio is not None else 3.20
+        trend_max_close_vs_trend = (
+            args.max_close_vs_trend if args.max_close_vs_trend is not None else 0.65
+        )
+        trend_min_close_vs_trend = (
+            args.min_close_vs_trend if args.min_close_vs_trend is not None else -0.08
+        )
+        trend_max_ret_20 = args.filter_max_ret_20 if args.filter_max_ret_20 is not None else 0.18
+        trend_min_amount_ma20 = (
+            args.min_amount_ma20 if args.min_amount_ma20 is not None else 100_000_000
+        )
+        config = TrendPullbackSetupConfig(
+            trend_window=args.trend_window,
+            fast_trend_window=args.fast_trend_window,
+            pullback_window=args.pullback_window,
+            volume_window=args.volume_window,
+            min_ret_60=args.min_ret_60,
+            max_ret_20=trend_max_ret_20,
+            max_drawdown_from_high=args.max_drawdown_from_high,
+            min_close_vs_trend=trend_min_close_vs_trend,
+            max_close_vs_trend=trend_max_close_vs_trend,
+            min_trend_slope_20=args.min_trend_slope_20,
+            min_volume_ratio=trend_min_volume_ratio,
+            max_volume_ratio=trend_max_volume_ratio,
+            min_amount_ma20=trend_min_amount_ma20,
+        )
+        result = scan_trend_pullback_setups(
+            candles_by_symbol,
+            config=config,
+            min_score=args.min_score,
+            stages=set(args.stages) if args.stages else None,
+            min_amount_ma20=trend_min_amount_ma20,
+            min_volume_ratio=args.min_volume_ratio,
+            min_ret_60=args.min_ret_60,
+            max_ret_20=trend_max_ret_20,
+            max_close_vs_trend=trend_max_close_vs_trend,
+            max_drawdown_from_high=args.max_drawdown_from_high,
+            max_volume_ratio=trend_max_volume_ratio,
+        )
+        report_type = "scan_trend_pullback_setup"
     report_path = save_report(result.to_dict("records"), report_type=report_type)
     if result.empty:
         print("没有找到符合条件的形态。")
@@ -652,10 +930,12 @@ def _sentiment_watchlist_from_args(args: argparse.Namespace) -> pd.DataFrame:
     else:
         watchlist_path = Path(args.watchlist) if args.watchlist else None
         if args.latest_scan:
-            watchlist_path = _latest_scan_report()
-            if watchlist_path is None:
+            frame, paths = _load_latest_scan_reports()
+            if frame.empty:
                 raise SystemExit("没有找到最新形态扫描报告，请先运行 scan-pattern。")
-            print(f"使用最新形态扫描报告: {watchlist_path}")
+            print("使用最新形态扫描报告: " + "；".join(str(path) for path in paths))
+            frame = _balanced_scan_selection(frame, args.top)
+            return _add_names_from_universe(frame)
         if watchlist_path is None:
             raise SystemExit("请传入 --symbols、--watchlist，或使用 --latest-scan。")
         frame = load_symbols_from_watchlist(watchlist_path)
@@ -667,13 +947,15 @@ def _sentiment_watchlist_from_args(args: argparse.Namespace) -> pd.DataFrame:
 
 def sentiment_score(args: argparse.Namespace) -> None:
     watchlist = _sentiment_watchlist_from_args(args)
+    target_date = _resolve_trading_date(args.target_date).date().isoformat()
+    _announce_trading_date_resolution(args.target_date, pd.Timestamp(target_date))
     scores, meta = build_sentiment_scores(
         watchlist,
         config=SentimentConfig(
             news_days=args.news_days,
             research_days=args.research_days,
             hot_rank_top=args.hot_rank_top,
-            target_date=args.target_date,
+            target_date=target_date,
         ),
     )
     csv_path = save_report(scores.to_dict("records"), report_type="sentiment_watchlist")
@@ -719,7 +1001,9 @@ def sentiment_score(args: argparse.Namespace) -> None:
 
 
 def market_theme(args: argparse.Namespace) -> None:
-    theme, meta = build_market_theme(args.target_date)
+    target_date = _resolve_trading_date(args.target_date).date().isoformat()
+    _announce_trading_date_resolution(args.target_date, pd.Timestamp(target_date))
+    theme, meta = build_market_theme(target_date)
     csv_path = save_report(theme.to_dict("records"), report_type="market_theme")
     md_path = save_market_theme_markdown(theme, meta)
 
@@ -742,10 +1026,18 @@ def market_theme(args: argparse.Namespace) -> None:
 
 
 def research_candidates(args: argparse.Namespace) -> None:
-    target_date = _latest_weekday(args.target_date).date().isoformat()
-    scan_path = Path(args.scan_report) if args.scan_report else _latest_scan_report()
-    if scan_path is None:
-        raise SystemExit("没有找到形态扫描报告，请先运行 scan-pattern。")
+    resolved_target = _resolve_trading_date(args.target_date)
+    _announce_trading_date_resolution(args.target_date, resolved_target)
+    target_date = resolved_target.date().isoformat()
+    scan_paths: list[Path] = []
+    if args.scan_report:
+        scan_path = Path(args.scan_report)
+        scan = load_report(scan_path)
+        scan_paths = [scan_path]
+    else:
+        scan, scan_paths = _load_latest_scan_reports()
+        if scan.empty:
+            raise SystemExit("没有找到形态扫描报告，请先运行 scan-pattern。")
     sentiment_path = _report_path_arg(
         args.sentiment_report,
         latest_pattern="sentiment_watchlist_*.csv",
@@ -762,7 +1054,6 @@ def research_candidates(args: argparse.Namespace) -> None:
         if theme_path is not None:
             theme = pd.read_csv(theme_path)
 
-    scan = load_report(scan_path)
     sentiment = load_report(sentiment_path)
     symbols = scan["symbol"].tolist()
 
@@ -794,12 +1085,13 @@ def research_candidates(args: argparse.Namespace) -> None:
         target_date=target_date,
         config=ResearchCandidateConfig(),
     )
+    candidates = _add_names_from_universe(candidates)
     csv_path = save_report(candidates.to_dict("records"), report_type="research_candidates")
     md_path = save_research_candidates_markdown(
         candidates,
         meta={
             "target_date": target_date,
-            "scan_report": str(scan_path),
+            "scan_report": "；".join(str(path) for path in scan_paths),
             "sentiment_report": str(sentiment_path),
             "theme_report": str(theme_path or ""),
             "errors": errors,
@@ -947,12 +1239,15 @@ def research_optimize(args: argparse.Namespace) -> None:
 
 
 def snapshot_research(args: argparse.Namespace) -> None:
-    target_date = _latest_weekday(args.target_date).date().isoformat()
+    resolved_target = _resolve_trading_date(args.target_date)
+    _announce_trading_date_resolution(args.target_date, resolved_target)
+    target_date = resolved_target.date().isoformat()
     reports = {
         "scan_base_breakout_setup": Path(args.scan_report)
         if args.scan_report
         else _latest_report("scan_base_breakout_setup_*.csv"),
         "scan_accumulation_setup": _latest_report("scan_accumulation_setup_*.csv"),
+        "scan_trend_pullback_setup": _latest_report("scan_trend_pullback_setup_*.csv"),
         "sentiment_watchlist": Path(args.sentiment_report)
         if args.sentiment_report
         else _latest_report("sentiment_watchlist_*.csv"),
@@ -970,7 +1265,9 @@ def snapshot_research(args: argparse.Namespace) -> None:
 
 
 def daily_research_summary(args: argparse.Namespace) -> None:
-    target_date = _latest_weekday(args.target_date).date().isoformat()
+    resolved_target = _resolve_trading_date(args.target_date)
+    _announce_trading_date_resolution(args.target_date, resolved_target)
+    target_date = resolved_target.date().isoformat()
     snapshot_dir = Path(args.snapshot_dir) if args.snapshot_dir else None
     summary = build_daily_research_summary(
         target_date=target_date,
@@ -989,19 +1286,223 @@ def daily_research_summary(args: argparse.Namespace) -> None:
             "symbol": "代码",
             "name": "名称",
             "research_tier": "分层",
-                "research_score": "研究分",
-                "theme_cluster": "主题簇",
-                "stage": "阶段",
-                "setup_phase": "节奏",
-                "core_news_count": "核心新闻",
-                "research_report_count": "研报数",
-                "total_penalty": "扣分",
-            }
-        )
+            "research_score": "研究分",
+            "theme_cluster": "主题簇",
+            "stage": "阶段",
+            "setup_phase": "节奏",
+            "core_news_count": "核心新闻",
+            "research_report_count": "研报数",
+            "total_penalty": "扣分",
+        }
+    )
     columns = ["代码", "名称", "分层", "研究分", "主题簇", "阶段", "节奏", "核心新闻", "研报数", "扣分"]
     print(display[[column for column in columns if column in display.columns]].to_string(index=False))
     print(f"候选 CSV: {csv_path}")
     print(f"中文复盘报告: {md_path}")
+
+
+def research_review(args: argparse.Namespace) -> None:
+    review = build_research_review(
+        since=args.since,
+        until=args.until,
+        top_movers=args.top_movers,
+        universe_file=Path(args.universe_file) if args.universe_file else None,
+    )
+    md_path, details_path, summary_path = save_research_review_reports(review)
+
+    print(f"可用快照: {', '.join(review.snapshot_dates) or '无'}")
+    print(f"已闭环信号日: {', '.join(review.closed_signal_dates) or '无'}")
+    if review.by_tier.empty:
+        print("没有可展示的复盘结果。")
+    else:
+        display = review.by_tier.rename(
+            columns={
+                "tier": "分层",
+                "count": "样本",
+                "avg_ret": "均值",
+                "median_ret": "中位数",
+                "win_rate": "胜率",
+                "gt5_rate": "涨超5%",
+                "lt_minus5_rate": "跌超5%",
+            }
+        )
+        print(display[["分层", "样本", "均值", "中位数", "胜率", "涨超5%", "跌超5%"]].to_string(index=False))
+    if not review.by_tier_horizon.empty:
+        horizon_display = review.by_tier_horizon[
+            review.by_tier_horizon["tier"].isin(["A1", "A2", "A3", "B1", "B2"])
+        ].rename(
+            columns={
+                "tier": "分层",
+                "horizon": "周期",
+                "count": "样本",
+                "avg_ret": "均值",
+                "median_ret": "中位数",
+                "win_rate": "胜率",
+                "gt5_rate": "涨超5%",
+                "lt_minus5_rate": "跌超5%",
+            }
+        )
+        print("分层多周期表现:")
+        print(
+            horizon_display[["分层", "周期", "样本", "均值", "中位数", "胜率", "涨超5%", "跌超5%"]].to_string(
+                index=False
+            )
+        )
+    print(f"复盘报告: {md_path}")
+    print(f"明细 CSV: {details_path}")
+    print(f"汇总 CSV: {summary_path}")
+
+
+def warehouse_ingest(args: argparse.Namespace) -> None:
+    resolved_target_date = _resolve_trading_date(args.target_date)
+    _announce_trading_date_resolution(args.target_date, resolved_target_date)
+    target_date = resolved_target_date.date().isoformat()
+    result = ingest_latest_reports(
+        target_date=target_date,
+        reports_dir=Path(args.reports_dir) if args.reports_dir else None,
+        warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
+        run_id=args.run_id,
+    )
+    print(f"研究仓库运行 ID: {result.run_id}")
+    print(f"目标交易日: {result.target_date}")
+    print(f"DuckDB: {result.db_path}")
+    print(f"Parquet: {result.parquet_root}")
+    if result.ingested.empty:
+        print("没有入库记录。")
+    else:
+        display = result.ingested.rename(
+            columns={
+                "report_type": "报告类型",
+                "status": "状态",
+                "row_count": "行数",
+                "source_path": "来源",
+            }
+        )
+        print(display[["报告类型", "状态", "行数", "来源"]].to_string(index=False))
+    if not result.status.empty:
+        print("仓库状态:")
+        print(result.status.to_string(index=False))
+
+
+def warehouse_status(args: argparse.Namespace) -> None:
+    status = build_warehouse_status(
+        warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
+    )
+    if status.empty:
+        print("研究仓库还没有初始化。")
+        return
+    print(status.to_string(index=False))
+
+
+def warehouse_backfill_snapshots(args: argparse.Namespace) -> None:
+    result = backfill_research_snapshots(
+        snapshot_root=Path(args.snapshot_root) if args.snapshot_root else None,
+        warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
+        since=args.since,
+        until=args.until,
+        run_id=args.run_id,
+    )
+    print(f"快照回填运行 ID: {result.run_id}")
+    print(f"日期范围: {result.target_date}")
+    print(f"DuckDB: {result.db_path}")
+    print(f"Parquet: {result.parquet_root}")
+    if result.ingested.empty:
+        print("没有找到可回填的研究快照。")
+    else:
+        display = result.ingested.rename(
+            columns={
+                "warehouse_target_date": "日期",
+                "report_type": "表",
+                "status": "状态",
+                "row_count": "行数",
+                "source_path": "来源",
+            }
+        )
+        print(display[["日期", "表", "状态", "行数", "来源"]].head(args.display_top).to_string(index=False))
+    if not result.status.empty:
+        print("仓库状态:")
+        print(result.status.to_string(index=False))
+
+
+def warehouse_sync_universe(args: argparse.Namespace) -> None:
+    resolved_target_date = _resolve_trading_date(args.target_date)
+    _announce_trading_date_resolution(args.target_date, resolved_target_date)
+    target_date = resolved_target_date.date().isoformat()
+    result = sync_stock_universe_to_warehouse(
+        universe_file=Path(args.universe_file),
+        target_date=target_date,
+        warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
+        run_id=args.run_id,
+    )
+    print(f"股票池入库运行 ID: {result.run_id}")
+    print(f"目标交易日: {result.target_date}")
+    print(result.ingested.to_string(index=False))
+    if not result.status.empty:
+        print("仓库状态:")
+        print(result.status.to_string(index=False))
+
+
+def warehouse_sync_candles(args: argparse.Namespace) -> None:
+    resolved_target_date = _resolve_trading_date(args.target_date)
+    _announce_trading_date_resolution(args.target_date, resolved_target_date)
+    target_date = resolved_target_date.date().isoformat()
+    result = sync_daily_candles_to_warehouse(
+        symbols=args.symbols,
+        universe_file=Path(args.universe_file) if args.universe_file else None,
+        cache_dir=Path(args.cache_dir) if args.cache_dir else None,
+        source=args.source,
+        since=args.since,
+        until=args.until,
+        target_date=target_date,
+        warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
+        run_id=args.run_id,
+        limit=args.limit,
+        force=args.force,
+    )
+    print(f"行情入库运行 ID: {result.run_id}")
+    print(f"目标交易日: {result.target_date}")
+    if result.ingested.empty:
+        print("没有找到可同步的行情缓存。")
+    else:
+        summary = result.ingested.groupby("status").size().reset_index(name="count")
+        print("同步结果:")
+        print(summary.to_string(index=False))
+        display = result.ingested.rename(
+            columns={
+                "symbol": "代码",
+                "status": "状态",
+                "row_count": "行数",
+                "first_timestamp": "开始",
+                "last_timestamp": "结束",
+            }
+        )
+        print(display[["代码", "状态", "行数", "开始", "结束"]].head(args.display_top).to_string(index=False))
+    if not result.status.empty:
+        print("仓库状态:")
+        print(result.status.to_string(index=False))
+
+
+def warehouse_review(args: argparse.Namespace) -> None:
+    review = build_warehouse_review(
+        since=args.since,
+        until=args.until,
+        warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
+    )
+    tier = review["tier"]
+    miss_risk = review["miss_risk"]
+    reports = review["reports"]
+    if tier.empty and miss_risk.empty and reports.empty:
+        print("研究仓库还没有可复盘的数据。")
+        return
+    if not tier.empty:
+        print("分层表现:")
+        print(tier.to_string(index=False))
+    if not miss_risk.empty:
+        print("错过样本风险归因:")
+        print(miss_risk.to_string(index=False))
+    if not reports.empty:
+        print("报告索引:")
+        print(reports.head(30).to_string(index=False))
 
 
 def _add_strategy_arguments(parser: argparse.ArgumentParser) -> None:
@@ -1036,6 +1537,8 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--asset-type", choices=["auto", "etf", "stock"], default="auto")
     sync.add_argument("--etf-provider", choices=["eastmoney", "sina"], default="eastmoney")
     sync.add_argument("--stock-provider", choices=["eastmoney", "sina"], default="eastmoney")
+    sync.add_argument("--incremental", action="store_true", help="基于本地缓存增量补数")
+    sync.add_argument("--lookback-days", type=int, default=60, help="增量补数时向前回看的自然日")
     sync.add_argument("--retries", type=int, default=3)
     sync.add_argument("--retry-wait", type=float, default=1.0)
     sync.set_defaults(func=sync_daily)
@@ -1064,6 +1567,9 @@ def build_parser() -> argparse.ArgumentParser:
     sync_universe.add_argument("--limit", type=int, default=None)
     sync_universe.add_argument("--offset", type=int, default=0)
     sync_universe.add_argument("--sleep", type=float, default=1.0)
+    sync_universe.add_argument("--workers", type=int, default=1, help="并行下载线程数，默认 1 表示顺序下载")
+    sync_universe.add_argument("--incremental", action="store_true", help="基于本地缓存增量补数")
+    sync_universe.add_argument("--lookback-days", type=int, default=60, help="增量补数时向前回看的自然日")
     sync_universe.add_argument(
         "--skip-existing",
         action=argparse.BooleanOptionalAction,
@@ -1095,6 +1601,11 @@ def build_parser() -> argparse.ArgumentParser:
     date_status.add_argument("--show-stale", action="store_true")
     date_status.add_argument("--top", type=int, default=20)
     date_status.add_argument("--output-stale", default=None)
+    date_status.add_argument(
+        "--exact-target-date",
+        action="store_true",
+        help="按传入目标日精确检查，不回退到本地最近缓存交易日；数据同步流程使用",
+    )
     date_status.set_defaults(func=cache_date_status)
 
     bt = subparsers.add_parser("backtest", help="使用缓存数据运行回测")
@@ -1143,21 +1654,28 @@ def build_parser() -> argparse.ArgumentParser:
             "accumulation",
             "pre_breakout",
             "overheated",
+            "trend_pullback",
+            "trend_resume",
         ],
         default=None,
     )
     scan.add_argument("--min-amount-ma20", type=float, default=None)
     scan.add_argument("--min-volume-ratio", type=float, default=None)
-    scan.add_argument("--max-volume-ratio", type=float, default=2.2)
+    scan.add_argument("--max-volume-ratio", type=float, default=None)
     scan.add_argument("--max-close-vs-trend", type=float, default=None)
-    scan.add_argument("--min-close-vs-trend", type=float, default=-0.05)
+    scan.add_argument("--min-close-vs-trend", type=float, default=None)
     scan.add_argument("--max-close-vs-cost", type=float, default=0.18)
     scan.add_argument("--min-price-position", type=float, default=0.30)
     scan.add_argument("--max-price-position", type=float, default=0.82)
     scan.add_argument("--min-distance-to-high", type=float, default=-0.35)
     scan.add_argument("--max-distance-to-high", type=float, default=-0.04)
     scan.add_argument("--filter-max-ret-20", type=float, default=None)
+    scan.add_argument("--min-ret-60", type=float, default=0.18)
     scan.add_argument("--max-ret-60", type=float, default=0.30)
+    scan.add_argument("--fast-trend-window", type=int, default=60)
+    scan.add_argument("--pullback-window", type=int, default=20)
+    scan.add_argument("--max-drawdown-from-high", type=float, default=0.32)
+    scan.add_argument("--min-trend-slope-20", type=float, default=0.03)
     scan.add_argument("--require-positive-trend-slope", action="store_true")
     _add_strategy_arguments(scan)
     scan.set_defaults(func=scan_pattern)
@@ -1252,6 +1770,61 @@ def build_parser() -> argparse.ArgumentParser:
     daily_summary.add_argument("--snapshot-dir", default=None)
     daily_summary.add_argument("--top", type=int, default=30)
     daily_summary.set_defaults(func=daily_research_summary)
+
+    review = subparsers.add_parser("research-review", help="复盘研究候选池的次日表现和错过样本")
+    review.add_argument("--since", default=None)
+    review.add_argument("--until", default=None)
+    review.add_argument("--top-movers", type=int, default=20)
+    review.add_argument("--universe-file", default=None)
+    review.set_defaults(func=research_review)
+
+    warehouse_ingest_parser = subparsers.add_parser("warehouse-ingest", help="把最新研究报告写入 DuckDB + Parquet 仓库")
+    warehouse_ingest_parser.add_argument("--target-date", default=None)
+    warehouse_ingest_parser.add_argument("--reports-dir", default=None)
+    warehouse_ingest_parser.add_argument("--warehouse-dir", default=None)
+    warehouse_ingest_parser.add_argument("--run-id", default=None)
+    warehouse_ingest_parser.set_defaults(func=warehouse_ingest)
+
+    warehouse_status_parser = subparsers.add_parser("warehouse-status", help="查看研究仓库表和日期覆盖情况")
+    warehouse_status_parser.add_argument("--warehouse-dir", default=None)
+    warehouse_status_parser.set_defaults(func=warehouse_status)
+
+    warehouse_backfill_parser = subparsers.add_parser("warehouse-backfill-snapshots", help="把历史研究快照回填到仓库")
+    warehouse_backfill_parser.add_argument("--since", default=None)
+    warehouse_backfill_parser.add_argument("--until", default=None)
+    warehouse_backfill_parser.add_argument("--snapshot-root", default=None)
+    warehouse_backfill_parser.add_argument("--warehouse-dir", default=None)
+    warehouse_backfill_parser.add_argument("--run-id", default=None)
+    warehouse_backfill_parser.add_argument("--display-top", type=int, default=30)
+    warehouse_backfill_parser.set_defaults(func=warehouse_backfill_snapshots)
+
+    warehouse_universe_parser = subparsers.add_parser("warehouse-sync-universe", help="把股票池文件写入仓库维表")
+    warehouse_universe_parser.add_argument("--universe-file", default="data/universe/a_stock.csv")
+    warehouse_universe_parser.add_argument("--target-date", default=None)
+    warehouse_universe_parser.add_argument("--warehouse-dir", default=None)
+    warehouse_universe_parser.add_argument("--run-id", default=None)
+    warehouse_universe_parser.set_defaults(func=warehouse_sync_universe)
+
+    warehouse_candles_parser = subparsers.add_parser("warehouse-sync-candles", help="把本地日线 CSV 缓存同步成 Parquet")
+    warehouse_candles_parser.add_argument("--symbols", nargs="+", default=None)
+    warehouse_candles_parser.add_argument("--universe-file", default=None)
+    warehouse_candles_parser.add_argument("--cache-dir", default=None)
+    warehouse_candles_parser.add_argument("--source", default="akshare")
+    warehouse_candles_parser.add_argument("--since", default=None)
+    warehouse_candles_parser.add_argument("--until", default=None)
+    warehouse_candles_parser.add_argument("--target-date", default=None)
+    warehouse_candles_parser.add_argument("--warehouse-dir", default=None)
+    warehouse_candles_parser.add_argument("--run-id", default=None)
+    warehouse_candles_parser.add_argument("--limit", type=int, default=None)
+    warehouse_candles_parser.add_argument("--force", action="store_true")
+    warehouse_candles_parser.add_argument("--display-top", type=int, default=30)
+    warehouse_candles_parser.set_defaults(func=warehouse_sync_candles)
+
+    warehouse_review_parser = subparsers.add_parser("warehouse-review", help="从研究仓库汇总候选池复盘和错过样本")
+    warehouse_review_parser.add_argument("--since", default=None)
+    warehouse_review_parser.add_argument("--until", default=None)
+    warehouse_review_parser.add_argument("--warehouse-dir", default=None)
+    warehouse_review_parser.set_defaults(func=warehouse_review)
 
     return parser
 

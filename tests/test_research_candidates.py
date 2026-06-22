@@ -88,3 +88,51 @@ def test_build_research_candidates_adds_theme_and_penalties() -> None:
     assert laggard["ret20_overheat_penalty"] == 10.0
     assert laggard["risk_notice_penalty"] == 10.0
     assert laggard["new_stock_penalty"] == 5.0
+
+
+def test_build_research_candidates_classifies_trend_pullback_as_a3() -> None:
+    scan = pd.DataFrame(
+        [
+            {
+                "symbol": "300548",
+                "timestamp": "2026-06-12",
+                "stage": "trend_resume",
+                "setup_phase": "强趋势再启动",
+                "score": 72.0,
+                "volume_ratio": 1.4,
+                "ret_20_pct": 0.08,
+                "ret_60_pct": 0.42,
+                "drawdown_from_high_pct": -0.12,
+                "close_vs_trend_pct": 0.22,
+                "amount_ma20": 1_000_000_000,
+            }
+        ]
+    )
+    sentiment = pd.DataFrame(
+        [
+            {
+                "symbol": "300548",
+                "name": "长芯博创",
+                "sentiment_score": 70.0,
+                "core_news_count": 1,
+                "top_keywords": "光通信、半导体",
+            }
+        ]
+    )
+    theme = pd.DataFrame([{"theme": "半导体", "theme_score": 60.0}])
+    profiles = pd.DataFrame(
+        [{"symbol": "300548", "industry": "计算机、通信和其他电子设备制造业", "listing_date": "2016-08-12"}]
+    )
+
+    result = build_research_candidates(
+        scan,
+        sentiment,
+        theme=theme,
+        profiles=profiles,
+        target_date="2026-06-12",
+    )
+
+    leader = result.iloc[0]
+    assert leader["research_tier"] == "A3"
+    assert leader["setup_phase"] == "强趋势再启动"
+    assert leader["stage_bonus"] > 0

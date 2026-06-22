@@ -10,6 +10,8 @@ A 股日线数据只能更新到最近一个交易日。
 
 例如，2026-06-14 是周日，A 股没有交易，所以最近一个正常交易日是 2026-06-12。命令不能生成 2026-06-14 的日线 K 线，因为市场没有开盘。
 
+注意：不要只按周一到周五判断。端午、春节、国庆等交易所休市日也要避开。项目会优先根据本地全市场缓存推断真实交易日；如果传入的是节假日或非交易日，会自动回退到最近一个已缓存交易日。
+
 ## 检查是否全部下载
 
 检查股票池里的每个标的是否都有本地 CSV 缓存：
@@ -27,12 +29,12 @@ python -m quant_a_stock.cli cache-status --universe-file data/universe/a_stock.c
 如果 `missing > 0`，继续补下载：
 
 ```powershell
-python -m quant_a_stock.cli sync-stock-universe --universe-file data/universe/a_stock.csv --since 2020-01-01 --stock-provider sina --adjust qfq --sleep 1.5 --skip-existing
+python -m quant_a_stock.cli sync-stock-universe --universe-file data/universe/a_stock.csv --since 2020-01-01 --stock-provider sina --adjust qfq --workers 2 --sleep 0.05 --skip-existing
 ```
 
 ## 检查数据日期覆盖
 
-检查哪些标的没有更新到最近工作日：
+检查哪些标的没有更新到最近交易日：
 
 ```powershell
 python -m quant_a_stock.cli cache-date-status --universe-file data/universe/a_stock.csv --show-stale --top 30 --output-stale data/universe/stale.csv
@@ -42,6 +44,14 @@ python -m quant_a_stock.cli cache-date-status --universe-file data/universe/a_st
 
 ```powershell
 python -m quant_a_stock.cli cache-date-status --universe-file data/universe/a_stock.csv --target-date 2026-06-12 --show-stale --top 30 --output-stale data/universe/stale.csv
+```
+
+如果指定日期不是本地缓存中的交易日，命令会提示并回退。例如节假日传入 `2026-06-19` 时，会使用最近一个已缓存交易日，而不是误判所有股票都缺数据。
+
+如果是在收盘后准备补当天数据，且当天还没有任何标的落到缓存里，用精确目标日检查：
+
+```powershell
+python -m quant_a_stock.cli cache-date-status --universe-file data/universe/a_stock.csv --target-date 2026-06-22 --exact-target-date --show-stale --top 30 --output-stale data/universe/stale.csv
 ```
 
 关键字段：
@@ -56,37 +66,68 @@ python -m quant_a_stock.cli cache-date-status --universe-file data/universe/a_st
 `cache-date-status` 会把过期标的写入 `data/universe/stale.csv`。然后只补这些标的：
 
 ```powershell
-python -m quant_a_stock.cli sync-stock-universe --universe-file data/universe/stale.csv --since 2020-01-01 --stock-provider sina --adjust qfq --sleep 1.5 --no-skip-existing
+python -m quant_a_stock.cli sync-stock-universe --universe-file data/universe/stale.csv --since 2020-01-01 --stock-provider sina --adjust qfq --incremental --lookback-days 60 --workers 2 --sleep 0.05 --no-skip-existing
 ```
 
-这里使用 `--no-skip-existing`，因为这些标的已经有 CSV 文件，只是日期没更新到目标日期，需要覆盖刷新。
+这里使用 `--incremental`，因为这些标的已经有 CSV 文件，只是日期没更新到目标日期。程序会从本地最后日期往前回看 `--lookback-days` 个自然日，只刷新最近一段数据，再和旧缓存合并去重。
+
+日常推荐 `--lookback-days 60`：速度更快，适合每天收盘后补数据、出候选池。周末或月末想更稳地刷新 250 日平台指标和最近复权，可以临时改成 `--lookback-days 450`。需要更严格重算月线三年结构时，可以临时改成 `--lookback-days 1200`。
+
+`--workers` 控制并行下载线程数。日常默认用 `sina + --workers 2`。`sina` 在高并发时可能触发 AKShare 依赖里的 `py_mini_racer` 崩溃；脚本里会自动把 Sina 的高并发保护到 2。`eastmoney` 可作为备用源，但当天全市场补数在本机上有过卡住的情况。
+
+也可以直接用数据补数脚本，它会自动生成过期清单、并行补数、最后再检查一次覆盖率：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_data_sync.ps1
+```
+
+后台运行时使用：
+
+```powershell
+Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PWD\scripts\run_data_sync.ps1`"" -WindowStyle Hidden
+```
+
+日志在 `logs/data_sync/`。
 
 ## 全量刷新
 
 只有在明确想重拉整个股票池时才使用：
 
 ```powershell
-python -m quant_a_stock.cli sync-stock-universe --universe-file data/universe/a_stock.csv --since 2020-01-01 --stock-provider sina --adjust qfq --sleep 1.5 --no-skip-existing
+python -m quant_a_stock.cli sync-stock-universe --universe-file data/universe/a_stock.csv --since 2020-01-01 --stock-provider sina --adjust qfq --workers 2 --sleep 0.1 --no-skip-existing
 ```
 
-全量刷新耗时较长，也更容易给数据源造成压力。优先使用“只补过期标的”的方式。
+全量刷新会从 `--since` 开始重拉整个股票池，耗时很长，也更容易给数据源造成压力。日常不要用它，优先使用“只补过期标的 + `--incremental`”。
 
 ## 断点续跑
 
 如果批量下载中断，只想补缺失文件：
 
 ```powershell
-python -m quant_a_stock.cli sync-stock-universe --universe-file data/universe/a_stock.csv --since 2020-01-01 --stock-provider sina --adjust qfq --sleep 1.5 --skip-existing
+python -m quant_a_stock.cli sync-stock-universe --universe-file data/universe/a_stock.csv --since 2020-01-01 --stock-provider sina --adjust qfq --workers 2 --sleep 0.05 --skip-existing
 ```
 
 这个命令会跳过已有 CSV，继续下载缺失标的。
+
+如果是当天数据中断，优先重新生成过期清单，然后只补 `stale.csv`：
+
+```powershell
+python -m quant_a_stock.cli cache-date-status --universe-file data/universe/a_stock.csv --show-stale --top 30 --output-stale data/universe/stale.csv
+python -m quant_a_stock.cli sync-stock-universe --universe-file data/universe/stale.csv --since 2020-01-01 --stock-provider sina --adjust qfq --incremental --lookback-days 60 --workers 2 --sleep 0.05 --no-skip-existing
+```
+
+跑一段时间后，用下面这个命令看还剩多少没补到目标日期：
+
+```powershell
+python -m quant_a_stock.cli cache-date-status --universe-file data/universe/a_stock.csv --show-stale --top 20 --output-stale data/universe/stale.csv
+```
 
 ## 下载小股票池
 
 下载几个个股：
 
 ```powershell
-python -m quant_a_stock.cli sync-daily --symbols 688143 688146 600519 --since 2020-01-01 --asset-type stock --stock-provider sina --adjust qfq
+python -m quant_a_stock.cli sync-daily --symbols 688143 688146 600519 --since 2020-01-01 --asset-type stock --stock-provider sina --adjust qfq --incremental --lookback-days 60
 ```
 
 使用 Sina 备用源下载 ETF：
@@ -95,7 +136,7 @@ python -m quant_a_stock.cli sync-daily --symbols 688143 688146 600519 --since 20
 python -m quant_a_stock.cli sync-daily --symbols 510300 159915 510500 --since 2020-01-01 --asset-type etf --etf-provider sina --adjust none
 ```
 
-## 扫描潜伏池和突破确认池
+## 扫描潜伏池、突破确认池和趋势回踩池
 
 扫描所有缓存标的的突破确认池：
 
@@ -122,6 +163,18 @@ python -m quant_a_stock.cli scan-pattern --pattern accumulation_setup --top 120 
 - `daily_score`、`weekly_score`、`monthly_score`：日/周/月拆分评分。
 - `setup_phase`：长期低位蓄势、周线右侧启动、日线触发观察等节奏标签。
 
+扫描“强趋势回踩/再启动”的补充候选：
+
+```powershell
+python -m quant_a_stock.cli scan-pattern --pattern trend_pullback_setup --top 120 --min-score 50 --stages trend_pullback trend_resume --min-amount-ma20 100000000 --min-ret-60 0.18 --filter-max-ret-20 0.18 --max-volume-ratio 3.20 --max-close-vs-trend 0.65 --max-drawdown-from-high 0.32
+```
+
+趋势回踩池会输出：
+
+- `ret_60_pct`：60 日趋势强度。
+- `drawdown_from_high_pct`：离近 60 日高点的回撤。
+- `trend_score`、`pullback_score`、`resume_score`：趋势、回踩和再启动拆分评分。
+
 只扫描自选观察池：
 
 ```powershell
@@ -133,7 +186,7 @@ python -m quant_a_stock.cli scan-pattern --pattern base_breakout_setup --symbols
 先跑形态扫描，再用最新扫描报告做情绪评分：
 
 ```powershell
-python -m quant_a_stock.cli sentiment-score --latest-scan --target-date 2026-06-12 --top 20 --display-top 20 --news-days 7
+python -m quant_a_stock.cli sentiment-score --latest-scan --target-date 2026-06-12 --top 90 --display-top 30 --news-days 7
 ```
 
 如果只想看自选股：
@@ -207,11 +260,63 @@ python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --to
 
 - 先用 `scan-pattern --pattern accumulation_setup` 找“长平台 + 低热度 + 温和放量”的潜伏池。
 - 再用 `scan-pattern --pattern base_breakout_setup` 保留“接近突破确认”的辅助池。
+- 再用 `scan-pattern --pattern trend_pullback_setup` 补充“强趋势回踩/再启动”的 A3 池。
 - 再用 `sentiment-score` 看候选股有没有热度、新闻和概念承接。
 - 最后用 `market-theme` 看候选是否落在当日强主线里。
 - 用 `research-candidates` 汇总成最终观察池，优先复盘 A/B 级候选。
 - 用 `daily-research-summary` 看当天主报告，它会合并市场温度、主题簇、候选持续性和风险提醒。
 - 如果形态很好但情绪极弱，先放观察池；如果情绪很热但形态已经大幅加速，避免追高。
+
+## 研究仓库
+
+每日报告生成后，把最新结果写入 DuckDB + Parquet：
+
+```powershell
+python -m quant_a_stock.cli warehouse-ingest --target-date 2026-06-18
+```
+
+把股票池写入维表：
+
+```powershell
+python -m quant_a_stock.cli warehouse-sync-universe --universe-file data/universe/a_stock.csv --target-date 2026-06-18
+```
+
+把本地日线 CSV 缓存同步为 Parquet：
+
+```powershell
+python -m quant_a_stock.cli warehouse-sync-candles --universe-file data/universe/a_stock.csv --target-date 2026-06-18
+```
+
+行情同步会先比较本地 CSV 最后日期和仓库索引，已同步的标的会跳过；第一次初始化会慢，后续夜间会快很多。只想试跑少量标的可以用：
+
+```powershell
+python -m quant_a_stock.cli warehouse-sync-candles --symbols 000001 002137 600999 --target-date 2026-06-18
+```
+
+回填历史研究快照：
+
+```powershell
+python -m quant_a_stock.cli warehouse-backfill-snapshots --since 2026-06-12 --until 2026-06-18
+```
+
+查看仓库状态：
+
+```powershell
+python -m quant_a_stock.cli warehouse-status
+```
+
+按日期区间做复盘汇总：
+
+```powershell
+python -m quant_a_stock.cli warehouse-review --since 2026-06-12 --until 2026-06-18
+```
+
+仓库路径：
+
+- DuckDB：`data/warehouse/alpha_cn.duckdb`
+- Parquet：`data/warehouse/parquet/`
+
+研究报告和快照入库是按目标交易日覆盖的。同一天重复跑不会把行数翻倍，只保留最新一版报告结果。日线行情按股票代码覆盖。这个目录不提交 git。
 
 ## 报告位置
 
@@ -222,6 +327,7 @@ python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --to
 - `sync_stock_universe_*.csv`
 - `scan_accumulation_setup_*.csv`
 - `scan_base_breakout_setup_*.csv`
+- `scan_trend_pullback_setup_*.csv`
 - `sentiment_watchlist_*.csv`
 - `sentiment_watchlist_*.md`
 - `market_theme_*.csv`

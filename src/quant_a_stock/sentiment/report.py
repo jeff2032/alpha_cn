@@ -90,9 +90,14 @@ def save_market_theme_markdown(theme: pd.DataFrame, meta: dict) -> Path:
             )
 
     hot_top = meta.get("hot_top") or []
+    provider_errors = _provider_errors(meta)
     lines.extend(["", "## 东财人气榜前 20", ""])
     if not hot_top:
-        lines.append("人气榜暂不可用。")
+        hot_rank_error = dict(provider_errors).get("东财人气榜")
+        if hot_rank_error:
+            lines.append("人气榜暂不可用：东财接口临时断开，不影响上面的涨停/强势行业方向。")
+        else:
+            lines.append("人气榜暂不可用。")
     else:
         for item in hot_top:
             rank = item.get("当前排名", "")
@@ -101,15 +106,35 @@ def save_market_theme_markdown(theme: pd.DataFrame, meta: dict) -> Path:
             pct = item.get("涨跌幅", "")
             lines.append(f"- 第 {rank} 名：{code} {name}，涨跌幅 {pct}")
 
-    provider_errors = [
-        value
-        for key, value in meta.items()
-        if key.endswith("_error") and value
-    ]
     if provider_errors:
         lines.extend(["", "## 数据源提示", ""])
-        for error in provider_errors:
-            lines.append(f"- {error}")
+        for label, error in provider_errors:
+            lines.append(f"- {label}：{_friendly_provider_error(error)}")
 
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
+
+
+def _provider_errors(meta: dict) -> list[tuple[str, str]]:
+    labels = {
+        "hot_rank_error": "东财人气榜",
+        "limit_pool_error": "涨停池",
+        "strong_pool_error": "强势股池",
+    }
+    errors = []
+    for key, label in labels.items():
+        value = meta.get(key)
+        if value:
+            errors.append((label, str(value)))
+    for key, value in meta.items():
+        if key.endswith("_error") and value and key not in labels:
+            errors.append((key.removesuffix("_error"), str(value)))
+    return errors
+
+
+def _friendly_provider_error(error: str) -> str:
+    if "RemoteDisconnected" in error or "Connection aborted" in error:
+        return "接口临时断开，通常是数据源限流或网络波动；本次会降级跳过该辅助数据。"
+    if "Read timed out" in error or "Timeout" in error:
+        return "接口超时，通常稍后重试即可；本次会降级跳过该辅助数据。"
+    return error

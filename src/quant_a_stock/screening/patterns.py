@@ -38,6 +38,23 @@ class AccumulationSetupConfig:
     weekly_window: int = 20
 
 
+@dataclass(frozen=True)
+class TrendPullbackSetupConfig:
+    trend_window: int = 120
+    fast_trend_window: int = 60
+    pullback_window: int = 20
+    volume_window: int = 20
+    min_ret_60: float = 0.18
+    max_ret_20: float = 0.18
+    max_drawdown_from_high: float = 0.32
+    min_close_vs_trend: float = -0.08
+    max_close_vs_trend: float = 0.65
+    min_trend_slope_20: float = 0.03
+    min_volume_ratio: float = 0.65
+    max_volume_ratio: float = 3.20
+    min_amount_ma20: float = 100_000_000
+
+
 def _clip_score(value: float, low: float = 0.0, high: float = 100.0) -> float:
     if np.isnan(value):
         return 0.0
@@ -302,6 +319,10 @@ def score_accumulation_setup(
     monthly_score = _monthly_setup_score(mtf)
     weekly_score = _weekly_setup_score(mtf)
     mtf_score = _clip_score(daily_score * 0.45 + weekly_score * 0.30 + monthly_score * 0.25)
+    early_trigger_score = _clip_score(
+        daily_score * 0.70 + weekly_score * 0.20 + monthly_score * 0.10
+    )
+    setup_score = max(mtf_score, early_trigger_score)
 
     stage = "accumulation"
     if (
@@ -329,8 +350,9 @@ def score_accumulation_setup(
         "timestamp": str(pd.Timestamp(latest["timestamp"]).date()),
         "stage": stage,
         "setup_phase": setup_phase,
-        "score": round(mtf_score, 2),
+        "score": round(setup_score, 2),
         "mtf_score": round(mtf_score, 2),
+        "early_trigger_score": round(early_trigger_score, 2),
         "daily_score": round(daily_score, 2),
         "weekly_score": round(weekly_score, 2),
         "monthly_score": round(monthly_score, 2),
@@ -403,6 +425,197 @@ def scan_accumulation_setups(
     if result.empty:
         return result
     return result.sort_values(["score", "volume_ratio"], ascending=[False, False]).reset_index(
+        drop=True
+    )
+
+
+def score_trend_pullback_setup(
+    candles: pd.DataFrame,
+    *,
+    symbol: str,
+    config: TrendPullbackSetupConfig = TrendPullbackSetupConfig(),
+) -> dict[str, float | str] | None:
+    frame = candles.copy()
+    if frame.empty:
+        return None
+
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"])
+    frame = frame.sort_values("timestamp").reset_index(drop=True)
+    required_bars = max(
+        config.trend_window,
+        config.fast_trend_window,
+        config.pullback_window,
+        config.volume_window,
+        120,
+    ) + 21
+    if len(frame) < required_bars:
+        return None
+
+    close = frame["close"]
+    high = frame["high"]
+    low = frame["low"]
+    volume = frame["volume"]
+    amount = frame["amount"] if "amount" in frame.columns else close * volume
+
+    ma_fast = close.rolling(config.fast_trend_window, min_periods=config.fast_trend_window).mean()
+    ma_slow = close.rolling(config.trend_window, min_periods=config.trend_window).mean()
+    trend_slope_20 = ma_slow / ma_slow.shift(20) - 1
+    fast_slope_10 = ma_fast / ma_fast.shift(10) - 1
+    high_60 = high.shift(1).rolling(60, min_periods=60).max()
+    low_60 = low.shift(1).rolling(60, min_periods=60).min()
+    recent_high = high.shift(1).rolling(config.pullback_window, min_periods=config.pullback_window).max()
+    recent_low = low.shift(1).rolling(config.pullback_window, min_periods=config.pullback_window).min()
+    ret_5 = close / close.shift(5) - 1
+    ret_20 = close / close.shift(20) - 1
+    ret_60 = close / close.shift(60) - 1
+    ret_120 = close / close.shift(120) - 1
+    close_vs_trend = close / ma_slow - 1
+    close_vs_fast = close / ma_fast - 1
+    drawdown_from_high = close / high_60 - 1
+    pullback_depth = recent_low / recent_high - 1
+    range_position_60 = (close - low_60) / (high_60 - low_60)
+    volume_ratio = volume / volume.rolling(config.volume_window, min_periods=config.volume_window).mean()
+    amount_ma20 = amount.rolling(config.volume_window, min_periods=config.volume_window).mean()
+
+    idx = frame.index[-1]
+    latest = frame.loc[idx]
+    metrics = {
+        "ret_5": float(ret_5.loc[idx]),
+        "ret_20": float(ret_20.loc[idx]),
+        "ret_60": float(ret_60.loc[idx]),
+        "ret_120": float(ret_120.loc[idx]),
+        "close_vs_trend": float(close_vs_trend.loc[idx]),
+        "close_vs_fast": float(close_vs_fast.loc[idx]),
+        "trend_slope_20": float(trend_slope_20.loc[idx]),
+        "fast_slope_10": float(fast_slope_10.loc[idx]),
+        "drawdown_from_high": float(drawdown_from_high.loc[idx]),
+        "pullback_depth": float(pullback_depth.loc[idx]),
+        "range_position_60": float(range_position_60.loc[idx]),
+        "volume_ratio": float(volume_ratio.loc[idx]),
+        "amount_ma20": float(amount_ma20.loc[idx]),
+    }
+    if any(np.isnan(value) for value in metrics.values()):
+        return None
+
+    trend_score = (
+        _clip_score((metrics["ret_60"] - config.min_ret_60) / 0.45 * 18, high=18)
+        + _clip_score((metrics["trend_slope_20"] - config.min_trend_slope_20) / 0.12 * 16, high=16)
+        + _clip_score((metrics["ret_120"] + 0.05) / 0.80 * 8, high=8)
+    )
+    pullback_score = (
+        _band_score(
+            metrics["drawdown_from_high"],
+            low=-config.max_drawdown_from_high,
+            high=-0.02,
+            target=-0.16,
+            points=18,
+        )
+        + _band_score(
+            metrics["pullback_depth"],
+            low=-0.35,
+            high=-0.03,
+            target=-0.16,
+            points=12,
+        )
+    )
+    resume_score = (
+        _clip_score((metrics["ret_5"] + 0.03) / 0.12 * 10, high=10)
+        + _clip_score((metrics["close_vs_fast"] + 0.04) / 0.16 * 8, high=8)
+        + _band_score(
+            metrics["volume_ratio"],
+            low=config.min_volume_ratio,
+            high=config.max_volume_ratio,
+            target=1.25,
+            points=10,
+        )
+    )
+    overheat_penalty = (
+        _clip_score((metrics["ret_20"] - config.max_ret_20) / 0.25 * 25, high=25)
+        + _clip_score((metrics["close_vs_trend"] - config.max_close_vs_trend) / 0.30 * 18, high=18)
+        + _clip_score((metrics["volume_ratio"] - config.max_volume_ratio) / 2.0 * 12, high=12)
+        + _clip_score((metrics["ret_120"] - 2.00) / 1.20 * 12, high=12)
+        + _clip_score((metrics["ret_5"] - 0.22) / 0.18 * 10, high=10)
+        + _clip_score((metrics["range_position_60"] - 0.92) / 0.25 * 10, high=10)
+    )
+    score = _clip_score(trend_score + pullback_score + resume_score - overheat_penalty)
+
+    stage = "trend_pullback"
+    setup_phase = "强趋势回踩"
+    if metrics["ret_5"] > 0.03 and metrics["close_vs_fast"] >= -0.02:
+        stage = "trend_resume"
+        setup_phase = "强趋势再启动"
+
+    return {
+        "symbol": symbol,
+        "timestamp": str(pd.Timestamp(latest["timestamp"]).date()),
+        "stage": stage,
+        "setup_phase": setup_phase,
+        "score": round(score, 2),
+        "trend_score": round(trend_score, 2),
+        "pullback_score": round(pullback_score, 2),
+        "resume_score": round(resume_score, 2),
+        "close": round(float(close.loc[idx]), 4),
+        "ret_5_pct": round(metrics["ret_5"], 4),
+        "ret_20_pct": round(metrics["ret_20"], 4),
+        "ret_60_pct": round(metrics["ret_60"], 4),
+        "ret_120_pct": round(metrics["ret_120"], 4),
+        "close_vs_trend_pct": round(metrics["close_vs_trend"], 4),
+        "close_vs_fast_pct": round(metrics["close_vs_fast"], 4),
+        "trend_slope_20_pct": round(metrics["trend_slope_20"], 4),
+        "fast_slope_10_pct": round(metrics["fast_slope_10"], 4),
+        "drawdown_from_high_pct": round(metrics["drawdown_from_high"], 4),
+        "pullback_depth_pct": round(metrics["pullback_depth"], 4),
+        "range_position_60_pct": round(metrics["range_position_60"], 4),
+        "volume_ratio": round(metrics["volume_ratio"], 4),
+        "amount_ma20": round(metrics["amount_ma20"], 2),
+    }
+
+
+def scan_trend_pullback_setups(
+    candles_by_symbol: dict[str, pd.DataFrame],
+    *,
+    config: TrendPullbackSetupConfig = TrendPullbackSetupConfig(),
+    min_score: float = 50.0,
+    stages: set[str] | None = None,
+    min_amount_ma20: float | None = None,
+    min_volume_ratio: float | None = None,
+    min_ret_60: float | None = None,
+    max_ret_20: float | None = None,
+    max_close_vs_trend: float | None = None,
+    max_drawdown_from_high: float | None = None,
+    max_volume_ratio: float | None = None,
+) -> pd.DataFrame:
+    rows = []
+    for symbol, candles in candles_by_symbol.items():
+        row = score_trend_pullback_setup(candles, symbol=symbol, config=config)
+        if row is None:
+            continue
+        if stages is not None and str(row["stage"]) not in stages:
+            continue
+        if min_amount_ma20 is not None and float(row["amount_ma20"]) < min_amount_ma20:
+            continue
+        if min_volume_ratio is not None and float(row["volume_ratio"]) < min_volume_ratio:
+            continue
+        if min_ret_60 is not None and float(row["ret_60_pct"]) < min_ret_60:
+            continue
+        if max_ret_20 is not None and float(row["ret_20_pct"]) > max_ret_20:
+            continue
+        if max_close_vs_trend is not None and float(row["close_vs_trend_pct"]) > max_close_vs_trend:
+            continue
+        if (
+            max_drawdown_from_high is not None
+            and float(row["drawdown_from_high_pct"]) < -max_drawdown_from_high
+        ):
+            continue
+        if max_volume_ratio is not None and float(row["volume_ratio"]) > max_volume_ratio:
+            continue
+        if float(row["score"]) >= min_score:
+            rows.append(row)
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+    return result.sort_values(["score", "ret_60_pct"], ascending=[False, False]).reset_index(
         drop=True
     )
 
