@@ -8,6 +8,9 @@
     [double]$SleepSeconds = 0.05,
     [int]$Workers = 6,
     [int]$LookbackDays = 60,
+    [string[]]$IndexSymbols = @("510300", "510500", "159915"),
+    [string]$EtfProvider = "eastmoney",
+    [string]$FallbackEtfProvider = "sina",
     [int]$SentimentTop = 180,
     [int]$RiskDays = 180,
     [int]$MaxStaleAllowed = 30,
@@ -175,6 +178,42 @@ function Get-LatestCacheDate {
     return $latest.ToString("yyyy-MM-dd")
 }
 
+function Get-CacheLastDate {
+    param([string]$Symbol)
+
+    $path = Join-Path $ProjectRoot "data/cache/akshare/daily/$Symbol.csv"
+    if (-not (Test-Path -LiteralPath $path)) {
+        return $null
+    }
+    $lastLine = Get-Content -LiteralPath $path -Tail 1
+    if (-not $lastLine) {
+        return $null
+    }
+    $dateText = ($lastLine -split ",")[0]
+    try {
+        return ([datetime]$dateText).ToString("yyyy-MM-dd")
+    } catch {
+        return $null
+    }
+}
+
+function Get-IndexStaleSymbols {
+    param(
+        [string[]]$Symbols,
+        [string]$TargetDate
+    )
+
+    $target = [datetime]$TargetDate
+    $stale = New-Object System.Collections.Generic.List[string]
+    foreach ($symbol in $Symbols) {
+        $lastDate = Get-CacheLastDate -Symbol $symbol
+        if (-not $lastDate -or ([datetime]$lastDate) -lt $target) {
+            $stale.Add($symbol)
+        }
+    }
+    return $stale.ToArray()
+}
+
 function Resolve-DefaultDataDate {
     param([string]$CutoffTime)
 
@@ -230,6 +269,7 @@ function Save-PrepReport {
     $lines.Add("## 数据覆盖")
     $lines.Add("")
     $lines.Add("- 准备后过期标的数：$script:FinalStaleCount")
+    $lines.Add("- ETF/指数过期标的数：$script:FinalIndexStaleCount")
     $lines.Add("- 过期清单：data/universe/stale_after_nightly.csv")
     $lines.Add("")
     $lines.Add("## 步骤结果")
@@ -259,6 +299,7 @@ Set-Location $ProjectRoot
 
 $script:StepResults = @()
 $script:FinalStaleCount = "未知"
+$script:FinalIndexStaleCount = "未知"
 $script:ResolvedTargetDate = ""
 
 $logDir = Join-Path $ProjectRoot "logs/nightly_prep"
@@ -347,6 +388,66 @@ try {
         Add-StepResult -Name "慢准备门槛" -Status "通过" -Detail "全市场缓存已到目标日期。"
     }
 
+    if ($IndexSymbols.Count -gt 0) {
+        $indexArgs = @(
+            "sync-daily",
+            "--symbols"
+        ) + $IndexSymbols + @(
+            "--since", $Since,
+            "--until", $script:ResolvedTargetDate,
+            "--asset-type", "etf",
+            "--etf-provider", $EtfProvider,
+            "--adjust", "none",
+            "--incremental",
+            "--lookback-days", $LookbackDays.ToString([Globalization.CultureInfo]::InvariantCulture),
+            "--retries", "3",
+            "--retry-wait", "1"
+        )
+
+        $primaryIndexSyncOk = $true
+        try {
+            Invoke-QuantStep -Name "补ETF指数行情" -Arguments $indexArgs
+        } catch {
+            $primaryIndexSyncOk = $false
+            Write-Step ("Primary ETF provider failed: " + $_.Exception.Message)
+        }
+
+        $staleIndexSymbols = @(Get-IndexStaleSymbols -Symbols $IndexSymbols -TargetDate $script:ResolvedTargetDate)
+        if ((-not $primaryIndexSyncOk -or $staleIndexSymbols.Count -gt 0) -and $FallbackEtfProvider -and $FallbackEtfProvider -ne $EtfProvider) {
+            $fallbackSymbols = if ($staleIndexSymbols.Count -gt 0) { $staleIndexSymbols } else { $IndexSymbols }
+            $fallbackArgs = @(
+                "sync-daily",
+                "--symbols"
+            ) + $fallbackSymbols + @(
+                "--since", $Since,
+                "--until", $script:ResolvedTargetDate,
+                "--asset-type", "etf",
+                "--etf-provider", $FallbackEtfProvider,
+                "--adjust", "none",
+                "--incremental",
+                "--lookback-days", $LookbackDays.ToString([Globalization.CultureInfo]::InvariantCulture),
+                "--retries", "3",
+                "--retry-wait", "1"
+            )
+            try {
+                Invoke-QuantStep -Name "补ETF指数行情备用源" -Arguments $fallbackArgs
+            } catch {
+                Write-Step ("Fallback ETF provider failed: " + $_.Exception.Message)
+            }
+        }
+
+        $finalIndexStale = @(Get-IndexStaleSymbols -Symbols $IndexSymbols -TargetDate $script:ResolvedTargetDate)
+        $script:FinalIndexStaleCount = $finalIndexStale.Count
+        if ($finalIndexStale.Count -gt 0) {
+            Add-StepResult -Name "ETF指数覆盖复查" -Status "警告" -Detail ("未到目标日期：" + ($finalIndexStale -join ", "))
+        } else {
+            Add-StepResult -Name "ETF指数覆盖复查" -Status "通过" -Detail "ETF/指数缓存已到目标日期。"
+        }
+    } else {
+        $script:FinalIndexStaleCount = 0
+        Add-StepResult -Name "ETF指数覆盖复查" -Status "跳过" -Detail "IndexSymbols 为空。"
+    }
+
     Invoke-QuantStep -Name "扫描突破确认池" -Arguments @(
         "scan-pattern",
         "--pattern", "base_breakout_setup",
@@ -427,6 +528,13 @@ try {
         "--until", $script:ResolvedTargetDate,
         "--top-movers", "20"
     )
+    Invoke-QuantStep -Name "候选生命周期跟踪" -Arguments @(
+        "track-candidates",
+        "--since", $reviewSince,
+        "--until", $script:ResolvedTargetDate,
+        "--universe-file", $UniverseFile,
+        "--top", "50"
+    )
     Invoke-QuantStep -Name "股票池维表入库" -Arguments @(
         "warehouse-sync-universe",
         "--universe-file", $UniverseFile,
@@ -437,6 +545,15 @@ try {
         "--universe-file", $UniverseFile,
         "--target-date", $script:ResolvedTargetDate
     )
+    if ($IndexSymbols.Count -gt 0) {
+        $indexWarehouseArgs = @(
+            "warehouse-sync-candles",
+            "--symbols"
+        ) + $IndexSymbols + @(
+            "--target-date", $script:ResolvedTargetDate
+        )
+        Invoke-QuantStep -Name "指数日线入库" -Arguments $indexWarehouseArgs
+    }
     Invoke-QuantStep -Name "研究快照回填" -Arguments @(
         "warehouse-backfill-snapshots",
         "--since", $script:ResolvedTargetDate,

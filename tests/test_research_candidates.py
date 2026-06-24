@@ -30,6 +30,15 @@ def test_build_research_candidates_adds_theme_and_penalties() -> None:
                 "trend_slope_20_pct": 0.02,
                 "distance_to_high_pct": -0.03,
             },
+            {
+                "symbol": "510300",
+                "timestamp": "2026-06-12",
+                "stage": "near_breakout",
+                "score": 99.0,
+                "volume_ratio": 1.1,
+                "ret_20_pct": 0.02,
+                "amount_ma20": 5_000_000_000,
+            },
         ]
     )
     sentiment = pd.DataFrame(
@@ -47,6 +56,13 @@ def test_build_research_candidates_adds_theme_and_penalties() -> None:
                 "sentiment_score": 60.0,
                 "hot_rank": 100,
                 "top_keywords": "其他概念",
+            },
+            {
+                "symbol": "510300",
+                "name": "沪深300ETF",
+                "sentiment_score": 99.0,
+                "hot_rank": 1,
+                "top_keywords": "ETF",
             },
         ]
     )
@@ -82,12 +98,17 @@ def test_build_research_candidates_adds_theme_and_penalties() -> None:
     laggard = result[result["symbol"] == "300001"].iloc[0]
 
     assert leader["symbol"] == "600160"
+    assert "510300" not in set(result["symbol"])
     assert leader["matched_theme"] == "半导体"
     assert leader["theme_bonus"] > 0
+    assert leader["action_bucket"] == "主攻-A2启动确认"
+    assert leader["risk_level"] == "低"
     assert laggard["volume_overheat_penalty"] == 8.0
     assert laggard["ret20_overheat_penalty"] == 10.0
     assert laggard["risk_notice_penalty"] == 10.0
     assert laggard["new_stock_penalty"] == 5.0
+    assert laggard["risk_level"] == "高"
+    assert laggard["action_bucket"] == "回避-风险优先"
 
 
 def test_build_research_candidates_classifies_trend_pullback_as_a3() -> None:
@@ -134,5 +155,54 @@ def test_build_research_candidates_classifies_trend_pullback_as_a3() -> None:
 
     leader = result.iloc[0]
     assert leader["research_tier"] == "A3"
+    assert leader["action_bucket"] == "主攻-A3趋势延续"
     assert leader["setup_phase"] == "强趋势再启动"
     assert leader["stage_bonus"] > 0
+
+
+def test_build_research_candidates_marks_strong_theme_b2_as_replenish_watch() -> None:
+    scan = pd.DataFrame(
+        [
+            {
+                "symbol": "688001",
+                "timestamp": "2026-06-12",
+                "stage": "trend_pullback",
+                "setup_phase": "强趋势回踩",
+                "score": 48.0,
+                "volume_ratio": 1.2,
+                "ret_20_pct": 0.08,
+                "ret_60_pct": 0.10,
+                "drawdown_from_high_pct": -0.08,
+                "close_vs_trend_pct": 0.20,
+                "amount_ma20": 300_000_000,
+            }
+        ]
+    )
+    sentiment = pd.DataFrame(
+        [
+            {
+                "symbol": "688001",
+                "name": "强芯科技",
+                "sentiment_score": 40.0,
+                "top_keywords": "半导体、存储芯片",
+            }
+        ]
+    )
+    theme = pd.DataFrame([{"theme": "半导体", "theme_score": 120.0}])
+    profiles = pd.DataFrame(
+        [{"symbol": "688001", "industry": "计算机、通信和其他电子设备制造业", "listing_date": "2020-01-01"}]
+    )
+
+    result = build_research_candidates(
+        scan,
+        sentiment,
+        theme=theme,
+        profiles=profiles,
+        target_date="2026-06-12",
+    )
+
+    row = result.iloc[0]
+    assert row["research_tier"] == "B2"
+    assert bool(row["is_strong_theme_candidate"]) is True
+    assert row["action_bucket"] == "补票-B2强主题"
+    assert "强主题补票" in row["upgrade_hint"]

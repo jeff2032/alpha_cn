@@ -17,6 +17,7 @@ STANDARD_COLUMNS = [
     "amount",
     "symbol",
 ]
+CACHE_COLUMNS = STANDARD_COLUMNS + ["is_suspended"]
 
 
 def daily_cache_path(
@@ -41,6 +42,7 @@ def save_daily_cache(
     output = candles.copy()
     if "timestamp" in output.columns:
         output["timestamp"] = pd.to_datetime(output["timestamp"]).dt.strftime("%Y-%m-%d")
+    output = output.loc[:, [column for column in CACHE_COLUMNS if column in output.columns]]
     output.to_csv(path, index=False)
     return path
 
@@ -60,4 +62,3 @@ def load_daily_cache(
     if "timestamp" in frame.columns:
         frame["timestamp"] = pd.to_datetime(frame["timestamp"])
     return frame
-

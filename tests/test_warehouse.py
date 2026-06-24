@@ -6,6 +6,7 @@ import pandas as pd
 
 from quant_a_stock.warehouse import backfill_research_snapshots
 from quant_a_stock.warehouse import ingest_latest_reports
+from quant_a_stock.warehouse import sync_candidate_lifecycles_to_warehouse
 from quant_a_stock.warehouse import sync_daily_candles_to_warehouse
 from quant_a_stock.warehouse import sync_stock_universe_to_warehouse
 from quant_a_stock.warehouse import warehouse_review
@@ -52,6 +53,7 @@ def test_ingest_latest_reports_builds_parquet_and_review_views(tmp_path: Path) -
                 "next_date": "2026-06-18",
                 "symbol": "002137",
                 "tier": "A2",
+                "model_bucket": "A1/A2_early_setup",
                 "next_ret": 0.10,
                 "ret_3d": 0.15,
             },
@@ -60,6 +62,7 @@ def test_ingest_latest_reports_builds_parquet_and_review_views(tmp_path: Path) -
                 "next_date": "2026-06-18",
                 "symbol": "600999",
                 "tier": "A3",
+                "model_bucket": "A3_trend_follow",
                 "next_ret": -0.02,
                 "ret_3d": 0.01,
             },
@@ -104,8 +107,11 @@ def test_ingest_latest_reports_builds_parquet_and_review_views(tmp_path: Path) -
 
     review = warehouse_review(since="2026-06-17", until="2026-06-18", warehouse_dir=warehouse_dir)
     tier = review["tier"]
+    bucket = review["bucket"]
     miss_risk = review["miss_risk"]
 
+    assert bucket.loc[bucket["model_bucket"] == "A1/A2_early_setup", "count"].iloc[0] == 1
+    assert bucket.loc[bucket["model_bucket"] == "A1/A2_early_setup", "win_rate_3d"].iloc[0] == 1.0
     assert tier.loc[tier["tier"] == "A2", "count"].iloc[0] == 1
     assert tier.loc[tier["tier"] == "A2", "count_3d"].iloc[0] == 1
     assert tier.loc[tier["tier"] == "A2", "win_rate_1d"].iloc[0] == 1.0
@@ -219,3 +225,44 @@ def test_sync_universe_and_daily_candles_to_warehouse(tmp_path: Path) -> None:
     assert universe_rows == 1
     assert candle_rows == 2
     assert candle_symbols == 1
+
+
+def test_sync_candidate_lifecycles_to_warehouse(tmp_path: Path) -> None:
+    warehouse_dir = tmp_path / "warehouse"
+    lifecycles = pd.DataFrame(
+        [
+            {
+                "lifecycle_id": "002137_20260618_research_candidates_v1_A2_1",
+                "symbol": "002137",
+                "name": "实益达",
+                "first_entry_date": "2026-06-18",
+                "status": "active",
+                "result_label": "hit",
+            }
+        ]
+    )
+    daily = pd.DataFrame(
+        [
+            {
+                "lifecycle_id": "002137_20260618_research_candidates_v1_A2_1",
+                "symbol": "002137",
+                "target_date": "2026-06-18",
+                "day_status": "new",
+            }
+        ]
+    )
+
+    result = sync_candidate_lifecycles_to_warehouse(
+        lifecycles=lifecycles,
+        daily=daily,
+        target_date="2026-06-18",
+        warehouse_dir=warehouse_dir,
+        run_id="lifecycle-test",
+    )
+
+    status = warehouse_status(warehouse_dir=warehouse_dir)
+    lifecycle_rows = status.loc[status["table"] == "candidate_lifecycles", "rows"].iloc[0]
+    daily_rows = status.loc[status["table"] == "candidate_lifecycle_daily", "rows"].iloc[0]
+    assert lifecycle_rows == 1
+    assert daily_rows == 1
+    assert result.ingested["row_count"].sum() == 2

@@ -294,6 +294,43 @@ def test_cache_date_status_command_parses_arguments() -> None:
     assert args.output_stale == "data/universe/stale.csv"
 
 
+def test_cache_date_status_symbols_keeps_etf_codes(tmp_path, monkeypatch, capsys) -> None:
+    daily_dir = tmp_path / "data" / "cache" / "akshare" / "daily"
+    daily_dir.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "timestamp": "2026-06-23",
+                "open": 5.0,
+                "high": 5.1,
+                "low": 4.9,
+                "close": 5.0,
+                "volume": 100,
+                "amount": 500,
+                "symbol": "510300",
+            }
+        ]
+    ).to_csv(daily_dir / "510300.csv", index=False)
+    monkeypatch.setattr(cli_module, "DEFAULT_PATHS", ProjectPaths(root=tmp_path))
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "cache-date-status",
+            "--symbols",
+            "510300",
+            "--target-date",
+            "2026-06-23",
+            "--exact-target-date",
+        ]
+    )
+    args.func(args)
+
+    output = capsys.readouterr().out
+    assert "总数: 1" in output
+    assert "已到目标日期: 1" in output
+
+
 def test_sentiment_score_command_parses_arguments() -> None:
     parser = build_parser()
 
@@ -474,6 +511,41 @@ def test_research_review_command_parses_arguments() -> None:
     assert args.until == "2026-06-18"
     assert args.top_movers == 10
     assert args.universe_file == "data/universe/a_stock.csv"
+
+
+def test_track_candidates_command_parses_arguments() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "track-candidates",
+            "--since",
+            "2026-06-12",
+            "--until",
+            "2026-06-24",
+            "--snapshot-root",
+            "data/snapshots/research",
+            "--cache-dir",
+            "data/cache",
+            "--universe-file",
+            "data/universe/a_stock.csv",
+            "--warehouse-dir",
+            "data/warehouse",
+            "--gap-trade-days",
+            "2",
+            "--no-write-warehouse",
+        ]
+    )
+
+    assert args.command == "track-candidates"
+    assert args.since == "2026-06-12"
+    assert args.until == "2026-06-24"
+    assert args.snapshot_root == "data/snapshots/research"
+    assert args.cache_dir == "data/cache"
+    assert args.universe_file == "data/universe/a_stock.csv"
+    assert args.warehouse_dir == "data/warehouse"
+    assert args.gap_trade_days == 2
+    assert args.write_warehouse is False
 
 
 def test_warehouse_ingest_command_parses_arguments() -> None:

@@ -177,7 +177,9 @@ def build_research_candidates(
     config: ResearchCandidateConfig = ResearchCandidateConfig(),
 ) -> pd.DataFrame:
     scan_frame = normalize_symbol_column(scan)
+    scan_frame = scan_frame[scan_frame["symbol"].map(_is_stock_like_symbol)].copy()
     sentiment_frame = normalize_symbol_column(sentiment)
+    sentiment_frame = sentiment_frame[sentiment_frame["symbol"].map(_is_stock_like_symbol)].copy()
 
     if "name" not in sentiment_frame.columns and "名称" in sentiment_frame.columns:
         sentiment_frame = sentiment_frame.rename(columns={"名称": "name"})
@@ -321,10 +323,17 @@ def build_research_candidates(
     ).clip(lower=0, upper=100).round(2)
     output["research_tier"] = output.apply(_tier, axis=1)
     output["research_tier_rank"] = output["research_tier"].map(_tier_rank)
+    output["risk_tags"] = output.apply(lambda row: "；".join(_risk_tags(row, config)), axis=1)
+    output["risk_level"] = output.apply(lambda row: _risk_level(row, config), axis=1)
+    output["is_risk_clean"] = output["risk_level"].isin(["低", "中"]) & (output["total_penalty"] <= 10)
+    output["is_strong_theme_candidate"] = output.apply(_is_strong_theme_candidate, axis=1)
+    output["action_bucket"] = output.apply(_action_bucket, axis=1)
+    output["action_rank"] = output["action_bucket"].map(_action_rank)
+    output["upgrade_hint"] = output.apply(_upgrade_hint, axis=1)
 
     return output.sort_values(
-        ["research_tier_rank", "research_score", "score", "sentiment_score"],
-        ascending=[True, False, False, False],
+        ["action_rank", "research_tier_rank", "research_score", "score", "sentiment_score"],
+        ascending=[True, True, False, False, False],
     ).reset_index(drop=True)
 
 
@@ -335,6 +344,28 @@ def _ensure_numeric_columns(frame: pd.DataFrame, columns: list[str]) -> pd.DataF
             output[column] = 0.0
         output[column] = pd.to_numeric(output[column], errors="coerce").fillna(0.0)
     return output
+
+
+def _is_stock_like_symbol(symbol: str) -> bool:
+    code = normalize_symbol(symbol)
+    return code.startswith(
+        (
+            "000",
+            "001",
+            "002",
+            "003",
+            "300",
+            "301",
+            "600",
+            "601",
+            "603",
+            "605",
+            "688",
+            "689",
+            "4",
+            "8",
+        )
+    )
 
 
 def _ensure_text_column(frame: pd.DataFrame, column: str) -> pd.DataFrame:
@@ -526,6 +557,140 @@ def _tier_rank(tier: str) -> int:
         "C": 6,
         "观察": 7,
     }.get(tier, 9)
+
+
+def _risk_tags(row: pd.Series, config: ResearchCandidateConfig) -> list[str]:
+    tags: list[str] = []
+    risk_count = _safe_number(row.get("risk_notice_count", 0.0))
+    total_penalty = _safe_number(row.get("total_penalty", 0.0))
+    ret20 = _safe_number(row.get("ret_20_pct", 0.0))
+    volume_ratio = _safe_number(row.get("volume_ratio", 0.0))
+    monthly_position = _safe_number(row.get("monthly_position_pct", 0.0))
+    price_position = _safe_number(row.get("price_position_pct", 0.0))
+    amount_ma20 = _safe_number(row.get("amount_ma20", 0.0))
+    listing_days = _safe_number(row.get("listing_days", 0.0))
+
+    if risk_count >= 2:
+        tags.append("公告风险多项命中")
+    elif risk_count >= 1:
+        tags.append("公告风险命中")
+    if total_penalty >= 15:
+        tags.append("总扣分偏高")
+    if ret20 >= config.ret20_extreme_threshold:
+        tags.append("20日涨幅过热")
+    elif ret20 >= config.ret20_hot_threshold:
+        tags.append("20日涨幅偏热")
+    if volume_ratio >= config.volume_extreme_threshold:
+        tags.append("量能极端放大")
+    elif volume_ratio >= config.volume_hot_threshold:
+        tags.append("量能偏热")
+    if _safe_number(row.get("combined_overheat_penalty", 0.0)) > 0:
+        tags.append("量价共振过热")
+    if monthly_position > config.monthly_high_position_threshold:
+        tags.append("月线位置偏高")
+    if price_position > config.price_high_position_threshold:
+        tags.append("区间位置偏高")
+    if listing_days and listing_days < config.new_stock_days:
+        tags.append("次新样本不足")
+    if amount_ma20 and amount_ma20 < 100_000_000:
+        tags.append("成交额偏低")
+    return tags
+
+
+def _risk_level(row: pd.Series, config: ResearchCandidateConfig) -> str:
+    tags = _risk_tags(row, config)
+    joined = "；".join(tags)
+    if any(key in joined for key in ("公告风险多项命中", "次新样本不足", "成交额偏低")):
+        return "高"
+    if any(key in joined for key in ("公告风险命中", "总扣分偏高", "20日涨幅过热", "量能极端放大")):
+        return "中高"
+    if any(key in joined for key in ("偏热", "位置偏高", "量价共振过热")):
+        return "中"
+    return "低"
+
+
+def _is_risk_clean(row: pd.Series) -> bool:
+    return str(row.get("risk_level", "")) in {"低", "中"} and _safe_number(row.get("total_penalty", 0.0)) <= 10
+
+
+def _is_strong_theme_candidate(row: pd.Series) -> bool:
+    matched_theme = bool(str(row.get("matched_theme", "") or "").strip())
+    co_rise_count = _safe_number(row.get("co_rise_count", 0.0))
+    core_news_count = _safe_number(row.get("core_news_count", 0.0))
+    research_report_count = _safe_number(row.get("research_report_count", 0.0))
+    sentiment_score = _safe_number(row.get("sentiment_score", 0.0))
+    return matched_theme or co_rise_count >= 20 or core_news_count > 0 or research_report_count >= 2 or sentiment_score >= 70
+
+
+def _is_b2_upgrade_watch(row: pd.Series) -> bool:
+    tier = str(row.get("research_tier", ""))
+    if tier not in {"B1", "B2"}:
+        return False
+    if not _is_risk_clean(row):
+        return False
+    stage = str(row.get("stage", "") or "")
+    ret20 = _safe_number(row.get("ret_20_pct", 0.0))
+    volume_ratio = _safe_number(row.get("volume_ratio", 0.0))
+    amount_ma20 = _safe_number(row.get("amount_ma20", 0.0))
+    return (
+        _is_strong_theme_candidate(row)
+        and stage in {"near_breakout", "breakout", "trend_pullback", "trend_resume", "pre_breakout"}
+        and ret20 <= 0.25
+        and volume_ratio <= 3.0
+        and (amount_ma20 == 0 or amount_ma20 >= 100_000_000)
+    )
+
+
+def _action_bucket(row: pd.Series) -> str:
+    tier = str(row.get("research_tier", ""))
+    risk_level = str(row.get("risk_level", ""))
+    total_penalty = _safe_number(row.get("total_penalty", 0.0))
+    if risk_level == "高" or total_penalty >= 18:
+        return "回避-风险优先"
+    if tier == "A2" and _is_risk_clean(row):
+        return "主攻-A2启动确认"
+    if tier == "A3" and _is_risk_clean(row):
+        return "主攻-A3趋势延续"
+    if _is_b2_upgrade_watch(row):
+        return "补票-B2强主题"
+    if tier == "A1":
+        return "观察-A1低位潜伏"
+    if tier == "A3":
+        return "观察-A3高波动"
+    if tier in {"B1", "B2"}:
+        return "观察-B级候选"
+    return "观察-低优先级"
+
+
+def _action_rank(bucket: str) -> int:
+    return {
+        "主攻-A2启动确认": 1,
+        "主攻-A3趋势延续": 2,
+        "补票-B2强主题": 3,
+        "观察-A1低位潜伏": 4,
+        "观察-A3高波动": 5,
+        "观察-B级候选": 6,
+        "观察-低优先级": 7,
+        "回避-风险优先": 8,
+    }.get(str(bucket), 9)
+
+
+def _upgrade_hint(row: pd.Series) -> str:
+    bucket = str(row.get("action_bucket", ""))
+    risk_tags = str(row.get("risk_tags", "") or "无明显风险")
+    if bucket == "主攻-A2启动确认":
+        return "启动确认主攻：看突破后承接、回踩不破和量能不过热。"
+    if bucket == "主攻-A3趋势延续":
+        return "趋势主攻：只看分歧低吸或强承接，不追高开加速。"
+    if bucket == "补票-B2强主题":
+        return "强主题补票：先补公告和盘中承接核验，符合再升级。"
+    if bucket == "观察-A1低位潜伏":
+        return "低位潜伏观察：等主题、量能和短线资金进一步确认。"
+    if bucket == "观察-A3高波动":
+        return "趋势高波动观察：先处理过热/高位风险，再考虑低吸。"
+    if bucket == "回避-风险优先":
+        return f"风险优先回避：{risk_tags}。"
+    return "观察为主：等待主线、量能或情绪进一步确认。"
 
 
 def _safe_number(value: object, default: float = 0.0) -> float:

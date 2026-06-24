@@ -92,7 +92,15 @@ python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --to
 python -m quant_a_stock.cli research-review --since 2026-05-29 --until 2026-06-12 --top-movers 20
 ```
 
-这个报告会把近两周快照里的候选池和 1/3/5 个交易日表现对齐，重点看 A2、A3、B1/B2 各自是否有效，以及全市场次日强票有没有被候选池捕获。A2 主要看 3/5 日是否从潜伏转强，A3 主要看 1/3 日趋势是否延续。
+这个报告会把近两周快照里的候选池和 1/3/5 个交易日表现对齐，重点看主攻池、补票池、观察池各自是否有效，以及全市场次日强票有没有被候选池捕获。A2 主要看 3/5 日是否从启动确认转强，A3 主要看 1/3 日趋势是否延续，B2 只看是否值得升级为强主题补票观察。
+
+生成 A2/A3/B2 候选生命周期跟踪：
+
+```powershell
+python -m quant_a_stock.cli track-candidates --since 2026-05-29 --until 2026-06-12 --top 50
+```
+
+这个报告会把“选进去之后怎么走”独立记录下来：新入池、继续跟踪、升级、降级、消失、命中、失败和观察窗口收益。它会写入 `candidate_lifecycles` 与 `candidate_lifecycle_daily` 两张仓库表，后续复盘和因子研究优先读这里。
 
 复盘报告里的“明显错过样本和风险提示”要分开看：
 
@@ -154,7 +162,12 @@ python -m quant_a_stock.cli warehouse-review --since 2026-06-12 --until 2026-06-
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_research.ps1
 ```
 
-早上脚本会做一次快速刷新和报告导出，并把 Markdown 同步到 Obsidian 的 `中国A股荐股/YYYY-MM-DD/` 目录。它默认使用：
+早上脚本会做一次快速刷新和报告导出，并把 Markdown 同步到 Obsidian：
+
+- 完整复盘：`中国A股荐股/每日复盘/数据截至日/`
+- 开盘前计划：`中国A股荐股/开盘计划/计划日期.md`
+
+它默认使用：
 
 ```powershell
 python -m quant_a_stock.cli research-candidates --target-date 目标日期 --top 30 --no-fetch-profiles --no-fetch-notices
@@ -167,8 +180,9 @@ python -m quant_a_stock.cli research-candidates --target-date 目标日期 --top
 优先看：
 
 - `daily_research_summary_*.md`：每日主报告，综合市场温度、主线、候选分层、持续性和风险提醒。
-- `research_candidates_*.md`：最终候选池，主要看 A/B 级。
-- `research_review_*.md`：滚动策略复盘，重点看 A2/A3/B 池近期命中、错过和亏损样本。
+- `research_candidates_*.md`：最终候选池，优先看 `action_bucket`，再看 A1/A2/A3/B2 分层。
+- `research_review_*.md`：滚动策略复盘，重点看主攻池、补票池、观察池近期命中、错过和亏损样本。
+- `candidate_lifecycle_tracking_*.md`：A2/A3/B2 候选生命周期，重点看入池后是否升级、兑现、失败或退出。
 - `market_theme_*.md`：当天市场主线。
 - `sentiment_watchlist_*.md`：候选股情绪细节。
 
@@ -195,16 +209,18 @@ python -m quant_a_stock.cli research-candidates --target-date 目标日期 --top
 
 优先人工复盘：
 
-- `research_tier` 属于 `A1`、`A2`、`A3` 或 `B1`
-- `research_score` 靠前
-- `stage = accumulation`
-- `setup_phase` 属于长期低位蓄势、周线右侧启动或日线触发观察
-- `matched_theme` 命中当天强主线
-- `total_penalty` 低
-- `risk_notice_titles` 为空或只是常规披露
+- `action_bucket = 主攻-A2启动确认`：启动确认主攻池，看突破后承接、回踩不破和量能不过热。
+- `action_bucket = 主攻-A3趋势延续`：趋势主攻池，只看分歧低吸或强承接，不追高开加速。
+- `action_bucket = 补票-B2强主题`：强主题补票池，必须再核验公告风险和盘中承接。
+- `research_score` 靠前，且 `risk_level` 为低或中。
+- `matched_theme` 命中当天强主线，或同主题/行业候选数量明显靠前。
+- `total_penalty` 低，`risk_notice_titles` 为空或只是常规披露。
 
 谨慎观察：
 
+- `action_bucket = 观察-A1低位潜伏`：不作为主攻，只看后续是否补量、补主题、补资金确认。
+- `action_bucket = 观察-A3高波动`：趋势仍强，但高位/过热/回撤风险需要先处理。
+- `action_bucket = 回避-风险优先`：原则上不进明日主攻池。
 - 情绪分很高但近 20 日涨幅过热。
 - 形态分很高但情绪分很低。
 - 主线未命中，只有个股独立异动。

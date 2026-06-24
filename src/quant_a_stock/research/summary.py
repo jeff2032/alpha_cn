@@ -163,9 +163,13 @@ def build_daily_research_summary(
         candidates = candidates.merge(lifecycle, on="symbol", how="left")
     if "research_tier_rank" not in candidates.columns:
         candidates["research_tier_rank"] = candidates["research_tier"].map(_tier_rank)
+    if "action_rank" not in candidates.columns:
+        candidates["action_rank"] = candidates["research_tier_rank"]
+    if "action_bucket" not in candidates.columns:
+        candidates["action_bucket"] = candidates["research_tier"].map(_fallback_action_bucket)
     candidates = candidates.sort_values(
-        ["research_tier_rank", "research_score", "score", "sentiment_score"],
-        ascending=[True, False, False, False],
+        ["action_rank", "research_tier_rank", "research_score", "score", "sentiment_score"],
+        ascending=[True, True, False, False, False],
     ).reset_index(drop=True)
     market, components = build_market_temperature(target_date=target_date)
     return DailyResearchSummary(
@@ -275,6 +279,7 @@ def save_daily_research_summary_markdown(summary: DailyResearchSummary, *, top: 
         "symbol",
         "name",
         "research_tier",
+        "action_bucket",
         "research_score",
         "theme_cluster",
         "stage",
@@ -289,25 +294,31 @@ def save_daily_research_summary_markdown(summary: DailyResearchSummary, *, top: 
         "core_news_count",
         "research_report_count",
         "total_penalty",
+        "risk_level",
+        "risk_tags",
         "days_seen",
         "score_delta",
     ]
-    core = candidates[candidates["research_tier"].isin(["A1", "A2", "A3", "B1"])].head(top)
-    lines.extend(["## A1/A2/A3/B1 核心候选", "", _markdown_table(core[_existing(core, display_cols)]), ""])
+    action_core = candidates[
+        candidates["action_bucket"].isin(["主攻-A2启动确认", "主攻-A3趋势延续", "补票-B2强主题"])
+    ].head(top)
+    if action_core.empty:
+        action_core = candidates[candidates["research_tier"].isin(["A2", "A3", "B1", "B2"])].head(top)
+    lines.extend(["## 主攻与补票候选", "", _markdown_table(action_core[_existing(action_core, display_cols)]), ""])
 
     for title, note, frame in _candidate_bucket_sections(candidates, top=top):
         lines.extend([f"## {title}", "", note, "", _markdown_table(frame[_existing(frame, display_cols)]), ""])
 
     lines.extend(["## 核心候选解读", ""])
-    if core.empty:
-        lines.append("今天没有 A1/A2/A3/B1 级候选。")
+    if action_core.empty:
+        lines.append("今天没有主攻或补票候选。")
     else:
-        for _, row in core.iterrows():
+        for _, row in action_core.iterrows():
             lines.extend(_candidate_reason_lines(row))
 
-    core_tiers = ["A1", "A2", "A3", "B1"]
+    core_buckets = ["主攻-A2启动确认", "主攻-A3趋势延续", "补票-B2强主题"]
     watch = candidates[
-        (~candidates["research_tier"].isin(core_tiers))
+        (~candidates["action_bucket"].isin(core_buckets))
         | (candidates["total_penalty"].fillna(0) > 0)
         | (candidates["core_news_count"].fillna(0) == 0)
     ].head(12)
@@ -319,23 +330,23 @@ def save_daily_research_summary_markdown(summary: DailyResearchSummary, *, top: 
 
 
 def _candidate_bucket_sections(candidates: pd.DataFrame, *, top: int) -> list[tuple[str, str, pd.DataFrame]]:
-    early = candidates[candidates["research_tier"].isin(["A1", "A2"])].head(top)
-    trend = candidates[candidates["research_tier"].isin(["A3"])].head(top)
-    watch = candidates[candidates["research_tier"].isin(["B1", "B2"])].head(top)
+    early = candidates[candidates["action_bucket"].isin(["观察-A1低位潜伏", "主攻-A2启动确认"])].head(top)
+    trend = candidates[candidates["action_bucket"].isin(["主攻-A3趋势延续", "观察-A3高波动"])].head(top)
+    watch = candidates[candidates["action_bucket"].isin(["补票-B2强主题", "观察-B级候选"])].head(top)
     return [
         (
             "A1/A2 低位潜伏与启动池",
-            "看 3-5 日是否转强，不用单日涨跌评价潜伏模型。",
+            "A2 是主攻，A1 先观察；看 3-5 日是否转强，不用单日涨跌评价潜伏模型。",
             early,
         ),
         (
             "A3 主线趋势延续池",
-            "看 1-2 日趋势延续和回踩不破，避免高开过热追买。",
+            "风险干净的 A3 才是主攻；高波动 A3 只看分歧承接，避免高开过热追买。",
             trend,
         ),
         (
             "B1/B2 观察补票池",
-            "只做人工复盘和主线补票，不直接当作买点。",
+            "只有强主题、风险干净、成交额足够的 B2 才进入补票观察，不直接当作买点。",
             watch,
         ),
     ]
@@ -405,6 +416,10 @@ def _candidate_reason_lines(row: pd.Series) -> list[str]:
         reasons.append(f"同主题/行业候选 {int(row.get('co_rise_count', 0))} 只")
     if row.get("total_penalty", 0) > 0:
         reasons.append(f"扣分 {row.get('total_penalty')}")
+    action_bucket = _clean_text(row.get("action_bucket", ""))
+    risk_level = _clean_text(row.get("risk_level", ""))
+    risk_tags = _clean_text(row.get("risk_tags", ""))
+    upgrade_hint = _clean_text(row.get("upgrade_hint", ""))
     trend_line = ""
     if str(row.get("stage", "")) in {"trend_pullback", "trend_resume"}:
         trend_line = (
@@ -418,9 +433,12 @@ def _candidate_reason_lines(row: pd.Series) -> list[str]:
         f"### {row.get('symbol')} {row.get('name')}",
         "",
         f"- 分层：{row.get('research_tier')}，研究分 {row.get('research_score')}",
+        f"- 动作分组：{action_bucket or '未分组'}，风险等级 {risk_level or '未标注'}",
         f"- 主题簇：{row.get('theme_cluster')}，阶段 {row.get('stage')}，节奏 {row.get('setup_phase', '') or '未标注'}",
         f"- 多周期：月线位置 {row.get('monthly_position_pct', '')}，周线趋势 {row.get('weekly_trend_slope_pct', '')}，多周期分 {row.get('mtf_score', '')}",
         f"- 理由：{reason_text}",
+        f"- 动作提示：{upgrade_hint or '观察为主'}",
+        f"- 风险标签：{risk_tags or '无明显风险'}",
         f"- 核心新闻：{latest_core_news or '无'}",
         f"- 最新研报：{latest_report or '无'}",
         "",
@@ -440,6 +458,19 @@ def _tier_rank(tier: str) -> int:
         "C": 6,
         "观察": 7,
     }.get(str(tier), 9)
+
+
+def _fallback_action_bucket(tier: object) -> str:
+    value = str(tier)
+    if value == "A2":
+        return "主攻-A2启动确认"
+    if value == "A3":
+        return "主攻-A3趋势延续"
+    if value == "A1":
+        return "观察-A1低位潜伏"
+    if value in {"B1", "B2"}:
+        return "观察-B级候选"
+    return "观察-低优先级"
 
 
 def _existing(frame: pd.DataFrame, columns: list[str]) -> list[str]:

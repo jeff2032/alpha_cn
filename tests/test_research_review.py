@@ -38,6 +38,9 @@ def test_build_research_review_summarizes_candidates_and_missed_movers(tmp_path,
                 "symbol": "000001",
                 "name": "",
                 "research_tier": "A2",
+                "action_bucket": "主攻-A2启动确认",
+                "risk_level": "低",
+                "risk_tags": "",
                 "research_score": 70,
                 "setup_phase": "日线触发观察",
                 "stage": "accumulation",
@@ -47,6 +50,9 @@ def test_build_research_review_summarizes_candidates_and_missed_movers(tmp_path,
                 "symbol": "000002",
                 "name": "二号股份",
                 "research_tier": "B2",
+                "action_bucket": "补票-B2强主题",
+                "risk_level": "中",
+                "risk_tags": "观察补票",
                 "research_score": 55,
                 "setup_phase": "观察补票",
                 "stage": "trend_pullback",
@@ -66,16 +72,38 @@ def test_build_research_review_summarizes_candidates_and_missed_movers(tmp_path,
 
     assert review.closed_signal_dates == ["2026-06-12"]
     assert set(review.details["symbol"]) == {"000001", "000002"}
+    assert "model_bucket" in review.details.columns
+    assert "action_bucket" in review.details.columns
+    assert "preferred_ret" in review.details.columns
+    assert "risk_tags" in review.details.columns
+    buckets = dict(zip(review.details["symbol"], review.details["model_bucket"]))
+    assert buckets["000001"] == "A1/A2_early_setup"
+    assert buckets["000002"] == "B_watchlist"
+    preferred = review.details[review.details["symbol"] == "000001"].iloc[0]
+    assert preferred["evaluation_horizon"] == "3d_5d"
+    assert preferred["preferred_horizon"] == "5d"
+    assert preferred["outcome_label"] == "hit"
     a2 = review.by_tier[review.by_tier["tier"] == "A2"].iloc[0]
     assert a2["count"] == 1
     assert a2["avg_ret"] == pytest.approx(0.1)
+    early_bucket = review.by_model_bucket[review.by_model_bucket["model_bucket"] == "A1/A2_early_setup"].iloc[0]
+    assert early_bucket["count"] == 1
+    assert not review.by_action_bucket.empty
+    assert "主攻-A2启动确认" in set(review.by_action_bucket["action_bucket"])
     a2_horizon = review.by_tier_horizon[review.by_tier_horizon["tier"] == "A2"]
     assert set(a2_horizon["horizon"]) == {"1d", "3d", "5d"}
     assert a2_horizon[a2_horizon["horizon"] == "5d"]["avg_ret"].iloc[0] == pytest.approx(0.5)
+    model_horizon = review.by_model_bucket_horizon[
+        review.by_model_bucket_horizon["model_bucket"] == "A1/A2_early_setup"
+    ]
+    assert set(model_horizon["horizon"]) == {"1d", "3d", "5d"}
     capture = review.market_capture.iloc[0]
     assert capture["top_in_candidates"] == 0
     assert review.missed_movers.iloc[0]["symbol"] == "000003"
     assert review.missed_movers.iloc[0]["miss_reason"] == "形态未入池"
+    assert review.missed_movers.iloc[0]["model_bucket"] in {"miss_learnable", "miss_event_only"}
+    assert "is_learnable" in review.missed_movers.columns
+    assert not review.miss_learnability.empty
     assert review.missed_movers.iloc[0]["risk_level"] in {"中", "中高", "高"}
     assert "未做公告风险核验" in review.missed_movers.iloc[0]["risk_tags"]
 
@@ -85,6 +113,9 @@ def test_build_research_review_summarizes_candidates_and_missed_movers(tmp_path,
     assert details_path.exists()
     assert summary_path.exists()
     markdown = markdown_path.read_text(encoding="utf-8")
+    assert "模型桶 1/3/5 日表现" in markdown
+    assert "动作分组首日表现" in markdown
+    assert "亏损样本归因" in markdown
     assert "明显错过样本和风险提示" in markdown
     assert "risk_tags" in markdown
 

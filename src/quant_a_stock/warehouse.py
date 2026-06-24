@@ -46,6 +46,8 @@ WAREHOUSE_TABLES = [
     "stock_universe",
     "daily_candles",
     "daily_candles_index",
+    "candidate_lifecycles",
+    "candidate_lifecycle_daily",
 ]
 
 
@@ -386,6 +388,55 @@ def sync_daily_candles_to_warehouse(
     )
 
 
+def sync_candidate_lifecycles_to_warehouse(
+    *,
+    lifecycles: pd.DataFrame,
+    daily: pd.DataFrame,
+    target_date: str,
+    warehouse_dir: Path | None = None,
+    run_id: str | None = None,
+) -> WarehouseIngestResult:
+    root = warehouse_root(warehouse_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    parquet = parquet_root(warehouse_dir)
+    parquet.mkdir(parents=True, exist_ok=True)
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    resolved_run_id = run_id or f"candidate_lifecycle_{target_date}_{stamp}"
+    ingested_at = datetime.now().isoformat(timespec="seconds")
+    rows = []
+
+    for table_name, frame in (
+        ("candidate_lifecycles", lifecycles),
+        ("candidate_lifecycle_daily", daily),
+    ):
+        output = frame.copy()
+        output["warehouse_run_id"] = resolved_run_id
+        output["warehouse_target_date"] = target_date
+        output["warehouse_source_path"] = "generated:candidate_lifecycle"
+        output["warehouse_ingested_at"] = ingested_at
+        _write_parquet(
+            output,
+            table_name,
+            target_date=target_date,
+            run_id=resolved_run_id,
+            warehouse_dir=warehouse_dir,
+        )
+        rows.append(_report_row(resolved_run_id, target_date, table_name, None, len(output), "ingested", ingested_at))
+
+    ingested = pd.DataFrame(rows)
+    refresh_warehouse_views(warehouse_dir=warehouse_dir)
+    status = warehouse_status(warehouse_dir=warehouse_dir)
+    return WarehouseIngestResult(
+        run_id=resolved_run_id,
+        target_date=target_date,
+        db_path=warehouse_db_path(warehouse_dir),
+        parquet_root=parquet,
+        ingested=ingested,
+        status=status,
+    )
+
+
 def refresh_warehouse_views(*, warehouse_dir: Path | None = None) -> None:
     root = warehouse_root(warehouse_dir)
     db_path = warehouse_db_path(warehouse_dir)
@@ -439,11 +490,17 @@ def warehouse_review(
 ) -> dict[str, pd.DataFrame]:
     db_path = warehouse_db_path(warehouse_dir)
     if not db_path.exists():
-        return {"tier": pd.DataFrame(), "miss_risk": pd.DataFrame(), "reports": pd.DataFrame()}
+        return {
+            "tier": pd.DataFrame(),
+            "bucket": pd.DataFrame(),
+            "miss_risk": pd.DataFrame(),
+            "reports": pd.DataFrame(),
+        }
     where, params = _date_filter("signal_date", since=since, until=until)
     with duckdb.connect(str(db_path), read_only=True) as conn:
         views = _warehouse_views(conn)
         tier = pd.DataFrame()
+        bucket = pd.DataFrame()
         miss_risk = pd.DataFrame()
         reports = pd.DataFrame()
         if "research_review_details" in views:
@@ -482,6 +539,58 @@ def warehouse_review(
                 """,
                 params,
             ).df()
+            bucket_expr = (
+                """
+                COALESCE(
+                    model_bucket,
+                    CASE
+                        WHEN tier IN ('A', 'A1', 'A2') THEN 'A1/A2_early_setup'
+                        WHEN tier = 'A3' THEN 'A3_trend_follow'
+                        WHEN tier IN ('B', 'B1', 'B2') THEN 'B_watchlist'
+                        ELSE 'other'
+                    END
+                )
+                """
+                if "model_bucket" in columns
+                else """
+                CASE
+                    WHEN tier IN ('A', 'A1', 'A2') THEN 'A1/A2_early_setup'
+                    WHEN tier = 'A3' THEN 'A3_trend_follow'
+                    WHEN tier IN ('B', 'B1', 'B2') THEN 'B_watchlist'
+                    ELSE 'other'
+                END
+                """
+            )
+            bucket = conn.execute(
+                f"""
+                WITH normalized AS (
+                    SELECT
+                        {bucket_expr} AS model_bucket,
+                        next_ret,
+                        {"ret_3d" if "ret_3d" in columns else "NULL"} AS ret_3d
+                    FROM research_review_details
+                    {where}
+                )
+                SELECT
+                    model_bucket,
+                    COUNT(*) AS count,
+                    AVG(next_ret) AS avg_ret_1d,
+                    MEDIAN(next_ret) AS median_ret_1d,
+                    AVG(CASE WHEN next_ret IS NULL THEN NULL WHEN next_ret > 0 THEN 1 ELSE 0 END) AS win_rate_1d,
+                    {win_rate_3d_expr} AS win_rate_3d,
+                    {avg_ret_3d_expr} AS avg_ret_3d
+                FROM normalized
+                GROUP BY model_bucket
+                ORDER BY
+                    CASE model_bucket
+                        WHEN 'A1/A2_early_setup' THEN 1
+                        WHEN 'A3_trend_follow' THEN 2
+                        WHEN 'B_watchlist' THEN 3
+                        ELSE 9
+                    END
+                """,
+                params,
+            ).df()
         if "missed_opportunities" in views:
             miss_where, miss_params = _date_filter("signal_date", since=since, until=until)
             miss_risk = conn.execute(
@@ -509,7 +618,7 @@ def warehouse_review(
                 """,
                 report_params,
             ).df()
-    return {"tier": tier, "miss_risk": miss_risk, "reports": reports}
+    return {"tier": tier, "bucket": bucket, "miss_risk": miss_risk, "reports": reports}
 
 
 def _latest_file(root: Path, pattern: str) -> Path | None:

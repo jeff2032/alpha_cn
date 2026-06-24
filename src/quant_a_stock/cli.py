@@ -20,6 +20,8 @@ from quant_a_stock.config import DEFAULT_PATHS
 from quant_a_stock.data.akshare_client import fetch_daily
 from quant_a_stock.data.cache import daily_cache_path, load_daily_cache, save_daily_cache
 from quant_a_stock.data.calendar import resolve_cached_trading_date
+from quant_a_stock.data_lifecycle import build_data_loop_status
+from quant_a_stock.data_lifecycle import build_retention_plan
 from quant_a_stock.data.universe import fetch_stock_universe
 from quant_a_stock.data.universe import filter_universe
 from quant_a_stock.data.universe import load_universe_file
@@ -30,6 +32,8 @@ from quant_a_stock.research.candidates import fetch_company_profiles
 from quant_a_stock.research.candidates import fetch_risk_notices
 from quant_a_stock.research.candidates import load_cache_listing_info
 from quant_a_stock.research.candidates import load_report
+from quant_a_stock.research.lifecycle import build_candidate_lifecycle_tracking
+from quant_a_stock.research.lifecycle import save_candidate_lifecycle_reports
 from quant_a_stock.research.report import save_research_candidates_markdown
 from quant_a_stock.research.review import build_research_review
 from quant_a_stock.research.review import save_research_review_reports
@@ -54,6 +58,7 @@ from quant_a_stock.strategy.registry import get_strategy
 from quant_a_stock.strategy.sma_trend_filter import STRATEGY_NAME
 from quant_a_stock.warehouse import backfill_research_snapshots
 from quant_a_stock.warehouse import ingest_latest_reports
+from quant_a_stock.warehouse import sync_candidate_lifecycles_to_warehouse
 from quant_a_stock.warehouse import sync_daily_candles_to_warehouse
 from quant_a_stock.warehouse import sync_stock_universe_to_warehouse
 from quant_a_stock.warehouse import warehouse_review as build_warehouse_review
@@ -589,14 +594,17 @@ def sync_stock_universe(args: argparse.Namespace) -> None:
 def cache_status(args: argparse.Namespace) -> None:
     if args.symbols:
         universe = pd.DataFrame({"symbol": args.symbols, "name": ""})
+        markets = None
     elif args.universe_file:
         universe = load_universe_file(Path(args.universe_file))
+        markets = _parse_markets(args.markets)
     else:
         universe = pd.DataFrame({"symbol": _cached_symbols(), "name": ""})
+        markets = _parse_markets(args.markets)
 
     universe = filter_universe(
         universe,
-        markets=_parse_markets(args.markets),
+        markets=markets,
         exclude_st=not args.include_st,
     )
     rows = []
@@ -638,14 +646,17 @@ def cache_status(args: argparse.Namespace) -> None:
 def cache_date_status(args: argparse.Namespace) -> None:
     if args.symbols:
         universe = pd.DataFrame({"symbol": args.symbols, "name": ""})
+        markets = None
     elif args.universe_file:
         universe = load_universe_file(Path(args.universe_file))
+        markets = _parse_markets(args.markets)
     else:
         universe = pd.DataFrame({"symbol": _cached_symbols(), "name": ""})
+        markets = _parse_markets(args.markets)
 
     universe = filter_universe(
         universe,
-        markets=_parse_markets(args.markets),
+        markets=markets,
         exclude_st=not args.include_st,
     )
     if args.exact_target_date and args.target_date:
@@ -1353,6 +1364,60 @@ def research_review(args: argparse.Namespace) -> None:
     print(f"汇总 CSV: {summary_path}")
 
 
+def track_candidates(args: argparse.Namespace) -> None:
+    resolved_until = _resolve_trading_date(args.until) if args.until else None
+    if args.until and resolved_until is not None:
+        _announce_trading_date_resolution(args.until, resolved_until)
+    until = resolved_until.date().isoformat() if resolved_until is not None else None
+    tracking_kwargs = {}
+    if args.snapshot_root:
+        tracking_kwargs["snapshot_root"] = Path(args.snapshot_root)
+    if args.cache_dir:
+        tracking_kwargs["cache_dir"] = Path(args.cache_dir)
+    if args.universe_file:
+        tracking_kwargs["universe_file"] = Path(args.universe_file)
+    tracking = build_candidate_lifecycle_tracking(
+        since=args.since,
+        until=until,
+        strategy_version=args.strategy_version,
+        gap_trade_days=args.gap_trade_days,
+        **tracking_kwargs,
+    )
+    lifecycle_path, daily_path, md_path = save_candidate_lifecycle_reports(tracking, top=args.top)
+    print(f"生命周期目标日期: {tracking.target_date or '无'}")
+    print(f"生命周期数量: {len(tracking.lifecycles)}")
+    print(f"每日状态数量: {len(tracking.daily)}")
+    print(f"生命周期 CSV: {lifecycle_path}")
+    print(f"每日状态 CSV: {daily_path}")
+    print(f"中文跟踪报告: {md_path}")
+    if not tracking.summary.empty:
+        display = tracking.summary.rename(
+            columns={
+                "first_action_bucket": "入池分组",
+                "count": "样本",
+                "active_count": "仍跟踪",
+                "hit_count": "命中",
+                "strong_hit_count": "强命中",
+                "failed_count": "失败",
+                "avg_ret_3d": "3日均值",
+                "avg_ret_5d": "5日均值",
+                "avg_ret_10d": "10日均值",
+                "avg_high_5d": "5日最大浮盈",
+                "avg_low_5d": "5日最大回撤",
+            }
+        )
+        print("分组生命周期表现:")
+        print(display.to_string(index=False))
+    if args.write_warehouse:
+        result = sync_candidate_lifecycles_to_warehouse(
+            lifecycles=tracking.lifecycles,
+            daily=tracking.daily,
+            target_date=tracking.target_date,
+            warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
+            run_id=args.run_id,
+        )
+        print(f"已写入仓库: {result.db_path}")
+
 def warehouse_ingest(args: argparse.Namespace) -> None:
     resolved_target_date = _resolve_trading_date(args.target_date)
     _announce_trading_date_resolution(args.target_date, resolved_target_date)
@@ -1392,6 +1457,78 @@ def warehouse_status(args: argparse.Namespace) -> None:
         print("研究仓库还没有初始化。")
         return
     print(status.to_string(index=False))
+
+
+def data_loop_status(args: argparse.Namespace) -> None:
+    target_date = None
+    if args.target_date:
+        resolved_target_date = _resolve_trading_date(args.target_date)
+        _announce_trading_date_resolution(args.target_date, resolved_target_date)
+        target_date = resolved_target_date.date().isoformat()
+    layers, checks = build_data_loop_status(
+        target_date=target_date,
+        plan_date=args.plan_date,
+        warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
+        obsidian_root=Path(args.obsidian_root) if args.obsidian_root else None,
+    )
+    print("数据层状态:")
+    display_layers = layers.rename(
+        columns={
+            "layer": "层",
+            "role": "角色",
+            "path": "路径",
+            "exists": "存在",
+            "files": "文件数",
+            "mb": "MB",
+            "newest": "最新修改",
+            "retention_policy": "保留策略",
+            "note": "说明",
+        }
+    )
+    print(display_layers[["层", "角色", "存在", "文件数", "MB", "最新修改", "保留策略"]].to_string(index=False))
+    print("")
+    print("闭环检查:")
+    display_checks = checks.rename(
+        columns={
+            "check": "检查项",
+            "status": "状态",
+            "detail": "说明",
+            "target_date": "目标日",
+        }
+    )
+    print(display_checks[["检查项", "状态", "目标日", "说明"]].to_string(index=False))
+
+
+def data_retention_plan(args: argparse.Namespace) -> None:
+    plan = build_retention_plan(
+        reports_days=args.reports_days,
+        ops_reports_days=args.ops_reports_days,
+        logs_days=args.logs_days,
+        snapshots_days=args.snapshots_days,
+    )
+    print("数据保留/清理预案（dry-run，不会删除文件）:")
+    if plan.empty:
+        print("没有命中可清理项。")
+        return
+    display = plan.rename(
+        columns={
+            "action": "动作",
+            "layer": "层",
+            "path": "路径",
+            "files": "文件数",
+            "mb": "MB",
+            "last_modified": "最后修改",
+            "reason": "原因",
+        }
+    )
+    summary = display.groupby(["层", "动作"], dropna=False).agg({"文件数": "sum", "MB": "sum"}).reset_index()
+    print("汇总:")
+    print(summary.to_string(index=False))
+    print("")
+    print("明细:")
+    print(display.head(args.top).to_string(index=False))
+    if len(display) > args.top:
+        print(f"还有 {len(display) - args.top} 项未展开。")
 
 
 def warehouse_backfill_snapshots(args: argparse.Namespace) -> None:
@@ -1489,11 +1626,15 @@ def warehouse_review(args: argparse.Namespace) -> None:
         warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
     )
     tier = review["tier"]
+    bucket = review.get("bucket", pd.DataFrame())
     miss_risk = review["miss_risk"]
     reports = review["reports"]
-    if tier.empty and miss_risk.empty and reports.empty:
+    if tier.empty and bucket.empty and miss_risk.empty and reports.empty:
         print("研究仓库还没有可复盘的数据。")
         return
+    if not bucket.empty:
+        print("模型桶表现:")
+        print(bucket.to_string(index=False))
     if not tier.empty:
         print("分层表现:")
         print(tier.to_string(index=False))
@@ -1778,6 +1919,20 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--universe-file", default=None)
     review.set_defaults(func=research_review)
 
+    tracking = subparsers.add_parser("track-candidates", help="生成 A2/A3/B2 候选生命周期跟踪报告并写入仓库")
+    tracking.add_argument("--since", default=None)
+    tracking.add_argument("--until", default=None)
+    tracking.add_argument("--snapshot-root", default=None)
+    tracking.add_argument("--cache-dir", default=None)
+    tracking.add_argument("--universe-file", default="data/universe/a_stock.csv")
+    tracking.add_argument("--warehouse-dir", default=None)
+    tracking.add_argument("--run-id", default=None)
+    tracking.add_argument("--strategy-version", default="research_candidates_v1")
+    tracking.add_argument("--gap-trade-days", type=int, default=3)
+    tracking.add_argument("--top", type=int, default=50)
+    tracking.add_argument("--write-warehouse", action=argparse.BooleanOptionalAction, default=True)
+    tracking.set_defaults(func=track_candidates)
+
     warehouse_ingest_parser = subparsers.add_parser("warehouse-ingest", help="把最新研究报告写入 DuckDB + Parquet 仓库")
     warehouse_ingest_parser.add_argument("--target-date", default=None)
     warehouse_ingest_parser.add_argument("--reports-dir", default=None)
@@ -1788,6 +1943,21 @@ def build_parser() -> argparse.ArgumentParser:
     warehouse_status_parser = subparsers.add_parser("warehouse-status", help="查看研究仓库表和日期覆盖情况")
     warehouse_status_parser.add_argument("--warehouse-dir", default=None)
     warehouse_status_parser.set_defaults(func=warehouse_status)
+
+    data_loop_parser = subparsers.add_parser("data-loop-status", help="查看数据闭环分层、仓库覆盖和 Obsidian 同步状态")
+    data_loop_parser.add_argument("--target-date", default=None)
+    data_loop_parser.add_argument("--plan-date", default=None)
+    data_loop_parser.add_argument("--warehouse-dir", default=None)
+    data_loop_parser.add_argument("--obsidian-root", default=None)
+    data_loop_parser.set_defaults(func=data_loop_status)
+
+    retention_parser = subparsers.add_parser("data-retention-plan", help="生成数据保留/清理 dry-run 预案")
+    retention_parser.add_argument("--reports-days", type=int, default=14)
+    retention_parser.add_argument("--ops-reports-days", type=int, default=60)
+    retention_parser.add_argument("--logs-days", type=int, default=30)
+    retention_parser.add_argument("--snapshots-days", type=int, default=30)
+    retention_parser.add_argument("--top", type=int, default=50)
+    retention_parser.set_defaults(func=data_retention_plan)
 
     warehouse_backfill_parser = subparsers.add_parser("warehouse-backfill-snapshots", help="把历史研究快照回填到仓库")
     warehouse_backfill_parser.add_argument("--since", default=None)

@@ -215,6 +215,146 @@ function Copy-LatestMarkdownReport {
     Write-Step "Obsidian export: $($source.Name) -> $destination"
 }
 
+function Get-LatestReportFile {
+    param([string]$Pattern)
+
+    $reportsDir = Join-Path $ProjectRoot "reports"
+    return Get-ChildItem -LiteralPath $reportsDir -Filter $Pattern |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+}
+
+function Format-CandidateTable {
+    param([object[]]$Rows)
+
+    $items = @($Rows)
+    if ($items.Count -eq 0) {
+        return "- 暂无"
+    }
+
+    $lines = @(
+        "| 代码 | 名称 | 分层 | 研究分 | 主题簇 | 阶段 | 节奏 | 扣分 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |"
+    )
+    foreach ($row in $items) {
+        $score = ""
+        $penalty = ""
+        try { $score = ([math]::Round([double]$row.research_score, 2)).ToString([Globalization.CultureInfo]::InvariantCulture) } catch {}
+        try { $penalty = ([math]::Round([double]$row.total_penalty, 2)).ToString([Globalization.CultureInfo]::InvariantCulture) } catch {}
+        $lines += "| $($row.symbol) | $($row.name) | $($row.research_tier) | $score | $($row.theme_cluster) | $($row.stage) | $($row.setup_phase) | $penalty |"
+    }
+    return ($lines -join "`r`n")
+}
+
+function Format-ThemeTable {
+    param([object[]]$Rows)
+
+    $items = @($Rows)
+    if ($items.Count -eq 0) {
+        return "- 暂无"
+    }
+
+    $lines = @(
+        "| 主题 | 候选数 | 涨停数 | 强势数 | 主题分 |",
+        "| --- | --- | --- | --- | --- |"
+    )
+    foreach ($row in $items) {
+        $score = ""
+        try { $score = ([math]::Round([double]$row.theme_score, 2)).ToString([Globalization.CultureInfo]::InvariantCulture) } catch {}
+        $lines += "| $($row.theme) | $($row.stock_count) | $($row.limit_count) | $($row.strong_count) | $score |"
+    }
+    return ($lines -join "`r`n")
+}
+
+function New-PreMarketPlanReport {
+    param(
+        [string]$TargetDir,
+        [string]$ReportDate,
+        [string]$DataDate
+    )
+
+    $dateStamp = $DataDate -replace "-", ""
+    $summary = Get-LatestReportFile -Pattern "daily_research_summary_${dateStamp}_*.md"
+    $candidateCsv = Get-LatestReportFile -Pattern "daily_research_candidates_${dateStamp}_*.csv"
+    if ($null -eq $candidateCsv) {
+        $candidateCsv = Get-LatestReportFile -Pattern "research_candidates_${dateStamp}_*.csv"
+    }
+    $themeCsv = Get-LatestReportFile -Pattern "market_theme_${dateStamp}_*.csv"
+
+    $marketLine = "- 市场温度：待查看当天复盘"
+    $actionLine = "- 操作口径：先看候选分层，再结合开盘强弱确认"
+    if ($summary) {
+        $summaryLines = Get-Content -LiteralPath $summary.FullName
+        $foundMarket = $summaryLines | Where-Object { $_ -like "- 市场温度：*" } | Select-Object -First 1
+        $foundAction = $summaryLines | Where-Object { $_ -like "- 操作口径：*" } | Select-Object -First 1
+        if ($foundMarket) { $marketLine = $foundMarket }
+        if ($foundAction) { $actionLine = $foundAction }
+    }
+
+    $themes = @()
+    if ($themeCsv) {
+        $themes = @(Import-Csv -LiteralPath $themeCsv.FullName | Select-Object -First 10)
+    }
+
+    $candidates = @()
+    if ($candidateCsv) {
+        $candidates = @(Import-Csv -LiteralPath $candidateCsv.FullName)
+    }
+    $a12 = @($candidates | Where-Object { $_.research_tier -in @("A1", "A2") } | Select-Object -First 12)
+    $a3 = @($candidates | Where-Object { $_.research_tier -eq "A3" } | Select-Object -First 18)
+    $watch = @($candidates | Where-Object { $_.research_tier -in @("B1", "B2") } | Select-Object -First 12)
+
+    $planPath = Join-Path $TargetDir "$ReportDate.md"
+    $dataReviewLink = "../每日复盘/$DataDate/每日推荐复盘.md"
+    $candidateLink = "../每日复盘/$DataDate/最终候选池.md"
+
+    @"
+# 开盘前推荐计划
+
+计划日期：$ReportDate
+数据截至：$DataDate
+
+这份是次日开盘前计划，不是 $DataDate 当天复盘。完整当天复盘见：[$DataDate 每日推荐复盘]($dataReviewLink)，候选明细见：[$DataDate 最终候选池]($candidateLink)。
+
+## 市场口径
+
+$marketLine
+$actionLine
+
+## 重点主线
+
+$(Format-ThemeTable -Rows $themes)
+
+## A1/A2 潜伏与启动
+
+看 3-5 个交易日是否转强，不用单日涨跌否定。
+
+$(Format-CandidateTable -Rows $a12)
+
+## A3 主线趋势
+
+看 1-2 个交易日趋势延续和回踩不破，避免高开过热追买。
+
+$(Format-CandidateTable -Rows $a3)
+
+## B1/B2 观察补票
+
+只做人工复盘和主线补票，不直接当作买点。
+
+$(Format-CandidateTable -Rows $watch)
+
+## 风险口径
+
+- 高开过多、放量滞涨、冲高回落的票先观察，不追。
+- 有公告风险、减持、问询、低流动性或疑似复权/特殊事件的样本，只做复盘，不纳入常规决策。
+- A3 当前弹性最好，但波动也最大；A1/A2 更偏潜伏，需要给 3-5 日验证窗口。
+
+这份文档只做研究复盘，不构成买卖建议。
+"@ | Set-Content -LiteralPath $planPath -Encoding UTF8
+
+    Write-Step "Obsidian export: created pre-market plan -> $planPath"
+}
+
 function Export-DailyReportsToObsidian {
     param(
         [string]$ReportDate,
@@ -235,36 +375,45 @@ function Export-DailyReportsToObsidian {
     }
 
     $exportRoot = Join-Path $ObsidianVaultPath $ObsidianExportDir
-    $targetDir = Join-Path $exportRoot $ReportDate
-    New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+    $reviewRoot = Join-Path $exportRoot "每日复盘"
+    $planRoot = Join-Path $exportRoot "开盘计划"
+    $strategyRoot = Join-Path $exportRoot "策略迭代"
+    New-Item -ItemType Directory -Force -Path $reviewRoot, $planRoot, $strategyRoot | Out-Null
+
+    $dateStamp = $DataDate -replace "-", ""
+    $dataDir = Join-Path $reviewRoot $DataDate
+    New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
 
     $indexPath = Join-Path $exportRoot "README.md"
-    if (-not (Test-Path -LiteralPath $indexPath)) {
-        @"
+    @"
 # 中国A股荐股
 
-这里由 alpha_cn 每日研究任务自动同步 Markdown 报告。
+这个目录由 alpha_cn 研究流程同步生成。
 
-每个计划日期一个目录，重点看：
+## 怎么看
 
-- 每日推荐复盘.md
-- 最终候选池.md
-- 市场主线.md
-- 情绪观察.md
-- 策略反思.md
+- `开盘计划/YYYY-MM-DD.md`：早上最先看的一页纸，给当天开盘前使用。
+- `每日复盘/YYYY-MM-DD/`：收盘后按数据日归档的完整复盘材料。
+- `策略迭代/`：长期沉淀规则复盘、miss 样本反推和风险过滤。
+
+## 日期口径
+
+- 每日复盘日期 = 数据截至日期，例如 `每日复盘/2026-06-22/`。
+- 开盘计划日期 = 准备交易的日期，例如 `开盘计划/2026-06-23.md`，内容基于上一交易日数据。
 "@ | Set-Content -LiteralPath $indexPath -Encoding UTF8
-    }
 
-    Copy-LatestMarkdownReport -Pattern "daily_research_summary_*.md" -DestinationName "每日推荐复盘.md" -TargetDir $targetDir
-    Copy-LatestMarkdownReport -Pattern "research_candidates_*.md" -DestinationName "最终候选池.md" -TargetDir $targetDir
-    Copy-LatestMarkdownReport -Pattern "market_theme_*.md" -DestinationName "市场主线.md" -TargetDir $targetDir
-    Copy-LatestMarkdownReport -Pattern "sentiment_watchlist_*.md" -DestinationName "情绪观察.md" -TargetDir $targetDir
-    $reflectionPath = Join-Path $targetDir "策略反思.md"
+    Copy-LatestMarkdownReport -Pattern "daily_research_summary_${dateStamp}_*.md" -DestinationName "每日推荐复盘.md" -TargetDir $dataDir
+    Copy-LatestMarkdownReport -Pattern "research_candidates_${dateStamp}_*.md" -DestinationName "最终候选池.md" -TargetDir $dataDir
+    Copy-LatestMarkdownReport -Pattern "market_theme_${dateStamp}_*.md" -DestinationName "市场主线.md" -TargetDir $dataDir
+    Copy-LatestMarkdownReport -Pattern "sentiment_watchlist_${dateStamp}_*.md" -DestinationName "情绪观察.md" -TargetDir $dataDir
+    Copy-LatestMarkdownReport -Pattern "research_review_${dateStamp}_*.md" -DestinationName "滚动复盘.md" -TargetDir $dataDir
+
+    $reflectionPath = Join-Path $dataDir "策略反思.md"
     if (-not (Test-Path -LiteralPath $reflectionPath)) {
         @"
 # 策略反思
 
-计划日期：$ReportDate
+计划日期：$DataDate
 数据截至：$DataDate
 
 ## 今日候选反馈
@@ -284,6 +433,10 @@ function Export-DailyReportsToObsidian {
 - 
 "@ | Set-Content -LiteralPath $reflectionPath -Encoding UTF8
         Write-Step "Obsidian export: created reflection note -> $reflectionPath"
+    }
+
+    if ($ReportDate -ne $DataDate) {
+        New-PreMarketPlanReport -TargetDir $planRoot -ReportDate $ReportDate -DataDate $DataDate
     }
 }
 
@@ -372,6 +525,11 @@ try {
     $staleCount = Get-CsvDataRowCount -Path $stalePath
     Write-Step "Stale symbols: $staleCount"
     if ($staleCount -gt 0) {
+        $effectiveWorkers = $Workers
+        if ($effectiveWorkers -gt 2) {
+            $effectiveWorkers = 2
+            Write-Step "Sina provider is unstable with high parallelism; use effective workers $effectiveWorkers instead of $Workers."
+        }
         Invoke-Quant @(
             "sync-stock-universe",
             "--universe-file", "data/universe/stale.csv",
@@ -379,7 +537,7 @@ try {
             "--stock-provider", "sina",
             "--adjust", "qfq",
             "--sleep", $SleepSeconds.ToString([Globalization.CultureInfo]::InvariantCulture),
-            "--workers", $Workers.ToString([Globalization.CultureInfo]::InvariantCulture),
+            "--workers", $effectiveWorkers.ToString([Globalization.CultureInfo]::InvariantCulture),
             "--incremental",
             "--lookback-days", $LookbackDays.ToString([Globalization.CultureInfo]::InvariantCulture),
             "--no-skip-existing"

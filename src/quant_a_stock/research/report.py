@@ -31,9 +31,11 @@ def save_research_candidates_markdown(
         "",
         "研究分 = 形态分 * 0.65 + 情绪分 * 0.35 + 阶段加分 + 主线加分 + 行业同涨加分 - 扣分项。",
         "",
-        "分层含义：A1=早期潜伏，A2=启动确认，A3=强趋势回踩/再启动，B1=观察主池，B2/C=备选观察。研究分只用于观察池排序，不是买卖信号。",
+        "分层含义：A1=早期潜伏，A2=启动确认，A3=强趋势回踩/再启动，B1=观察主池，B2/C=备选观察。新增 action_bucket 用来区分主攻、补票、观察和风险回避。",
         "",
-        "扣分项包括近 20 日涨幅过热、量能过热、量价同时过热、月线/区间位置偏高、次新样本不足和风险公告命中。",
+        "当前研究口径：主攻 A2 启动确认和风险干净的 A3 趋势延续；A1 低位潜伏先观察；B2 只有命中强主题且风险干净时才进入补票观察。",
+        "",
+        "扣分项包括近 20 日涨幅过热、量能过热、量价同时过热、月线/区间位置偏高、次新样本不足和风险公告命中。risk_level 和 risk_tags 要优先看。",
         "",
         "## 候选分层",
         "",
@@ -46,6 +48,7 @@ def save_research_candidates_markdown(
             "symbol",
             "name",
             "research_tier",
+            "action_bucket",
             "research_score",
             "stage",
             "setup_phase",
@@ -57,6 +60,8 @@ def save_research_candidates_markdown(
             "matched_theme",
             "co_rise_count",
             "total_penalty",
+            "risk_level",
+            "risk_tags",
         ]
         existing_cols = [column for column in display_cols if column in candidates.columns]
         lines.extend(
@@ -65,6 +70,21 @@ def save_research_candidates_markdown(
                 "",
             ]
         )
+
+        for title, bucket_names in [
+            ("主攻池", ["主攻-A2启动确认", "主攻-A3趋势延续"]),
+            ("强主题补票观察池", ["补票-B2强主题"]),
+            ("低位和高波动观察池", ["观察-A1低位潜伏", "观察-A3高波动", "观察-B级候选"]),
+            ("风险优先回避池", ["回避-风险优先"]),
+        ]:
+            if "action_bucket" not in candidates.columns:
+                continue
+            subset = candidates[candidates["action_bucket"].isin(bucket_names)]
+            if subset.empty:
+                continue
+            lines.extend([f"## {title}", ""])
+            lines.append(_markdown_table(subset.loc[:, existing_cols].head(30)))
+            lines.append("")
 
         for tier in ["A1", "A2", "A3", "B1", "B2", "C", "观察"]:
             subset = candidates[candidates["research_tier"] == tier]
@@ -93,6 +113,8 @@ def _candidate_lines(row: pd.Series) -> list[str]:
         f"### {symbol} {name}",
         "",
         f"- 研究分：{row.get('research_score', '')}",
+        f"- 动作分组：{row.get('action_bucket', '') or '未分组'}，风险等级 {row.get('risk_level', '') or '未标注'}",
+        f"- 动作提示：{row.get('upgrade_hint', '') or '观察为主'}",
         f"- 形态：{row.get('stage', '')}，节奏 {row.get('setup_phase', '') or '未标注'}，形态分 {row.get('score', '')}",
         f"- 多周期：月线位置 {row.get('monthly_position_pct', '')}，"
         f"周线趋势 {row.get('weekly_trend_slope_pct', '')}，"
@@ -107,6 +129,7 @@ def _candidate_lines(row: pd.Series) -> list[str]:
         f"量价共振过热 {row.get('combined_overheat_penalty', '')}，"
         f"位置偏高 {row.get('position_overhead_penalty', '')}，"
         f"公告风险 {row.get('risk_notice_penalty', '')}",
+        f"- 风险标签：{row.get('risk_tags', '') or '无明显风险'}",
         f"- 热门关键词：{row.get('top_keywords', '') or '无'}",
     ]
     if str(row.get("stage", "")) in {"trend_pullback", "trend_resume"}:
