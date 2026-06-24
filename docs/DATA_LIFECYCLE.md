@@ -67,7 +67,7 @@
 | --- | --- |
 | `sample_type` | 样本类型，当前候选为 `candidate`，错过样本为 `miss` |
 | `model_bucket` | 模型桶：`A1/A2_early_setup`、`A3_trend_follow`、`B_watchlist`、`miss_learnable`、`miss_event_only` |
-| `action_bucket` | 动作分组：主攻-A2启动确认、主攻-A3趋势延续、补票-B2强主题、观察或回避 |
+| `action_bucket` | 动作分组：主攻-A2启动确认、主攻-A3趋势延续、补票-B2a主线扩散、观察-B2b主题待确认、观察或回避 |
 | `evaluation_horizon` | 评价窗口：潜伏/启动看 `3d_5d`，趋势看 `1d_3d`，观察池看 `observe_1d_3d` |
 | `preferred_horizon` | 当前样本优先评价周期 |
 | `preferred_ret` | 当前样本优先评价周期收益 |
@@ -100,7 +100,9 @@
 
 - `主攻-A2启动确认`
 - `主攻-A3趋势延续`
-- `补票-B2强主题`
+- `补票-B2a主线扩散`
+- `补票-B2强主题`，历史兼容桶名
+- `观察-B2b主题待确认`
 
 如果同一只股票消失不超过 3 个交易日后重新入池，仍算同一轮机会；超过 3 个交易日后回来，建立新的生命周期。A1 低位潜伏先只做观察，不进入主生命周期，除非后续升级到 B2/A2/A3。
 

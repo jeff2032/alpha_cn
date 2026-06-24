@@ -262,7 +262,7 @@ python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --to
 - 主线命中：热门关键词或行业命中当日强主线时加分。
 - 行业同涨：同一行业或同一主线里多只票同时进入形态池时加分。
 - 风险公告：公告标题命中问询、处罚、立案、诉讼、减持、质押、担保逾期等关键词时扣分。
-- 动作分组：`action_bucket` 会把候选拆成主攻、补票、观察和风险回避。当前主攻 A2 启动确认和风险干净的 A3 趋势延续；A1 先观察；B2 只有强主题、风险干净、成交额足够时才进入补票观察。
+- 动作分组：`action_bucket` 会把候选拆成主攻、补票、观察和风险回避。当前主攻 A2 启动确认和风险干净的 A3 趋势延续；A1 先观察；B2 拆成 `补票-B2a主线扩散` 和 `观察-B2b主题待确认`。
 - 风险标签：`risk_level` 和 `risk_tags` 要优先看，公告风险、次新样本不足、成交额偏低、涨幅/量能过热会明显降权。
 
 使用方式建议：
@@ -272,7 +272,7 @@ python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --to
 - 再用 `scan-pattern --pattern trend_pullback_setup` 补充“强趋势回踩/再启动”的 A3 池。
 - 再用 `sentiment-score` 看候选股有没有热度、新闻和概念承接。
 - 最后用 `market-theme` 看候选是否落在当日强主线里。
-- 用 `research-candidates` 汇总成最终观察池，优先复盘 `action_bucket` 里的主攻池和强主题补票池。
+- 用 `research-candidates` 汇总成最终观察池，优先复盘 `action_bucket` 里的主攻池、B2a 主线扩散补票池和 B2b 主题待确认池。
 - 用 `daily-research-summary` 看当天主报告，它会合并市场温度、主题簇、候选持续性和风险提醒。
 - 如果形态很好但情绪极弱，先放观察池；如果情绪很热但形态已经大幅加速，避免追高。
 

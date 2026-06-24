@@ -279,6 +279,7 @@ def save_daily_research_summary_markdown(summary: DailyResearchSummary, *, top: 
         "symbol",
         "name",
         "research_tier",
+        "b2_subtype",
         "action_bucket",
         "research_score",
         "theme_cluster",
@@ -300,7 +301,7 @@ def save_daily_research_summary_markdown(summary: DailyResearchSummary, *, top: 
         "score_delta",
     ]
     action_core = candidates[
-        candidates["action_bucket"].isin(["主攻-A2启动确认", "主攻-A3趋势延续", "补票-B2强主题"])
+        candidates["action_bucket"].isin(["主攻-A2启动确认", "主攻-A3趋势延续", "补票-B2a主线扩散", "补票-B2强主题"])
     ].head(top)
     if action_core.empty:
         action_core = candidates[candidates["research_tier"].isin(["A2", "A3", "B1", "B2"])].head(top)
@@ -316,7 +317,7 @@ def save_daily_research_summary_markdown(summary: DailyResearchSummary, *, top: 
         for _, row in action_core.iterrows():
             lines.extend(_candidate_reason_lines(row))
 
-    core_buckets = ["主攻-A2启动确认", "主攻-A3趋势延续", "补票-B2强主题"]
+    core_buckets = ["主攻-A2启动确认", "主攻-A3趋势延续", "补票-B2a主线扩散", "补票-B2强主题"]
     watch = candidates[
         (~candidates["action_bucket"].isin(core_buckets))
         | (candidates["total_penalty"].fillna(0) > 0)
@@ -332,7 +333,7 @@ def save_daily_research_summary_markdown(summary: DailyResearchSummary, *, top: 
 def _candidate_bucket_sections(candidates: pd.DataFrame, *, top: int) -> list[tuple[str, str, pd.DataFrame]]:
     early = candidates[candidates["action_bucket"].isin(["观察-A1低位潜伏", "主攻-A2启动确认"])].head(top)
     trend = candidates[candidates["action_bucket"].isin(["主攻-A3趋势延续", "观察-A3高波动"])].head(top)
-    watch = candidates[candidates["action_bucket"].isin(["补票-B2强主题", "观察-B级候选"])].head(top)
+    watch = candidates[candidates["action_bucket"].isin(["补票-B2a主线扩散", "补票-B2强主题", "观察-B2b主题待确认", "观察-B级候选"])].head(top)
     return [
         (
             "A1/A2 低位潜伏与启动池",
@@ -346,7 +347,7 @@ def _candidate_bucket_sections(candidates: pd.DataFrame, *, top: int) -> list[tu
         ),
         (
             "B1/B2 观察补票池",
-            "只有强主题、风险干净、成交额足够的 B2 才进入补票观察，不直接当作买点。",
+            "B2a 是主线扩散补票观察，B2b 只是主题待确认；都不直接当作买点。",
             watch,
         ),
     ]

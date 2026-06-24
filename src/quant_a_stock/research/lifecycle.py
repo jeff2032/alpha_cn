@@ -14,21 +14,29 @@ from quant_a_stock.data.universe import load_universe_file
 from quant_a_stock.research.snapshot import SNAPSHOT_ROOT
 
 
-TRACKED_ACTION_BUCKETS = ("主攻-A2启动确认", "主攻-A3趋势延续", "补票-B2强主题")
+TRACKED_ACTION_BUCKETS = (
+    "主攻-A2启动确认",
+    "主攻-A3趋势延续",
+    "补票-B2a主线扩散",
+    "补票-B2强主题",
+    "观察-B2b主题待确认",
+)
 TRACKED_TIERS = ("A2", "A3", "B2")
 FORWARD_HORIZONS = (1, 3, 5, 10, 15)
 DEFAULT_GAP_TRADE_DAYS = 3
 DEFAULT_STRATEGY_VERSION = "research_candidates_v1"
 
 ACTION_STAGE_RANK = {
-    "补票-B2强主题": 1,
-    "主攻-A2启动确认": 2,
-    "主攻-A3趋势延续": 3,
+    "观察-B2b主题待确认": 1,
+    "补票-B2强主题": 2,
+    "补票-B2a主线扩散": 2,
+    "主攻-A2启动确认": 3,
+    "主攻-A3趋势延续": 4,
 }
 TIER_STAGE_RANK = {
     "B2": 1,
-    "A2": 2,
-    "A3": 3,
+    "A2": 3,
+    "A3": 4,
 }
 
 
@@ -935,6 +943,8 @@ def _first_text(*values: object) -> str:
 def _bucket_code(bucket_or_tier: str, tier: str) -> str:
     mapping = {
         "补票-B2强主题": "B2",
+        "补票-B2a主线扩散": "B2a",
+        "观察-B2b主题待确认": "B2b",
         "主攻-A2启动确认": "A2",
         "主攻-A3趋势延续": "A3",
     }

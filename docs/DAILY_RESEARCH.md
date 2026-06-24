@@ -92,7 +92,7 @@ python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --to
 python -m quant_a_stock.cli research-review --since 2026-05-29 --until 2026-06-12 --top-movers 20
 ```
 
-这个报告会把近两周快照里的候选池和 1/3/5 个交易日表现对齐，重点看主攻池、补票池、观察池各自是否有效，以及全市场次日强票有没有被候选池捕获。A2 主要看 3/5 日是否从启动确认转强，A3 主要看 1/3 日趋势是否延续，B2 只看是否值得升级为强主题补票观察。
+这个报告会把近两周快照里的候选池和 1/3/5 个交易日表现对齐，重点看主攻池、B2a 补票池、B2b 观察池各自是否有效，以及全市场次日强票有没有被候选池捕获。A2 主要看 3/5 日是否从启动确认转强，A3 主要看 1/3 日趋势是否延续，B2a 看主线扩散能否兑现，B2b 看是否能升级。
 
 生成 A2/A3/B2 候选生命周期跟踪：
 
@@ -211,7 +211,8 @@ python -m quant_a_stock.cli research-candidates --target-date 目标日期 --top
 
 - `action_bucket = 主攻-A2启动确认`：启动确认主攻池，看突破后承接、回踩不破和量能不过热。
 - `action_bucket = 主攻-A3趋势延续`：趋势主攻池，只看分歧低吸或强承接，不追高开加速。
-- `action_bucket = 补票-B2强主题`：强主题补票池，必须再核验公告风险和盘中承接。
+- `action_bucket = 补票-B2a主线扩散`：主线扩散补票池，必须再核验公告风险和盘中承接。
+- `action_bucket = 观察-B2b主题待确认`：有主题线索但确认不足，只观察是否补量、补承接或升级。
 - `research_score` 靠前，且 `risk_level` 为低或中。
 - `matched_theme` 命中当天强主线，或同主题/行业候选数量明显靠前。
 - `total_penalty` 低，`risk_notice_titles` 为空或只是常规披露。

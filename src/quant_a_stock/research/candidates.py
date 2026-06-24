@@ -327,6 +327,7 @@ def build_research_candidates(
     output["risk_level"] = output.apply(lambda row: _risk_level(row, config), axis=1)
     output["is_risk_clean"] = output["risk_level"].isin(["低", "中"]) & (output["total_penalty"] <= 10)
     output["is_strong_theme_candidate"] = output.apply(_is_strong_theme_candidate, axis=1)
+    output["b2_subtype"] = output.apply(_b2_subtype, axis=1)
     output["action_bucket"] = output.apply(_action_bucket, axis=1)
     output["action_rank"] = output["action_bucket"].map(_action_rank)
     output["upgrade_hint"] = output.apply(_upgrade_hint, axis=1)
@@ -641,6 +642,60 @@ def _is_b2_upgrade_watch(row: pd.Series) -> bool:
     )
 
 
+def _b2_subtype(row: pd.Series) -> str:
+    tier = str(row.get("research_tier", ""))
+    if tier not in {"B1", "B2"} or not _is_risk_clean(row):
+        return ""
+    if _is_b2a_theme_spread(row):
+        return "B2a"
+    if _is_b2b_theme_watch(row):
+        return "B2b"
+    return ""
+
+
+def _is_b2a_theme_spread(row: pd.Series) -> bool:
+    if not _is_b2_upgrade_watch(row):
+        return False
+    stage = str(row.get("stage", "") or "")
+    ret20 = _safe_number(row.get("ret_20_pct", 0.0))
+    volume_ratio = _safe_number(row.get("volume_ratio", 0.0))
+    amount_ma20 = _safe_number(row.get("amount_ma20", 0.0))
+    co_rise_count = _safe_number(row.get("co_rise_count", 0.0))
+    theme_rank = _safe_number(row.get("theme_rank", 99.0), 99.0)
+    core_news_count = _safe_number(row.get("core_news_count", 0.0))
+    sentiment_score = _safe_number(row.get("sentiment_score", 0.0))
+    in_strong_pool = bool(row.get("in_strong_pool", False))
+    in_limit_pool = bool(row.get("in_limit_pool", False))
+
+    confirmations = 0
+    confirmations += int(co_rise_count >= 8 or theme_rank <= 5)
+    confirmations += int(core_news_count > 0 or sentiment_score >= 62)
+    confirmations += int(in_strong_pool or in_limit_pool or volume_ratio >= 1.05)
+    confirmations += int(stage in {"near_breakout", "breakout", "trend_resume", "trend_pullback"})
+
+    return (
+        confirmations >= 3
+        and ret20 <= 0.22
+        and volume_ratio <= 2.8
+        and (amount_ma20 == 0 or amount_ma20 >= 100_000_000)
+    )
+
+
+def _is_b2b_theme_watch(row: pd.Series) -> bool:
+    tier = str(row.get("research_tier", ""))
+    if tier not in {"B1", "B2"} or not _is_risk_clean(row):
+        return False
+    ret20 = _safe_number(row.get("ret_20_pct", 0.0))
+    volume_ratio = _safe_number(row.get("volume_ratio", 0.0))
+    amount_ma20 = _safe_number(row.get("amount_ma20", 0.0))
+    return (
+        _is_strong_theme_candidate(row)
+        and ret20 <= 0.30
+        and volume_ratio <= 3.2
+        and (amount_ma20 == 0 or amount_ma20 >= 80_000_000)
+    )
+
+
 def _action_bucket(row: pd.Series) -> str:
     tier = str(row.get("research_tier", ""))
     risk_level = str(row.get("risk_level", ""))
@@ -651,8 +706,11 @@ def _action_bucket(row: pd.Series) -> str:
         return "主攻-A2启动确认"
     if tier == "A3" and _is_risk_clean(row):
         return "主攻-A3趋势延续"
-    if _is_b2_upgrade_watch(row):
-        return "补票-B2强主题"
+    b2_subtype = str(row.get("b2_subtype", ""))
+    if b2_subtype == "B2a":
+        return "补票-B2a主线扩散"
+    if b2_subtype == "B2b":
+        return "观察-B2b主题待确认"
     if tier == "A1":
         return "观察-A1低位潜伏"
     if tier == "A3":
@@ -666,12 +724,14 @@ def _action_rank(bucket: str) -> int:
     return {
         "主攻-A2启动确认": 1,
         "主攻-A3趋势延续": 2,
+        "补票-B2a主线扩散": 3,
         "补票-B2强主题": 3,
-        "观察-A1低位潜伏": 4,
-        "观察-A3高波动": 5,
-        "观察-B级候选": 6,
-        "观察-低优先级": 7,
-        "回避-风险优先": 8,
+        "观察-B2b主题待确认": 4,
+        "观察-A1低位潜伏": 5,
+        "观察-A3高波动": 6,
+        "观察-B级候选": 7,
+        "观察-低优先级": 8,
+        "回避-风险优先": 9,
     }.get(str(bucket), 9)
 
 
@@ -682,8 +742,12 @@ def _upgrade_hint(row: pd.Series) -> str:
         return "启动确认主攻：看突破后承接、回踩不破和量能不过热。"
     if bucket == "主攻-A3趋势延续":
         return "趋势主攻：只看分歧低吸或强承接，不追高开加速。"
+    if bucket == "补票-B2a主线扩散":
+        return "B2a 主线扩散补涨：主题和资金已确认，先核验公告与盘中承接，再决定是否升级。"
     if bucket == "补票-B2强主题":
-        return "强主题补票：先补公告和盘中承接核验，符合再升级。"
+        return "强主题补票：历史桶名，按 B2a/B2b 复盘拆看。"
+    if bucket == "观察-B2b主题待确认":
+        return "B2b 主题待确认：有主题线索，但资金/形态确认不足，等待放量、承接或升级信号。"
     if bucket == "观察-A1低位潜伏":
         return "低位潜伏观察：等主题、量能和短线资金进一步确认。"
     if bucket == "观察-A3高波动":

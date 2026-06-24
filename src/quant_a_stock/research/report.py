@@ -33,7 +33,7 @@ def save_research_candidates_markdown(
         "",
         "分层含义：A1=早期潜伏，A2=启动确认，A3=强趋势回踩/再启动，B1=观察主池，B2/C=备选观察。新增 action_bucket 用来区分主攻、补票、观察和风险回避。",
         "",
-        "当前研究口径：主攻 A2 启动确认和风险干净的 A3 趋势延续；A1 低位潜伏先观察；B2 只有命中强主题且风险干净时才进入补票观察。",
+        "当前研究口径：主攻 A2 启动确认和风险干净的 A3 趋势延续；A1 低位潜伏先观察；B2 拆成 B2a 主线扩散补涨和 B2b 主题待确认。",
         "",
         "扣分项包括近 20 日涨幅过热、量能过热、量价同时过热、月线/区间位置偏高、次新样本不足和风险公告命中。risk_level 和 risk_tags 要优先看。",
         "",
@@ -48,6 +48,7 @@ def save_research_candidates_markdown(
             "symbol",
             "name",
             "research_tier",
+            "b2_subtype",
             "action_bucket",
             "research_score",
             "stage",
@@ -73,7 +74,8 @@ def save_research_candidates_markdown(
 
         for title, bucket_names in [
             ("主攻池", ["主攻-A2启动确认", "主攻-A3趋势延续"]),
-            ("强主题补票观察池", ["补票-B2强主题"]),
+            ("B2a 主线扩散补票池", ["补票-B2a主线扩散", "补票-B2强主题"]),
+            ("B2b 主题待确认观察池", ["观察-B2b主题待确认"]),
             ("低位和高波动观察池", ["观察-A1低位潜伏", "观察-A3高波动", "观察-B级候选"]),
             ("风险优先回避池", ["回避-风险优先"]),
         ]:

@@ -204,5 +204,54 @@ def test_build_research_candidates_marks_strong_theme_b2_as_replenish_watch() ->
     row = result.iloc[0]
     assert row["research_tier"] == "B2"
     assert bool(row["is_strong_theme_candidate"]) is True
-    assert row["action_bucket"] == "补票-B2强主题"
-    assert "强主题补票" in row["upgrade_hint"]
+    assert row["b2_subtype"] == "B2a"
+    assert row["action_bucket"] == "补票-B2a主线扩散"
+    assert "主线扩散补涨" in row["upgrade_hint"]
+
+
+def test_build_research_candidates_splits_b2b_theme_watch() -> None:
+    scan = pd.DataFrame(
+        [
+            {
+                "symbol": "688002",
+                "timestamp": "2026-06-12",
+                "stage": "pre_breakout",
+                "setup_phase": "低位潜伏观察",
+                "score": 48.0,
+                "volume_ratio": 0.8,
+                "ret_20_pct": 0.08,
+                "ret_60_pct": 0.10,
+                "drawdown_from_high_pct": -0.08,
+                "close_vs_trend_pct": 0.08,
+                "amount_ma20": 300_000_000,
+            }
+        ]
+    )
+    sentiment = pd.DataFrame(
+        [
+            {
+                "symbol": "688002",
+                "name": "待确认科技",
+                "sentiment_score": 40.0,
+                "top_keywords": "半导体、存储芯片",
+            }
+        ]
+    )
+    theme = pd.DataFrame([{"theme": "半导体", "theme_score": 120.0}])
+    profiles = pd.DataFrame(
+        [{"symbol": "688002", "industry": "计算机、通信和其他电子设备制造业", "listing_date": "2020-01-01"}]
+    )
+
+    result = build_research_candidates(
+        scan,
+        sentiment,
+        theme=theme,
+        profiles=profiles,
+        target_date="2026-06-12",
+    )
+
+    row = result.iloc[0]
+    assert row["research_tier"] == "B2"
+    assert row["b2_subtype"] == "B2b"
+    assert row["action_bucket"] == "观察-B2b主题待确认"
+    assert "主题待确认" in row["upgrade_hint"]
