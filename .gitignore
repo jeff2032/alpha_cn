@@ -12,3 +12,4 @@ __pycache__/
 /data/
 /reports/
 /logs/
+/.tmp_warehouse_check/

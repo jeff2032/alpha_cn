@@ -8,14 +8,17 @@ import pandas as pd
 from quant_a_stock.config import DEFAULT_PATHS
 
 
-def _report_path(prefix: str, suffix: str = "md") -> Path:
+def _report_path(prefix: str, suffix: str = "md", *, date_prefix: str | None = None) -> Path:
     DEFAULT_PATHS.reports.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if date_prefix:
+        stamp = f"{date_prefix.replace('-', '')}_{datetime.now().strftime('%H%M%S')}"
+    else:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return DEFAULT_PATHS.reports / f"{prefix}_{stamp}.{suffix}"
 
 
 def save_sentiment_markdown(scores: pd.DataFrame, meta: dict, *, title: str = "候选股情绪面报告") -> Path:
-    path = _report_path("sentiment_watchlist")
+    path = _report_path("sentiment_watchlist", date_prefix=str(meta.get("target_date", "")) or None)
     lines = [
         f"# {title}",
         "",
@@ -69,7 +72,7 @@ def save_sentiment_markdown(scores: pd.DataFrame, meta: dict, *, title: str = "�
 
 
 def save_market_theme_markdown(theme: pd.DataFrame, meta: dict) -> Path:
-    path = _report_path("market_theme")
+    path = _report_path("market_theme", date_prefix=str(meta.get("target_date", "")) or None)
     lines = [
         "# 市场主线观察报告",
         "",

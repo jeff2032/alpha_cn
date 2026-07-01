@@ -73,12 +73,18 @@ python -m quant_a_stock.cli sync-stock-universe --universe-file data/universe/st
 
 日常推荐 `--lookback-days 60`：速度更快，适合每天收盘后补数据、出候选池。周末或月末想更稳地刷新 250 日平台指标和最近复权，可以临时改成 `--lookback-days 450`。需要更严格重算月线三年结构时，可以临时改成 `--lookback-days 1200`。
 
-`--workers` 控制并行下载线程数。日常默认用 `sina + --workers 2`。`sina` 在高并发时可能触发 AKShare 依赖里的 `py_mini_racer` 崩溃；脚本里会自动把 Sina 的高并发保护到 2。`eastmoney` 可作为备用源，但当天全市场补数在本机上有过卡住的情况。
+`--workers` 控制并行下载线程数。日常默认入口可以给 `--workers 6`，但脚本会把 `sina` 自动保护到 2，避免 AKShare 依赖里的 `py_mini_racer` 在高并发下崩溃。现在 `run_data_sync.ps1` 会先用 `sina` 补数；如果主源进程崩溃或失败，会重新生成过期清单，再用 `eastmoney` 备用源继续补剩余标的。最后统一用覆盖率检查判断是否还需要重试。
 
 也可以直接用数据补数脚本，它会自动生成过期清单、并行补数、最后再检查一次覆盖率：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_data_sync.ps1
+```
+
+明确指定目标日和备用源：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_data_sync.ps1 -TargetDate 2026-06-25 -StockProvider sina -FallbackStockProvider eastmoney -Workers 6 -FallbackWorkers 6
 ```
 
 后台运行时使用：
@@ -291,6 +297,8 @@ python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --to
 python -m quant_a_stock.cli warehouse-ingest --target-date 2026-06-18
 ```
 
+这一步会同时派生中间层事实表：`missed_opportunity_daily`、`factor_diagnostics_daily`、`strategy_review_daily`；候选和市场态度中间层也会随最新候选报告刷新。
+
 把股票池写入维表：
 
 ```powershell
@@ -314,6 +322,8 @@ python -m quant_a_stock.cli warehouse-sync-candles --symbols 000001 002137 60099
 ```powershell
 python -m quant_a_stock.cli warehouse-backfill-snapshots --since 2026-06-12 --until 2026-06-18
 ```
+
+这一步会从历史快照派生 `research_candidate_daily` 和 `stock_market_attitude_daily`，用于长期复盘和因子挖掘。
 
 查看仓库状态：
 

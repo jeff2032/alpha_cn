@@ -237,7 +237,10 @@ def build_candidate_lifecycle(
 
 def save_daily_research_summary_markdown(summary: DailyResearchSummary, *, top: int = 30) -> Path:
     DEFAULT_PATHS.reports.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if summary.target_date:
+        stamp = f"{summary.target_date.replace('-', '')}_{datetime.now().strftime('%H%M%S')}"
+    else:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = DEFAULT_PATHS.reports / f"daily_research_summary_{stamp}.md"
     candidates = summary.candidates.copy()
     for column in ["core_news_count", "research_report_count", "total_penalty"]:

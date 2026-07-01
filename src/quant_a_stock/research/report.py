@@ -14,9 +14,13 @@ def save_research_candidates_markdown(
     meta: dict | None = None,
 ) -> Path:
     DEFAULT_PATHS.reports.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = DEFAULT_PATHS.reports / f"research_candidates_{stamp}.md"
     meta = meta or {}
+    date_prefix = str(meta.get("target_date", "")) or None
+    if date_prefix:
+        stamp = f"{date_prefix.replace('-', '')}_{datetime.now().strftime('%H%M%S')}"
+    else:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = DEFAULT_PATHS.reports / f"research_candidates_{stamp}.md"
 
     lines = [
         "# 全市场潜力股研究候选池",

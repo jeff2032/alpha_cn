@@ -52,7 +52,7 @@ Commands:
   data-loop         Show data lifecycle and closed-loop status.
   retention-plan    Show cleanup dry-run candidates.
   cache-status      Show A-stock cache coverage.
-  track-candidates  Build A2/A3/B2 candidate lifecycle tracking.
+  track-candidates  Build A1/A2/A3/B2 candidate lifecycle tracking.
 
 Examples:
   .\scripts\alpha.ps1 task-status

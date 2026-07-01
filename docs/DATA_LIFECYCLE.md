@@ -1,19 +1,14 @@
 # 数据闭环与保留策略
 
-这个项目的数据分成四层：源数据、数仓主数据、运行产物、人工知识库。原则是：**机器可复盘的数据进数仓，人看的结论进 Obsidian，中间产物只保留近期排障窗口。**
+这个项目的数据分成三层：用户结论层、中间复盘层、原始数据层。原则是：**用户看 Obsidian 的短结论，我们看 DuckDB + Parquet 的结构化中间层，原始行情/公告/主题只作为可追溯底座。**
 
 ## 数据分层
 
 | 层 | 路径 | 定位 | 保留策略 |
 | --- | --- | --- | --- |
-| 原始 CSV 缓存 | `data/cache/akshare/daily/` | AKShare 下载后的日线缓存，当前增量补数依赖它 | 暂不清理 |
-| Parquet 数仓 | `data/warehouse/parquet/` | 结构化主数据，行情、候选、情绪、主题、复盘都应进这里 | 长期保留 |
-| DuckDB 查询壳 | `data/warehouse/alpha_cn.duckdb` | 通过 view 查询 Parquet，不是主数据副本 | 保留，可重建 |
-| 每日研究快照 | `data/snapshots/research/` | 入仓前/排障用的日期快照 | 入仓后保留最近 30 天 |
-| 机器报告 | `reports/` | CSV/Markdown 运行产物 | 入仓/同步后保留最近 14 天 |
-| 运维报告 | `reports/ops/` | 夜间任务状态和失败原因 | 保留最近 60 天 |
-| 日志 | `logs/` | 排障用运行日志 | 保留最近 30 天 |
-| Obsidian | `G:\Program Files (x86)\Obsidian_base\中国A股荐股\` | 人看的复盘、计划和策略沉淀 | 人工保留，不自动清理 |
+| 用户结论层 | `G:\Program Files (x86)\Obsidian_base\中国A股荐股\` | 给持仓人/使用者看的短结论：明日主攻、可拿一拿、短线机会、观察池、风险/失效条件、昨日推荐复盘摘要 | 人工保留，不自动清理 |
+| 中间复盘层 | `data/warehouse/parquet/` + `data/warehouse/alpha_cn.duckdb` | 给我们复盘、聚合、反推和因子挖掘用，稳定保存候选、生命周期、miss、因子诊断和策略复盘事实表 | 长期保留；DuckDB 可重建，Parquet 是主存储 |
+| 原始数据层 | `data/cache/`、`data/snapshots/research/`、`reports/`、`logs/` | 行情、行业、公告、主题、候选快照、运行报告和日志；用于排障、回填和可追溯 | 行情缓存暂不清理；快照、reports 和 logs 按保留策略清理 |
 
 ## 当前闭环
 
@@ -24,9 +19,9 @@
 3. `snapshot-research` 已归档当天快照。
 4. `warehouse-sync-universe` 已写入股票池维表。
 5. `warehouse-sync-candles` 已同步日线 Parquet。
-6. `warehouse-backfill-snapshots` 已把研究快照写入仓库。
-7. `track-candidates` 已把 A2/A3/B2 候选生命周期写入仓库。
-8. `warehouse-ingest` 已索引最新报告和研究结果。
+6. `warehouse-backfill-snapshots` 已把研究快照写入仓库，并派生 `research_candidate_daily`、`stock_market_attitude_daily`。
+7. `track-candidates` 已把 A1/A2/A3/B2 候选生命周期写入仓库。
+8. `warehouse-ingest` 已索引最新报告和研究结果，并派生 miss、因子诊断、策略复盘中间层。
 9. Obsidian 中有 `每日复盘/数据截至日/` 和必要时的 `开盘计划/计划日期.md`。
 
 ## 日常检查
@@ -59,6 +54,21 @@
 - `data/snapshots/` 只作为快照过渡层，不作为最终主存储。
 - 开盘计划和人工判断进入 Obsidian；后续如果要量化“人工是否采纳”，再单独入仓。
 
+## 中间层事实表
+
+中间层不追求好看，追求能查、能聚合、能反推。当前稳定表：
+
+| 表 | 粒度 | 用途 |
+| --- | --- | --- |
+| `research_candidate_daily` | 每天每只最终候选一行 | 保存分层、分组、分数、主题、风险、预期观察周期、原因标签和市场态度摘要 |
+| `stock_market_attitude_daily` | 每天每只候选一行 | 保存热度、资金承接、主题共振、盘面态度、事件、风险和拥挤度，输出强确认/温和确认/冷启动/虚热/过热分歧/风险压制 |
+| `candidate_lifecycle_daily` | 每个生命周期每天一行 | 观察新入池、继续、升级、降级、消失、命中、失败、移出 |
+| `missed_opportunity_daily` | 每个明显错过样本一行 | 记录当天大涨但没进入候选的票，以及 miss 原因、风险和是否可学习 |
+| `factor_diagnostics_daily` | 每个复盘聚合项一行 | 保存分层、动作桶、模型桶、阶段、亏损归因、miss 可学习性的统计结果 |
+| `strategy_review_daily` | 每个策略片段一行 | 把复盘统计粗标为有效、中性、拖后腿或样本不足，供后续策略反思使用 |
+
+这些表由 `warehouse-backfill-snapshots` 和 `warehouse-ingest` 自动派生，不需要新增日常命令。
+
 ## 复盘样本标签
 
 `research_review_details` 会给候选样本补充统一标签：
@@ -68,7 +78,7 @@
 | `sample_type` | 样本类型，当前候选为 `candidate`，错过样本为 `miss` |
 | `model_bucket` | 模型桶：`A1/A2_early_setup`、`A3_trend_follow`、`B_watchlist`、`miss_learnable`、`miss_event_only` |
 | `action_bucket` | 动作分组：主攻-A2启动确认、主攻-A3趋势延续、补票-B2a主线扩散、观察-B2b主题待确认、观察或回避 |
-| `evaluation_horizon` | 评价窗口：潜伏/启动看 `3d_5d`，趋势看 `1d_3d`，观察池看 `observe_1d_3d` |
+| `evaluation_horizon` | 评价窗口：A1 看 10/20/30 日，A2 看 3/5/10/15 日，A3 看 1/3/5/10 日，观察池先看是否升级 |
 | `preferred_horizon` | 当前样本优先评价周期 |
 | `preferred_ret` | 当前样本优先评价周期收益 |
 | `outcome_label` | `hit`、`loss`、`neutral`、`intraday_fade`、`volatile_win` |
@@ -78,9 +88,9 @@
 
 复盘报告会新增：
 
-- 模型桶 1/3/5 日表现
+- 模型桶 1/3/5/10/15/20/30 日表现
 - 模型桶首日表现
-- 动作分组 1/3/5 日表现
+- 动作分组 1/3/5/10/15/20/30 日表现
 - 动作分组首日表现
 - 亏损样本归因
 - Miss 样本可学习性
@@ -104,7 +114,7 @@
 - `补票-B2强主题`，历史兼容桶名
 - `观察-B2b主题待确认`
 
-如果同一只股票消失不超过 3 个交易日后重新入池，仍算同一轮机会；超过 3 个交易日后回来，建立新的生命周期。A1 低位潜伏先只做观察，不进入主生命周期，除非后续升级到 B2/A2/A3。
+如果同一只股票消失不超过 3 个交易日后重新入池，仍算同一轮机会；超过 3 个交易日后回来，建立新的生命周期。A1 低位潜伏也进入生命周期，但观察窗口更长，重点看后续是否补量、补主题、升级到 B2/A2/A3，不能和 A3 趋势票用同一个短周期标准评价。
 
 手动生成：
 

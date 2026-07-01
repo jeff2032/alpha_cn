@@ -92,15 +92,15 @@ python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --to
 python -m quant_a_stock.cli research-review --since 2026-05-29 --until 2026-06-12 --top-movers 20
 ```
 
-这个报告会把近两周快照里的候选池和 1/3/5 个交易日表现对齐，重点看主攻池、B2a 补票池、B2b 观察池各自是否有效，以及全市场次日强票有没有被候选池捕获。A2 主要看 3/5 日是否从启动确认转强，A3 主要看 1/3 日趋势是否延续，B2a 看主线扩散能否兑现，B2b 看是否能升级。
+这个报告会把历史快照里的候选池和 1/3/5/10/15/20/30 个交易日表现对齐，重点看主攻池、B2a 补票池、B2b 观察池各自是否有效，以及全市场次日强票有没有被候选池捕获。A3 主要看 1-10 日趋势是否延续，A2 主要看 3-15 日是否从启动确认转强，A1 主要看 10-30 日是否从低位蓄势进入启动，B2a 看主线扩散能否兑现，B2b 看是否能升级。
 
-生成 A2/A3/B2 候选生命周期跟踪：
+生成 A1/A2/A3/B2 候选生命周期跟踪：
 
 ```powershell
 python -m quant_a_stock.cli track-candidates --since 2026-05-29 --until 2026-06-12 --top 50
 ```
 
-这个报告会把“选进去之后怎么走”独立记录下来：新入池、继续跟踪、升级、降级、消失、命中、失败和观察窗口收益。它会写入 `candidate_lifecycles` 与 `candidate_lifecycle_daily` 两张仓库表，后续复盘和因子研究优先读这里。
+这个报告会把“选进去之后怎么走”独立记录下来：新入池、继续跟踪、升级、降级、消失、命中、失败和观察窗口收益。它会写入 `candidate_lifecycles` 与 `candidate_lifecycle_daily` 两张仓库表，后续复盘和因子研究优先读这里。人工报告只展示主攻继续跟踪、观察继续跟踪、今日变化、命中待复核和失败/移出，系统内部仍保留全量生命周期。
 
 复盘报告里的“明显错过样本和风险提示”要分开看：
 
@@ -115,7 +115,7 @@ python -m quant_a_stock.cli track-candidates --since 2026-05-29 --until 2026-06-
 python -m quant_a_stock.cli warehouse-ingest --target-date 2026-06-12
 ```
 
-仓库采用 DuckDB + Parquet，落在 `data/warehouse/`，这个目录不提交 git。当前持久化每日研究结果、历史研究快照、复盘明细、错过样本、报告索引、股票池维表和日线行情 Parquet。
+仓库采用 DuckDB + Parquet，落在 `data/warehouse/`，这个目录不提交 git。当前分三层使用：Obsidian 只放用户能看懂的结论；DuckDB/Parquet 保存 `research_candidate_daily`、`stock_market_attitude_daily`、`candidate_lifecycle_daily`、`missed_opportunity_daily`、`factor_diagnostics_daily`、`strategy_review_daily` 等中间层事实表；行情、主题、公告和快照保留为原始底座。
 
 把股票池写入维表：
 
@@ -182,7 +182,7 @@ python -m quant_a_stock.cli research-candidates --target-date 目标日期 --top
 - `daily_research_summary_*.md`：每日主报告，综合市场温度、主线、候选分层、持续性和风险提醒。
 - `research_candidates_*.md`：最终候选池，优先看 `action_bucket`，再看 A1/A2/A3/B2 分层。
 - `research_review_*.md`：滚动策略复盘，重点看主攻池、补票池、观察池近期命中、错过和亏损样本。
-- `candidate_lifecycle_tracking_*.md`：A2/A3/B2 候选生命周期，重点看入池后是否升级、兑现、失败或退出。
+- `candidate_lifecycle_tracking_*.md`：A1/A2/A3/B2 候选生命周期，重点看入池后是否升级、兑现、失败或退出；同步到 Obsidian 后文件名为 `滚动跟踪.md`。
 - `market_theme_*.md`：当天市场主线。
 - `sentiment_watchlist_*.md`：候选股情绪细节。
 

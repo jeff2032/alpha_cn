@@ -96,12 +96,42 @@ function Get-PreviousWeekday {
     return $day
 }
 
+function Get-CacheDateCoverage {
+    param(
+        [string]$CacheDir,
+        [datetime]$Date,
+        [int]$MinCount = 100
+    )
+
+    $targetText = $Date.ToString("yyyy-MM-dd")
+    $count = 0
+    foreach ($file in Get-ChildItem -LiteralPath $CacheDir -Filter "*.csv") {
+        try {
+            $match = Select-String -LiteralPath $file.FullName -Pattern $targetText -SimpleMatch -List -ErrorAction Stop
+            if ($null -ne $match) {
+                $count += 1
+                if ($count -ge $MinCount) {
+                    break
+                }
+            }
+        } catch {
+        }
+    }
+    return $count
+}
+
 function Resolve-CachedTradingDate {
     param([datetime]$Date)
 
     $cacheDir = Join-Path $ProjectRoot "data/cache/akshare/daily"
     if (-not (Test-Path $cacheDir)) {
         return (Get-PreviousWeekday -Date $Date).ToString("yyyy-MM-dd")
+    }
+
+    $target = $Date.Date
+    $exactCount = Get-CacheDateCoverage -CacheDir $cacheDir -Date $target
+    if ($exactCount -ge 100) {
+        return $target.ToString("yyyy-MM-dd")
     }
 
     $counts = @{}
@@ -120,7 +150,6 @@ function Resolve-CachedTradingDate {
         }
     }
 
-    $target = $Date.Date
     $latest = $null
     foreach ($key in $counts.Keys) {
         $candidate = [datetime]$key
@@ -246,6 +275,65 @@ function Format-CandidateTable {
     return ($lines -join "`r`n")
 }
 
+function Format-LifecycleTable {
+    param([object[]]$Rows)
+
+    $items = @($Rows)
+    if ($items.Count -eq 0) {
+        return "- 暂无"
+    }
+
+    $lines = @(
+        "| 代码 | 名称 | 当前分组 | 结果 | 已走交易日 | 主观察日 | 3日收益 | 5日收益 | 10日收益 | 风险 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+    )
+    foreach ($row in $items) {
+        $ret3 = Format-PercentText $row.ret_3d
+        $ret5 = Format-PercentText $row.ret_5d
+        $ret10 = Format-PercentText $row.ret_10d
+        $lines += "| $($row.symbol) | $($row.name) | $($row.current_action_bucket) | $($row.result_label) | $($row.days_since_entry) | $($row.primary_horizon_days) | $ret3 | $ret5 | $ret10 | $($row.risk_level) |"
+    }
+    return ($lines -join "`r`n")
+}
+
+function Format-LifecycleEventTable {
+    param([object[]]$Rows)
+
+    $items = @($Rows)
+    if ($items.Count -eq 0) {
+        return "- 暂无"
+    }
+
+    $lines = @(
+        "| 代码 | 名称 | 日状态 | 当日分组 | 分层 | 入池收益 | 入池最大浮盈 | 入池最大回撤 | 风险 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+    )
+    foreach ($row in $items) {
+        $ret = Format-PercentText $row.since_entry_ret
+        $high = Format-PercentText $row.since_entry_high_ret
+        $low = Format-PercentText $row.since_entry_low_ret
+        $lines += "| $($row.symbol) | $($row.name) | $($row.day_status) | $($row.action_bucket) | $($row.research_tier) | $ret | $high | $low | $($row.risk_level) |"
+    }
+    return ($lines -join "`r`n")
+}
+
+function Format-PercentText {
+    param([object]$Value)
+
+    try {
+        if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
+            return ""
+        }
+        $number = [double]$Value
+        if ([double]::IsNaN($number)) {
+            return ""
+        }
+        return (($number * 100).ToString("0.00", [Globalization.CultureInfo]::InvariantCulture) + "%")
+    } catch {
+        return ""
+    }
+}
+
 function Format-ThemeTable {
     param([object[]]$Rows)
 
@@ -280,6 +368,8 @@ function New-PreMarketPlanReport {
         $candidateCsv = Get-LatestReportFile -Pattern "research_candidates_${dateStamp}_*.csv"
     }
     $themeCsv = Get-LatestReportFile -Pattern "market_theme_${dateStamp}_*.csv"
+    $lifecycleCsv = Get-LatestReportFile -Pattern "candidate_lifecycles_${dateStamp}_*.csv"
+    $lifecycleDailyCsv = Get-LatestReportFile -Pattern "candidate_lifecycle_daily_${dateStamp}_*.csv"
 
     $marketLine = "- 市场温度：待查看当天复盘"
     $actionLine = "- 操作口径：先看候选分层，再结合开盘强弱确认"
@@ -304,9 +394,44 @@ function New-PreMarketPlanReport {
     $a3 = @($candidates | Where-Object { $_.research_tier -eq "A3" } | Select-Object -First 18)
     $watch = @($candidates | Where-Object { $_.research_tier -in @("B1", "B2") } | Select-Object -First 12)
 
+    $lifecycles = @()
+    if ($lifecycleCsv) {
+        $lifecycles = @(Import-Csv -LiteralPath $lifecycleCsv.FullName)
+    }
+    $mainTracking = @(
+        $lifecycles |
+            Where-Object {
+                $_.status -eq "active" -and
+                $_.result_label -in @("pending", "neutral") -and
+                $_.current_action_bucket -in @("主攻-A2启动确认", "主攻-A3趋势延续")
+            } |
+            Sort-Object @{ Expression = { try { -[double]$_.current_score } catch { 0 } } } |
+            Select-Object -First 8
+    )
+    $watchTracking = @(
+        $lifecycles |
+            Where-Object {
+                $_.status -eq "active" -and
+                $_.result_label -in @("pending", "neutral") -and
+                $_.current_action_bucket -in @("观察-A1低位潜伏", "补票-B2a主线扩散", "补票-B2强主题", "观察-B2b主题待确认")
+            } |
+            Sort-Object @{ Expression = { try { -[double]$_.current_score } catch { 0 } } } |
+            Select-Object -First 12
+    )
+    $changes = @()
+    if ($lifecycleDailyCsv) {
+        $changes = @(
+            Import-Csv -LiteralPath $lifecycleDailyCsv.FullName |
+                Where-Object { $_.target_date -eq $DataDate -and $_.day_status -in @("new", "upgraded", "downgraded") } |
+                Sort-Object day_status, @{ Expression = { try { -[double]$_.research_score } catch { 0 } } } |
+                Select-Object -First 15
+        )
+    }
+
     $planPath = Join-Path $TargetDir "$ReportDate.md"
     $dataReviewLink = "../每日复盘/$DataDate/每日推荐复盘.md"
     $candidateLink = "../每日复盘/$DataDate/最终候选池.md"
+    $trackingLink = "../每日复盘/$DataDate/滚动跟踪.md"
 
     @"
 # 开盘前推荐计划
@@ -315,6 +440,7 @@ function New-PreMarketPlanReport {
 数据截至：$DataDate
 
 这份是次日开盘前计划，不是 $DataDate 当天复盘。完整当天复盘见：[$DataDate 每日推荐复盘]($dataReviewLink)，候选明细见：[$DataDate 最终候选池]($candidateLink)。
+滚动生命周期跟踪见：[$DataDate 滚动跟踪]($trackingLink)。
 
 ## 市场口径
 
@@ -336,6 +462,22 @@ $(Format-CandidateTable -Rows $a12)
 看 1-2 个交易日趋势延续和回踩不破，避免高开过热追买。
 
 $(Format-CandidateTable -Rows $a3)
+
+## 旧票滚动跟踪
+
+这里不是新增推荐，只处理前几天入池后仍在生命周期里的票。
+
+### 主攻继续跟踪
+
+$(Format-LifecycleTable -Rows $mainTracking)
+
+### 观察继续跟踪
+
+$(Format-LifecycleTable -Rows $watchTracking)
+
+### 今日变化
+
+$(Format-LifecycleEventTable -Rows $changes)
 
 ## B1/B2 观察补票
 
@@ -407,6 +549,7 @@ function Export-DailyReportsToObsidian {
     Copy-LatestMarkdownReport -Pattern "market_theme_${dateStamp}_*.md" -DestinationName "市场主线.md" -TargetDir $dataDir
     Copy-LatestMarkdownReport -Pattern "sentiment_watchlist_${dateStamp}_*.md" -DestinationName "情绪观察.md" -TargetDir $dataDir
     Copy-LatestMarkdownReport -Pattern "research_review_${dateStamp}_*.md" -DestinationName "滚动复盘.md" -TargetDir $dataDir
+    Copy-LatestMarkdownReport -Pattern "candidate_lifecycle_tracking_${dateStamp}_*.md" -DestinationName "滚动跟踪.md" -TargetDir $dataDir
 
     $reflectionPath = Join-Path $dataDir "策略反思.md"
     if (-not (Test-Path -LiteralPath $reflectionPath)) {
@@ -489,6 +632,7 @@ try {
         "sync-daily",
         "--symbols", $ProbeSymbol,
         "--since", $Since,
+        "--until", $targetDate,
         "--adjust", "qfq",
         "--asset-type", "stock",
         "--stock-provider", "sina",
@@ -530,18 +674,27 @@ try {
             $effectiveWorkers = 2
             Write-Step "Sina provider is unstable with high parallelism; use effective workers $effectiveWorkers instead of $Workers."
         }
-        Invoke-Quant @(
-            "sync-stock-universe",
-            "--universe-file", "data/universe/stale.csv",
-            "--since", $Since,
-            "--stock-provider", "sina",
-            "--adjust", "qfq",
-            "--sleep", $SleepSeconds.ToString([Globalization.CultureInfo]::InvariantCulture),
-            "--workers", $effectiveWorkers.ToString([Globalization.CultureInfo]::InvariantCulture),
-            "--incremental",
-            "--lookback-days", $LookbackDays.ToString([Globalization.CultureInfo]::InvariantCulture),
-            "--no-skip-existing"
-        )
+        try {
+            Invoke-Quant @(
+                "sync-stock-universe",
+                "--universe-file", "data/universe/stale.csv",
+                "--since", $Since,
+                "--until", $targetDate,
+                "--stock-provider", "sina",
+                "--adjust", "qfq",
+                "--sleep", $SleepSeconds.ToString([Globalization.CultureInfo]::InvariantCulture),
+                "--workers", $effectiveWorkers.ToString([Globalization.CultureInfo]::InvariantCulture),
+                "--incremental",
+                "--lookback-days", $LookbackDays.ToString([Globalization.CultureInfo]::InvariantCulture),
+                "--no-skip-existing"
+            )
+        } catch {
+            if ($staleCount -le 100) {
+                Write-Step "Universe sync failed for $staleCount stale symbols; continue with existing cache. Error: $($_.Exception.Message)"
+            } else {
+                throw
+            }
+        }
     }
 
     $latestCacheDate = Get-LatestCacheDate
@@ -557,6 +710,7 @@ try {
     Invoke-Quant @(
         "scan-pattern",
         "--pattern", "base_breakout_setup",
+        "--target-date", $targetDate,
         "--top", "120",
         "--min-score", "50",
         "--stages", "watch", "near_breakout",
@@ -568,6 +722,7 @@ try {
     Invoke-Quant @(
         "scan-pattern",
         "--pattern", "accumulation_setup",
+        "--target-date", $targetDate,
         "--top", "120",
         "--min-score", "50",
         "--stages", "accumulation",
@@ -586,6 +741,7 @@ try {
     Invoke-Quant @(
         "scan-pattern",
         "--pattern", "trend_pullback_setup",
+        "--target-date", $targetDate,
         "--top", "120",
         "--min-score", "50",
         "--stages", "trend_pullback", "trend_resume",
@@ -625,6 +781,20 @@ try {
         "daily-research-summary",
         "--target-date", $targetDate,
         "--top", "30"
+    )
+    $trackingSince = ([datetime]::Parse($targetDate)).AddDays(-45).ToString("yyyy-MM-dd")
+    Invoke-Quant @(
+        "research-review",
+        "--since", $trackingSince,
+        "--until", $targetDate,
+        "--top-movers", "20"
+    )
+    Invoke-Quant @(
+        "track-candidates",
+        "--since", $trackingSince,
+        "--until", $targetDate,
+        "--universe-file", $UniverseFile,
+        "--top", "80"
     )
 
     Export-DailyReportsToObsidian -ReportDate $planDate -DataDate $targetDate

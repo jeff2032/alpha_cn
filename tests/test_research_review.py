@@ -80,7 +80,7 @@ def test_build_research_review_summarizes_candidates_and_missed_movers(tmp_path,
     assert buckets["000001"] == "A1/A2_early_setup"
     assert buckets["000002"] == "B_watchlist"
     preferred = review.details[review.details["symbol"] == "000001"].iloc[0]
-    assert preferred["evaluation_horizon"] == "3d_5d"
+    assert preferred["evaluation_horizon"] == "3d_5d_10d_15d"
     assert preferred["preferred_horizon"] == "5d"
     assert preferred["outcome_label"] == "hit"
     a2 = review.by_tier[review.by_tier["tier"] == "A2"].iloc[0]
@@ -113,7 +113,7 @@ def test_build_research_review_summarizes_candidates_and_missed_movers(tmp_path,
     assert details_path.exists()
     assert summary_path.exists()
     markdown = markdown_path.read_text(encoding="utf-8")
-    assert "模型桶 1/3/5 日表现" in markdown
+    assert "模型桶多周期表现" in markdown
     assert "动作分组首日表现" in markdown
     assert "亏损样本归因" in markdown
     assert "明显错过样本和风险提示" in markdown

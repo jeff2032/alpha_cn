@@ -8,6 +8,8 @@
     [double]$SleepSeconds = 0.05,
     [int]$Workers = 6,
     [int]$LookbackDays = 60,
+    [string]$FallbackStockProvider = "eastmoney",
+    [int]$FallbackStockWorkers = 6,
     [string[]]$IndexSymbols = @("510300", "510500", "159915"),
     [string]$EtfProvider = "eastmoney",
     [string]$FallbackEtfProvider = "sina",
@@ -99,12 +101,42 @@ function Get-PreviousWeekday {
     return $day
 }
 
+function Get-CacheDateCoverage {
+    param(
+        [string]$CacheDir,
+        [datetime]$Date,
+        [int]$MinCount = 100
+    )
+
+    $targetText = $Date.ToString("yyyy-MM-dd")
+    $count = 0
+    foreach ($file in Get-ChildItem -LiteralPath $CacheDir -Filter "*.csv") {
+        try {
+            $match = Select-String -LiteralPath $file.FullName -Pattern $targetText -SimpleMatch -List -ErrorAction Stop
+            if ($null -ne $match) {
+                $count += 1
+                if ($count -ge $MinCount) {
+                    break
+                }
+            }
+        } catch {
+        }
+    }
+    return $count
+}
+
 function Resolve-CachedTradingDate {
     param([datetime]$Date)
 
     $cacheDir = Join-Path $ProjectRoot "data/cache/akshare/daily"
     if (-not (Test-Path $cacheDir)) {
         return (Get-PreviousWeekday -Date $Date).ToString("yyyy-MM-dd")
+    }
+
+    $target = $Date.Date
+    $exactCount = Get-CacheDateCoverage -CacheDir $cacheDir -Date $target
+    if ($exactCount -ge 100) {
+        return $target.ToString("yyyy-MM-dd")
     }
 
     $counts = @{}
@@ -123,7 +155,6 @@ function Resolve-CachedTradingDate {
         }
     }
 
-    $target = $Date.Date
     $latest = $null
     foreach ($key in $counts.Keys) {
         $candidate = [datetime]$key
@@ -347,7 +378,9 @@ try {
             "-Since", $Since,
             "-TargetDate", $script:ResolvedTargetDate,
             "-StockProvider", $StockProvider,
+            "-FallbackStockProvider", $FallbackStockProvider,
             "-Workers", $Workers.ToString([Globalization.CultureInfo]::InvariantCulture),
+            "-FallbackWorkers", $FallbackStockWorkers.ToString([Globalization.CultureInfo]::InvariantCulture),
             "-SleepSeconds", $SleepSeconds.ToString([Globalization.CultureInfo]::InvariantCulture),
             "-LookbackDays", $LookbackDays.ToString([Globalization.CultureInfo]::InvariantCulture)
         )
@@ -451,6 +484,7 @@ try {
     Invoke-QuantStep -Name "扫描突破确认池" -Arguments @(
         "scan-pattern",
         "--pattern", "base_breakout_setup",
+        "--target-date", $script:ResolvedTargetDate,
         "--top", "120",
         "--min-score", "50",
         "--stages", "watch", "near_breakout",
@@ -462,6 +496,7 @@ try {
     Invoke-QuantStep -Name "扫描低位潜伏池" -Arguments @(
         "scan-pattern",
         "--pattern", "accumulation_setup",
+        "--target-date", $script:ResolvedTargetDate,
         "--top", "120",
         "--min-score", "50",
         "--stages", "accumulation",
@@ -480,6 +515,7 @@ try {
     Invoke-QuantStep -Name "扫描强趋势回踩池" -Arguments @(
         "scan-pattern",
         "--pattern", "trend_pullback_setup",
+        "--target-date", $script:ResolvedTargetDate,
         "--top", "120",
         "--min-score", "50",
         "--stages", "trend_pullback", "trend_resume",
@@ -521,7 +557,7 @@ try {
         "--target-date", $script:ResolvedTargetDate,
         "--top", "30"
     )
-    $reviewSince = ([datetime]::Parse($script:ResolvedTargetDate)).AddDays(-14).ToString("yyyy-MM-dd")
+    $reviewSince = ([datetime]::Parse($script:ResolvedTargetDate)).AddDays(-45).ToString("yyyy-MM-dd")
     Invoke-QuantStep -Name "生成策略滚动复盘" -Arguments @(
         "research-review",
         "--since", $reviewSince,

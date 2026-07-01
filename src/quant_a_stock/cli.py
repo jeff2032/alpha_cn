@@ -79,13 +79,20 @@ def _parse_markets(values: list[str] | None) -> set[str] | None:
     return {value.lower() for value in values}
 
 
-def _load_candles(symbols: list[str], *, since: str | None = None) -> dict[str, pd.DataFrame]:
+def _load_candles(
+    symbols: list[str],
+    *,
+    since: str | None = None,
+    until: str | None = None,
+) -> dict[str, pd.DataFrame]:
     candles_by_symbol = {}
     for symbol in symbols:
         candles = load_daily_cache(symbol)
         candles = clean_candles(candles, symbol=symbol)
         if since:
             candles = candles[candles["timestamp"] >= pd.Timestamp(since)].reset_index(drop=True)
+        if until:
+            candles = candles[candles["timestamp"] <= pd.Timestamp(until)].reset_index(drop=True)
         candles_by_symbol[symbol] = candles
     return candles_by_symbol
 
@@ -122,6 +129,15 @@ def _latest_report(pattern: str) -> Path | None:
     return reports[0] if reports else None
 
 
+def _latest_report_for_target(report_type: str, target_date: str | None) -> Path | None:
+    if target_date:
+        date_prefix = target_date.replace("-", "")
+        path = _latest_report(f"{report_type}_{date_prefix}_*.csv")
+        if path is not None:
+            return path
+    return _latest_report(f"{report_type}_*.csv")
+
+
 def _report_path_arg(value: str | None, *, latest_pattern: str, missing_message: str) -> Path:
     if value:
         return Path(value)
@@ -146,16 +162,27 @@ def _latest_scan_report() -> Path | None:
     return reports[0] if reports else None
 
 
-def _latest_scan_reports() -> list[Path]:
+def _latest_scan_reports(target_date: str | None = None) -> list[Path]:
     reports_dir = DEFAULT_PATHS.reports
     if not reports_dir.exists():
         return []
     paths = []
-    for pattern in (
-        "scan_base_breakout_setup_*.csv",
-        "scan_accumulation_setup_*.csv",
-        "scan_trend_pullback_setup_*.csv",
+    for report_type in (
+        "scan_base_breakout_setup",
+        "scan_accumulation_setup",
+        "scan_trend_pullback_setup",
     ):
+        pattern = f"{report_type}_*.csv"
+        if target_date:
+            date_prefix = target_date.replace("-", "")
+            dated_matches = sorted(
+                reports_dir.glob(f"{report_type}_{date_prefix}_*.csv"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+            if dated_matches:
+                paths.append(dated_matches[0])
+                continue
         matches = sorted(
             reports_dir.glob(pattern),
             key=lambda path: path.stat().st_mtime,
@@ -166,13 +193,20 @@ def _latest_scan_reports() -> list[Path]:
     return paths
 
 
-def _load_latest_scan_reports() -> tuple[pd.DataFrame, list[Path]]:
-    paths = _latest_scan_reports()
+def _load_latest_scan_reports(target_date: str | None = None) -> tuple[pd.DataFrame, list[Path]]:
+    paths = _latest_scan_reports(target_date=target_date)
     frames = []
+    loaded_paths = []
     for path in paths:
-        frame = load_report(path)
+        try:
+            frame = load_report(path)
+        except pd.errors.EmptyDataError:
+            continue
+        if frame.empty:
+            continue
         frame["scan_source"] = path.stem
         frames.append(frame)
+        loaded_paths.append(path)
 
     if not frames:
         return pd.DataFrame(), []
@@ -182,7 +216,7 @@ def _load_latest_scan_reports() -> tuple[pd.DataFrame, list[Path]]:
         merged["score"] = pd.to_numeric(merged["score"], errors="coerce").fillna(0.0)
         merged = merged.sort_values("score", ascending=False)
     merged = merged.drop_duplicates(subset=["symbol"], keep="first").reset_index(drop=True)
-    return merged, paths
+    return merged, loaded_paths
 
 
 def _balanced_scan_selection(frame: pd.DataFrame, top: int | None) -> pd.DataFrame:
@@ -810,11 +844,17 @@ def scan_pattern(args: argparse.Namespace) -> None:
             "不支持的形态。目前可用: base_breakout_setup, accumulation_setup, trend_pullback_setup"
         )
 
+    target_date = None
+    if args.target_date:
+        resolved_target = _resolve_trading_date(args.target_date)
+        _announce_trading_date_resolution(args.target_date, resolved_target)
+        target_date = resolved_target.date().isoformat()
+
     symbols = args.symbols or _cached_symbols()
     if not symbols:
         raise SystemExit("没有传入标的，也没有找到本地缓存 CSV。")
 
-    candles_by_symbol = _load_candles(symbols)
+    candles_by_symbol = _load_candles(symbols, until=target_date)
     if args.pattern == "base_breakout_setup":
         config = BaseBreakoutSetupConfig(
             base_window=args.base_window,
@@ -927,7 +967,11 @@ def scan_pattern(args: argparse.Namespace) -> None:
             max_volume_ratio=trend_max_volume_ratio,
         )
         report_type = "scan_trend_pullback_setup"
-    report_path = save_report(result.to_dict("records"), report_type=report_type)
+    report_path = save_report(
+        result.to_dict("records"),
+        report_type=report_type,
+        date_prefix=target_date,
+    )
     if result.empty:
         print("没有找到符合条件的形态。")
     else:
@@ -935,13 +979,13 @@ def scan_pattern(args: argparse.Namespace) -> None:
     print(f"报告: {report_path}")
 
 
-def _sentiment_watchlist_from_args(args: argparse.Namespace) -> pd.DataFrame:
+def _sentiment_watchlist_from_args(args: argparse.Namespace, *, target_date: str | None = None) -> pd.DataFrame:
     if args.symbols:
         frame = pd.DataFrame({"symbol": args.symbols, "name": ""})
     else:
         watchlist_path = Path(args.watchlist) if args.watchlist else None
         if args.latest_scan:
-            frame, paths = _load_latest_scan_reports()
+            frame, paths = _load_latest_scan_reports(target_date=target_date)
             if frame.empty:
                 raise SystemExit("没有找到最新形态扫描报告，请先运行 scan-pattern。")
             print("使用最新形态扫描报告: " + "；".join(str(path) for path in paths))
@@ -957,9 +1001,9 @@ def _sentiment_watchlist_from_args(args: argparse.Namespace) -> pd.DataFrame:
 
 
 def sentiment_score(args: argparse.Namespace) -> None:
-    watchlist = _sentiment_watchlist_from_args(args)
     target_date = _resolve_trading_date(args.target_date).date().isoformat()
     _announce_trading_date_resolution(args.target_date, pd.Timestamp(target_date))
+    watchlist = _sentiment_watchlist_from_args(args, target_date=target_date)
     scores, meta = build_sentiment_scores(
         watchlist,
         config=SentimentConfig(
@@ -969,7 +1013,11 @@ def sentiment_score(args: argparse.Namespace) -> None:
             target_date=target_date,
         ),
     )
-    csv_path = save_report(scores.to_dict("records"), report_type="sentiment_watchlist")
+    csv_path = save_report(
+        scores.to_dict("records"),
+        report_type="sentiment_watchlist",
+        date_prefix=target_date,
+    )
     md_path = save_sentiment_markdown(scores, meta)
 
     if scores.empty:
@@ -1015,7 +1063,11 @@ def market_theme(args: argparse.Namespace) -> None:
     target_date = _resolve_trading_date(args.target_date).date().isoformat()
     _announce_trading_date_resolution(args.target_date, pd.Timestamp(target_date))
     theme, meta = build_market_theme(target_date)
-    csv_path = save_report(theme.to_dict("records"), report_type="market_theme")
+    csv_path = save_report(
+        theme.to_dict("records"),
+        report_type="market_theme",
+        date_prefix=target_date,
+    )
     md_path = save_market_theme_markdown(theme, meta)
 
     if theme.empty:
@@ -1046,22 +1098,22 @@ def research_candidates(args: argparse.Namespace) -> None:
         scan = load_report(scan_path)
         scan_paths = [scan_path]
     else:
-        scan, scan_paths = _load_latest_scan_reports()
+        scan, scan_paths = _load_latest_scan_reports(target_date=target_date)
         if scan.empty:
             raise SystemExit("没有找到形态扫描报告，请先运行 scan-pattern。")
     sentiment_path = _report_path_arg(
         args.sentiment_report,
-        latest_pattern="sentiment_watchlist_*.csv",
+        latest_pattern=f"sentiment_watchlist_{target_date.replace('-', '')}_*.csv",
         missing_message="没有找到情绪评分报告，请先运行 sentiment-score。",
     )
     theme_path: Path | None = None
     theme = pd.DataFrame()
     if args.refresh_theme:
         theme, theme_meta = build_market_theme(target_date)
-        theme_path = save_report(theme.to_dict("records"), report_type="market_theme")
+        theme_path = save_report(theme.to_dict("records"), report_type="market_theme", date_prefix=target_date)
         save_market_theme_markdown(theme, theme_meta)
     else:
-        theme_path = _latest_report("market_theme_*.csv")
+        theme_path = _latest_report_for_target("market_theme", target_date)
         if theme_path is not None:
             theme = pd.read_csv(theme_path)
 
@@ -1097,7 +1149,11 @@ def research_candidates(args: argparse.Namespace) -> None:
         config=ResearchCandidateConfig(),
     )
     candidates = _add_names_from_universe(candidates)
-    csv_path = save_report(candidates.to_dict("records"), report_type="research_candidates")
+    csv_path = save_report(
+        candidates.to_dict("records"),
+        report_type="research_candidates",
+        date_prefix=target_date,
+    )
     md_path = save_research_candidates_markdown(
         candidates,
         meta={
@@ -1256,18 +1312,18 @@ def snapshot_research(args: argparse.Namespace) -> None:
     reports = {
         "scan_base_breakout_setup": Path(args.scan_report)
         if args.scan_report
-        else _latest_report("scan_base_breakout_setup_*.csv"),
-        "scan_accumulation_setup": _latest_report("scan_accumulation_setup_*.csv"),
-        "scan_trend_pullback_setup": _latest_report("scan_trend_pullback_setup_*.csv"),
+        else _latest_report_for_target("scan_base_breakout_setup", target_date),
+        "scan_accumulation_setup": _latest_report_for_target("scan_accumulation_setup", target_date),
+        "scan_trend_pullback_setup": _latest_report_for_target("scan_trend_pullback_setup", target_date),
         "sentiment_watchlist": Path(args.sentiment_report)
         if args.sentiment_report
-        else _latest_report("sentiment_watchlist_*.csv"),
+        else _latest_report_for_target("sentiment_watchlist", target_date),
         "market_theme": Path(args.theme_report)
         if args.theme_report
-        else _latest_report("market_theme_*.csv"),
+        else _latest_report_for_target("market_theme", target_date),
         "research_candidates": Path(args.research_report)
         if args.research_report
-        else _latest_report("research_candidates_*.csv"),
+        else _latest_report_for_target("research_candidates", target_date),
     }
     snapshot_dir = save_research_snapshot(target_date=target_date, reports=reports)
     print(f"研究快照目录: {snapshot_dir}")
@@ -1287,6 +1343,7 @@ def daily_research_summary(args: argparse.Namespace) -> None:
     csv_path = save_report(
         summary.candidates.to_dict("records"),
         report_type="daily_research_candidates",
+        date_prefix=target_date,
     )
     md_path = save_daily_research_summary_markdown(summary, top=args.top)
 
@@ -1319,7 +1376,8 @@ def research_review(args: argparse.Namespace) -> None:
         top_movers=args.top_movers,
         universe_file=Path(args.universe_file) if args.universe_file else None,
     )
-    md_path, details_path, summary_path = save_research_review_reports(review)
+    date_prefix = args.until or (review.snapshot_dates[-1] if review.snapshot_dates else None)
+    md_path, details_path, summary_path = save_research_review_reports(review, date_prefix=date_prefix)
 
     print(f"可用快照: {', '.join(review.snapshot_dates) or '无'}")
     print(f"已闭环信号日: {', '.join(review.closed_signal_dates) or '无'}")
@@ -1781,6 +1839,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan = subparsers.add_parser("scan-pattern", help="扫描缓存标的的形态")
     scan.add_argument("--pattern", default="base_breakout_setup")
     scan.add_argument("--symbols", nargs="+", default=None)
+    scan.add_argument("--target-date", default=None)
     scan.add_argument("--top", type=int, default=20)
     scan.add_argument("--min-score", type=float, default=50.0)
     scan.add_argument("--include-extended", action="store_true")
@@ -1919,7 +1978,7 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--universe-file", default=None)
     review.set_defaults(func=research_review)
 
-    tracking = subparsers.add_parser("track-candidates", help="生成 A2/A3/B2 候选生命周期跟踪报告并写入仓库")
+    tracking = subparsers.add_parser("track-candidates", help="生成 A1/A2/A3/B2 候选生命周期跟踪报告并写入仓库")
     tracking.add_argument("--since", default=None)
     tracking.add_argument("--until", default=None)
     tracking.add_argument("--snapshot-root", default=None)

@@ -102,8 +102,18 @@ def test_ingest_latest_reports_builds_parquet_and_review_views(tmp_path: Path) -
     status = warehouse_status(warehouse_dir=warehouse_dir)
     candidates_rows = status.loc[status["table"] == "research_candidates", "rows"].iloc[0]
     missed_rows = status.loc[status["table"] == "missed_opportunities", "rows"].iloc[0]
+    candidate_daily_rows = status.loc[status["table"] == "research_candidate_daily", "rows"].iloc[0]
+    attitude_rows = status.loc[status["table"] == "stock_market_attitude_daily", "rows"].iloc[0]
+    missed_daily_rows = status.loc[status["table"] == "missed_opportunity_daily", "rows"].iloc[0]
+    factor_rows = status.loc[status["table"] == "factor_diagnostics_daily", "rows"].iloc[0]
+    strategy_rows = status.loc[status["table"] == "strategy_review_daily", "rows"].iloc[0]
     assert candidates_rows == 1
     assert missed_rows == 1
+    assert candidate_daily_rows == 1
+    assert attitude_rows == 1
+    assert missed_daily_rows == 1
+    assert factor_rows == 1
+    assert strategy_rows == 1
 
     review = warehouse_review(since="2026-06-17", until="2026-06-18", warehouse_dir=warehouse_dir)
     tier = review["tier"]
@@ -154,8 +164,12 @@ def test_backfill_snapshots_syncs_research_snapshot_tables(tmp_path: Path) -> No
     status = warehouse_status(warehouse_dir=warehouse_dir)
     snapshot_rows = status.loc[status["table"] == "snapshot_research_candidates", "rows"].iloc[0]
     index_rows = status.loc[status["table"] == "snapshot_index", "rows"].iloc[0]
+    candidate_daily_rows = status.loc[status["table"] == "research_candidate_daily", "rows"].iloc[0]
+    attitude_rows = status.loc[status["table"] == "stock_market_attitude_daily", "rows"].iloc[0]
     assert snapshot_rows == 1
-    assert index_rows == 6
+    assert index_rows == 8
+    assert candidate_daily_rows == 1
+    assert attitude_rows == 1
 
 
 def test_sync_universe_and_daily_candles_to_warehouse(tmp_path: Path) -> None:

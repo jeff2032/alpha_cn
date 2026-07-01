@@ -38,11 +38,20 @@ MARKDOWN_REPORT_SPECS = {
     "research_review_markdown": "research_review_*.md",
 }
 
+MIDDLE_LAYER_TABLES = [
+    "research_candidate_daily",
+    "stock_market_attitude_daily",
+    "missed_opportunity_daily",
+    "factor_diagnostics_daily",
+    "strategy_review_daily",
+]
+
 WAREHOUSE_TABLES = [
     *CSV_REPORT_SPECS.keys(),
     "report_index",
     *SNAPSHOT_CSV_SPECS.keys(),
     "snapshot_index",
+    *MIDDLE_LAYER_TABLES,
     "stock_universe",
     "daily_candles",
     "daily_candles_index",
@@ -90,6 +99,7 @@ def ingest_latest_reports(
     resolved_run_id = run_id or f"{target_date}_{stamp}"
     ingested_at = datetime.now().isoformat(timespec="seconds")
     report_rows: list[dict] = []
+    loaded_reports: dict[str, pd.DataFrame] = {}
 
     for table_name, pattern in CSV_REPORT_SPECS.items():
         path = _latest_file(reports_root, pattern)
@@ -105,9 +115,20 @@ def ingest_latest_reports(
             ingested_at=ingested_at,
         )
         _write_parquet(output, table_name, target_date=target_date, run_id=resolved_run_id, warehouse_dir=warehouse_dir)
+        loaded_reports[table_name] = output
         report_rows.append(
             _report_row(resolved_run_id, target_date, table_name, path, len(output), "ingested", ingested_at)
         )
+
+    report_rows.extend(
+        _write_middle_layer_from_reports(
+            loaded_reports,
+            target_date=target_date,
+            run_id=resolved_run_id,
+            ingested_at=ingested_at,
+            warehouse_dir=warehouse_dir,
+        )
+    )
 
     for report_type, pattern in MARKDOWN_REPORT_SPECS.items():
         path = _latest_file(reports_root, pattern)
@@ -156,6 +177,7 @@ def backfill_research_snapshots(
     for snapshot_dir in _snapshot_dirs(snapshots_root, since=since, until=until):
         target_date = snapshot_dir.name
         snapshot_rows: list[dict] = []
+        loaded_snapshots: dict[str, pd.DataFrame] = {}
         for table_name, filename in SNAPSHOT_CSV_SPECS.items():
             path = snapshot_dir / filename
             if not path.exists():
@@ -178,9 +200,19 @@ def backfill_research_snapshots(
                 run_id=resolved_run_id,
                 warehouse_dir=warehouse_dir,
             )
+            loaded_snapshots[table_name] = output
             row = _report_row(resolved_run_id, target_date, table_name, path, len(output), "ingested", ingested_at)
             snapshot_rows.append(row)
             all_rows.append(row)
+        middle_rows = _write_middle_layer_from_snapshots(
+            loaded_snapshots,
+            target_date=target_date,
+            run_id=resolved_run_id,
+            ingested_at=ingested_at,
+            warehouse_dir=warehouse_dir,
+        )
+        snapshot_rows.extend(middle_rows)
+        all_rows.extend(middle_rows)
         _write_parquet(
             pd.DataFrame(snapshot_rows),
             "snapshot_index",
@@ -437,6 +469,137 @@ def sync_candidate_lifecycles_to_warehouse(
     )
 
 
+def _write_middle_layer_from_reports(
+    frames: dict[str, pd.DataFrame],
+    *,
+    target_date: str,
+    run_id: str,
+    ingested_at: str,
+    warehouse_dir: Path | None,
+) -> list[dict]:
+    rows: list[dict] = []
+    candidates = frames.get("research_candidates")
+    if candidates is not None and not candidates.empty:
+        rows.append(
+            _write_middle_frame(
+                _build_research_candidate_daily(candidates, target_date=target_date),
+                "research_candidate_daily",
+                target_date=target_date,
+                run_id=run_id,
+                source_path="derived:research_candidates",
+                ingested_at=ingested_at,
+                warehouse_dir=warehouse_dir,
+            )
+        )
+        rows.append(
+            _write_middle_frame(
+                _build_stock_market_attitude_daily(candidates, target_date=target_date),
+                "stock_market_attitude_daily",
+                target_date=target_date,
+                run_id=run_id,
+                source_path="derived:research_candidates",
+                ingested_at=ingested_at,
+                warehouse_dir=warehouse_dir,
+            )
+        )
+
+    missed = frames.get("missed_opportunities")
+    if missed is not None and not missed.empty:
+        rows.append(
+            _write_middle_frame(
+                _build_missed_opportunity_daily(missed, target_date=target_date),
+                "missed_opportunity_daily",
+                target_date=target_date,
+                run_id=run_id,
+                source_path="derived:research_review_missed",
+                ingested_at=ingested_at,
+                warehouse_dir=warehouse_dir,
+            )
+        )
+
+    summary = frames.get("research_review_summary")
+    if summary is not None and not summary.empty:
+        rows.append(
+            _write_middle_frame(
+                _build_factor_diagnostics_daily(summary, target_date=target_date),
+                "factor_diagnostics_daily",
+                target_date=target_date,
+                run_id=run_id,
+                source_path="derived:research_review_summary",
+                ingested_at=ingested_at,
+                warehouse_dir=warehouse_dir,
+            )
+        )
+        rows.append(
+            _write_middle_frame(
+                _build_strategy_review_daily(summary, target_date=target_date),
+                "strategy_review_daily",
+                target_date=target_date,
+                run_id=run_id,
+                source_path="derived:research_review_summary",
+                ingested_at=ingested_at,
+                warehouse_dir=warehouse_dir,
+            )
+        )
+    return [row for row in rows if row]
+
+
+def _write_middle_layer_from_snapshots(
+    frames: dict[str, pd.DataFrame],
+    *,
+    target_date: str,
+    run_id: str,
+    ingested_at: str,
+    warehouse_dir: Path | None,
+) -> list[dict]:
+    candidates = frames.get("snapshot_research_candidates")
+    if candidates is None or candidates.empty:
+        return []
+    return [
+        _write_middle_frame(
+            _build_research_candidate_daily(candidates, target_date=target_date),
+            "research_candidate_daily",
+            target_date=target_date,
+            run_id=run_id,
+            source_path="derived:snapshot_research_candidates",
+            ingested_at=ingested_at,
+            warehouse_dir=warehouse_dir,
+        ),
+        _write_middle_frame(
+            _build_stock_market_attitude_daily(candidates, target_date=target_date),
+            "stock_market_attitude_daily",
+            target_date=target_date,
+            run_id=run_id,
+            source_path="derived:snapshot_research_candidates",
+            ingested_at=ingested_at,
+            warehouse_dir=warehouse_dir,
+        ),
+    ]
+
+
+def _write_middle_frame(
+    frame: pd.DataFrame,
+    table_name: str,
+    *,
+    target_date: str,
+    run_id: str,
+    source_path: str,
+    ingested_at: str,
+    warehouse_dir: Path | None,
+) -> dict:
+    output = frame.copy()
+    if output.empty:
+        return _report_row(run_id, target_date, table_name, None, 0, "empty", ingested_at)
+    if "symbol" in output.columns:
+        output["symbol"] = output["symbol"].astype(str).str.zfill(6)
+    output["warehouse_run_id"] = run_id
+    output["warehouse_target_date"] = target_date
+    output["warehouse_source_path"] = source_path
+    output["warehouse_ingested_at"] = ingested_at
+    _write_parquet(output, table_name, target_date=target_date, run_id=run_id, warehouse_dir=warehouse_dir)
+    return _report_row(run_id, target_date, table_name, None, len(output), "derived", ingested_at)
+
+
 def refresh_warehouse_views(*, warehouse_dir: Path | None = None) -> None:
     root = warehouse_root(warehouse_dir)
     db_path = warehouse_db_path(warehouse_dir)
@@ -619,6 +782,440 @@ def warehouse_review(
                 report_params,
             ).df()
     return {"tier": tier, "bucket": bucket, "miss_risk": miss_risk, "reports": reports}
+
+
+def _build_research_candidate_daily(frame: pd.DataFrame, *, target_date: str) -> pd.DataFrame:
+    output = pd.DataFrame()
+    output["target_date"] = _constant_series(frame, target_date)
+    output["symbol"] = _column(frame, "symbol", default="").astype(str).str.zfill(6)
+    output["name"] = _column(frame, "name", "名称", default="")
+    output["tier"] = _column(frame, "research_tier", "tier", default="")
+    output["action_bucket"] = _column(frame, "action_bucket", default="")
+    output["model_bucket"] = output.apply(lambda row: _candidate_model_bucket(row["tier"], row["action_bucket"]), axis=1)
+    output["expected_horizon"] = output.apply(lambda row: _expected_horizon(row["tier"], row["action_bucket"]), axis=1)
+    output["research_score"] = _numeric_column(frame, "research_score")
+    output["shape_score"] = _numeric_column(frame, "score")
+    output["sentiment_score"] = _numeric_column(frame, "sentiment_score")
+    output["stage"] = _column(frame, "stage", default="")
+    output["matched_theme"] = _column(frame, "matched_theme", default="")
+    output["theme_rank"] = _numeric_column(frame, "theme_rank")
+    output["co_rise_count"] = _numeric_column(frame, "co_rise_count")
+    output["risk_level"] = _column(frame, "risk_level", default="")
+    output["risk_tags"] = _column(frame, "risk_tags", default="")
+    output["reason_tags"] = frame.apply(_candidate_reason_tags, axis=1)
+    output["latest_core_news"] = _column(frame, "latest_core_news", default="")
+    output["upgrade_hint"] = _column(frame, "upgrade_hint", default="")
+    attitude = frame.apply(_market_attitude_parts, axis=1, result_type="expand")
+    output["market_attitude_label"] = attitude["label"]
+    output["market_attitude_reasons"] = attitude["reasons"]
+    output["market_attitude_risks"] = attitude["risks"]
+    output["next_status"] = ""
+    return output
+
+
+def _build_stock_market_attitude_daily(frame: pd.DataFrame, *, target_date: str) -> pd.DataFrame:
+    attitude = frame.apply(_market_attitude_parts, axis=1, result_type="expand")
+    output = pd.DataFrame()
+    output["target_date"] = _constant_series(frame, target_date)
+    output["symbol"] = _column(frame, "symbol", default="").astype(str).str.zfill(6)
+    output["name"] = _column(frame, "name", "名称", default="")
+    output["attention_score"] = attitude["attention_score"]
+    output["money_confirmation_score"] = attitude["money_confirmation_score"]
+    output["theme_confirmation_score"] = attitude["theme_confirmation_score"]
+    output["price_action_attitude_score"] = attitude["price_action_attitude_score"]
+    output["event_score"] = attitude["event_score"]
+    output["risk_attitude_score"] = attitude["risk_attitude_score"]
+    output["crowding_risk_score"] = attitude["crowding_risk_score"]
+    output["attitude_label"] = attitude["label"]
+    output["attitude_reasons"] = attitude["reasons"]
+    output["attitude_risks"] = attitude["risks"]
+    output["data_sources"] = "candidate, sentiment, theme, price_volume, risk_notice"
+    return output
+
+
+def _build_missed_opportunity_daily(frame: pd.DataFrame, *, target_date: str) -> pd.DataFrame:
+    output = pd.DataFrame()
+    output["target_date"] = _constant_series(frame, target_date)
+    output["signal_date"] = _column(frame, "signal_date", default=target_date)
+    output["next_date"] = _column(frame, "next_date", default="")
+    output["symbol"] = _column(frame, "symbol", default="").astype(str).str.zfill(6)
+    output["name"] = _column(frame, "name", "名称", default="")
+    output["next_ret"] = _numeric_column(frame, "next_ret")
+    output["model_bucket"] = _column(frame, "model_bucket", default="miss_learnable")
+    output["is_learnable"] = _column(frame, "is_learnable", default="")
+    output["miss_reason"] = _column(frame, "miss_reason", default="")
+    output["risk_level"] = _column(frame, "risk_level", default="")
+    output["risk_tags"] = _column(frame, "risk_tags", default="")
+    output["primary_risk_tag"] = _column(frame, "primary_risk_tag", default="")
+    output["action_hint"] = _column(frame, "action_hint", default="")
+    return output
+
+
+def _build_factor_diagnostics_daily(frame: pd.DataFrame, *, target_date: str) -> pd.DataFrame:
+    output = frame.copy()
+    output.insert(0, "target_date", target_date)
+    output["diagnostic_type"] = _column(output, "table", default="")
+    output["factor_name"] = output.apply(_factor_name, axis=1)
+    output["horizon"] = _column(output, "horizon", default="")
+    return output
+
+
+def _build_strategy_review_daily(frame: pd.DataFrame, *, target_date: str) -> pd.DataFrame:
+    if "table" not in frame.columns:
+        return pd.DataFrame(columns=["target_date", "review_type", "segment_name", "horizon", "verdict", "review_note"])
+    output = frame[frame["table"].astype(str).isin(_strategy_review_tables())].copy()
+    if output.empty:
+        return pd.DataFrame(columns=["target_date", "review_type", "segment_name", "horizon", "verdict", "review_note"])
+    output.insert(0, "target_date", target_date)
+    output["review_type"] = output["table"].astype(str)
+    output["segment_name"] = output.apply(_factor_name, axis=1)
+    output["horizon"] = _column(output, "horizon", default="")
+    output["verdict"] = output.apply(_strategy_verdict, axis=1)
+    output["review_note"] = output.apply(_strategy_review_note, axis=1)
+    return output
+
+
+def _strategy_review_tables() -> set[str]:
+    return {
+        "by_tier",
+        "by_tier_horizon",
+        "by_model_bucket",
+        "by_model_bucket_horizon",
+        "by_action_bucket",
+        "by_action_bucket_horizon",
+        "by_stage",
+        "by_stage_horizon",
+        "loss_attribution",
+        "miss_learnability",
+        "portfolio",
+        "market_capture",
+    }
+
+
+def _candidate_model_bucket(tier: object, action_bucket: object) -> str:
+    tier_text = str(tier or "")
+    bucket_text = str(action_bucket or "")
+    if tier_text in {"A1", "A2"}:
+        return "A1/A2_early_setup"
+    if tier_text == "A3":
+        return "A3_trend_follow"
+    if tier_text.startswith("B") or "B2" in bucket_text:
+        return "B_watchlist"
+    return "other"
+
+
+def _expected_horizon(tier: object, action_bucket: object) -> str:
+    tier_text = str(tier or "")
+    bucket_text = str(action_bucket or "")
+    if tier_text == "A1" or "A1" in bucket_text:
+        return "10-30d"
+    if tier_text == "A2" or "A2" in bucket_text:
+        return "3-15d"
+    if tier_text == "A3" or "A3" in bucket_text:
+        return "1-10d"
+    if "B2a" in bucket_text:
+        return "3-10d"
+    if "B2b" in bucket_text:
+        return "1-5d"
+    if tier_text.startswith("B"):
+        return "1-10d"
+    return "observe"
+
+
+def _candidate_reason_tags(row: pd.Series) -> str:
+    tags: list[str] = []
+    stage = str(row.get("stage", "") or "")
+    stage_map = {
+        "accumulation": "低位蓄势",
+        "pre_breakout": "突破前压缩",
+        "near_breakout": "接近突破",
+        "breakout": "突破确认",
+        "trend_pullback": "趋势回踩",
+        "trend_resume": "趋势再启动",
+    }
+    if stage in stage_map:
+        tags.append(stage_map[stage])
+    theme = str(row.get("matched_theme", "") or "")
+    if theme:
+        tags.append(f"主线:{theme}")
+    if _safe_float(row.get("co_rise_count")) >= 8:
+        tags.append("同主题共振")
+    if _safe_float(row.get("core_news_count")) > 0:
+        tags.append("核心新闻")
+    sentiment = _safe_float(row.get("sentiment_score"))
+    if sentiment >= 70:
+        tags.append("情绪强")
+    elif sentiment >= 60:
+        tags.append("情绪温和")
+    volume_ratio = _safe_float(row.get("volume_ratio"))
+    if volume_ratio >= 1.2:
+        tags.append("量能确认")
+    elif 0 < volume_ratio < 0.8:
+        tags.append("量能不足")
+    if bool(row.get("in_limit_pool", False)):
+        tags.append("涨停池")
+    elif bool(row.get("in_strong_pool", False)):
+        tags.append("强势池")
+    return "；".join(tags)
+
+
+def _market_attitude_parts(row: pd.Series) -> dict:
+    attention = _attention_score(row)
+    money = _money_confirmation_score(row)
+    theme = _theme_confirmation_score(row)
+    price_action = _price_action_attitude_score(row)
+    event = _event_score(row)
+    risk = _risk_attitude_score(row)
+    crowding = _crowding_risk_score(row)
+    label = _attitude_label(attention, money, theme, price_action, event, risk, crowding)
+    reasons = _attitude_reasons(row, attention, money, theme, price_action, event)
+    risks = _attitude_risks(row, risk, crowding)
+    return {
+        "attention_score": round(attention, 2),
+        "money_confirmation_score": round(money, 2),
+        "theme_confirmation_score": round(theme, 2),
+        "price_action_attitude_score": round(price_action, 2),
+        "event_score": round(event, 2),
+        "risk_attitude_score": round(risk, 2),
+        "crowding_risk_score": round(crowding, 2),
+        "label": label,
+        "reasons": "；".join(reasons),
+        "risks": "；".join(risks),
+    }
+
+
+def _attention_score(row: pd.Series) -> float:
+    sentiment = _safe_float(row.get("sentiment_score"))
+    hot_rank = _safe_float(row.get("hot_rank"))
+    hot_rank_score = max(0.0, 100.0 - hot_rank) if hot_rank > 0 else 0.0
+    news_score = min(100.0, _safe_float(row.get("news_count")) * 8 + _safe_float(row.get("core_news_count")) * 25)
+    return _clip(max(sentiment, hot_rank_score, news_score))
+
+
+def _money_confirmation_score(row: pd.Series) -> float:
+    volume_ratio = _safe_float(row.get("volume_ratio"))
+    amount_ma20 = _safe_float(row.get("amount_ma20"))
+    amount_score = 0.0
+    if amount_ma20 >= 500_000_000:
+        amount_score = 30.0
+    elif amount_ma20 >= 200_000_000:
+        amount_score = 20.0
+    elif amount_ma20 >= 80_000_000:
+        amount_score = 10.0
+    volume_score = min(45.0, max(0.0, volume_ratio - 0.7) * 35.0) if volume_ratio > 0 else 0.0
+    pool_score = 20.0 if bool(row.get("in_limit_pool", False)) else (12.0 if bool(row.get("in_strong_pool", False)) else 0.0)
+    stage_score = 10.0 if str(row.get("stage", "")) in {"near_breakout", "breakout", "trend_resume"} else 0.0
+    return _clip(amount_score + volume_score + pool_score + stage_score)
+
+
+def _theme_confirmation_score(row: pd.Series) -> float:
+    score = 0.0
+    theme_rank = _safe_float(row.get("theme_rank"), default=99.0)
+    if theme_rank > 0 and theme_rank <= 10:
+        score += max(20.0, 70.0 - (theme_rank - 1.0) * 5.0)
+    if str(row.get("matched_theme", "") or ""):
+        score = max(score, 55.0)
+    score += min(30.0, _safe_float(row.get("co_rise_count")) * 2.5)
+    return _clip(score)
+
+
+def _price_action_attitude_score(row: pd.Series) -> float:
+    stage = str(row.get("stage", "") or "")
+    stage_score = {
+        "accumulation": 45.0,
+        "pre_breakout": 55.0,
+        "near_breakout": 65.0,
+        "breakout": 70.0,
+        "trend_pullback": 55.0,
+        "trend_resume": 70.0,
+    }.get(stage, 35.0)
+    ret20 = _safe_float(row.get("ret_20_pct"))
+    volume_ratio = _safe_float(row.get("volume_ratio"))
+    if ret20 > 0.24 and volume_ratio > 2.2:
+        stage_score -= 20.0
+    elif ret20 < 0.15 and volume_ratio >= 1.0:
+        stage_score += 8.0
+    return _clip(stage_score)
+
+
+def _event_score(row: pd.Series) -> float:
+    core = _safe_float(row.get("core_news_count"))
+    reports = _safe_float(row.get("research_report_count"))
+    latest_core = str(row.get("latest_core_news", "") or "").strip()
+    return _clip(core * 35.0 + reports * 12.0 + (20.0 if latest_core else 0.0))
+
+
+def _risk_attitude_score(row: pd.Series) -> float:
+    risk_level = str(row.get("risk_level", "") or "")
+    level_score = {"低": 0.0, "中": 25.0, "中高": 55.0, "高": 85.0}.get(risk_level, 10.0)
+    notice_score = min(50.0, _safe_float(row.get("risk_notice_count")) * 25.0)
+    penalty_score = min(60.0, _safe_float(row.get("total_penalty")) * 2.5)
+    return _clip(max(level_score, notice_score, penalty_score))
+
+
+def _crowding_risk_score(row: pd.Series) -> float:
+    score = 0.0
+    ret20 = _safe_float(row.get("ret_20_pct"))
+    volume_ratio = _safe_float(row.get("volume_ratio"))
+    monthly_position = _safe_float(row.get("monthly_position_pct"))
+    price_position = _safe_float(row.get("price_position_pct"))
+    if ret20 > 0.30:
+        score += 35.0
+    elif ret20 > 0.18:
+        score += 20.0
+    if volume_ratio > 4.0:
+        score += 35.0
+    elif volume_ratio > 2.2:
+        score += 20.0
+    if monthly_position > 0.75:
+        score += 20.0
+    if price_position > 0.82:
+        score += 20.0
+    return _clip(score)
+
+
+def _attitude_label(
+    attention: float,
+    money: float,
+    theme: float,
+    price_action: float,
+    event: float,
+    risk: float,
+    crowding: float,
+) -> str:
+    if risk >= 70:
+        return "风险压制"
+    if crowding >= 70 and money < 55:
+        return "过热分歧"
+    if attention >= 65 and money >= 60 and (theme >= 55 or event >= 55) and price_action >= 55:
+        return "强确认"
+    if money >= 50 and (theme >= 45 or attention >= 55 or event >= 45):
+        return "温和确认"
+    if attention >= 65 and money < 45:
+        return "虚热"
+    if attention < 45 and money < 45:
+        return "冷启动"
+    return "观察确认"
+
+
+def _attitude_reasons(
+    row: pd.Series,
+    attention: float,
+    money: float,
+    theme: float,
+    price_action: float,
+    event: float,
+) -> list[str]:
+    reasons: list[str] = []
+    if attention >= 65:
+        reasons.append("热度较高")
+    if money >= 60:
+        reasons.append("资金承接较强")
+    elif money >= 50:
+        reasons.append("资金温和确认")
+    if theme >= 55:
+        theme_name = str(row.get("matched_theme", "") or "")
+        reasons.append(f"主题共振{':' + theme_name if theme_name else ''}")
+    if price_action >= 65:
+        reasons.append("盘面走势确认")
+    if event >= 55:
+        reasons.append("核心事件催化")
+    if not reasons:
+        reasons.append("暂无强证据")
+    return reasons
+
+
+def _attitude_risks(row: pd.Series, risk: float, crowding: float) -> list[str]:
+    risks: list[str] = []
+    if risk >= 55:
+        risks.append(str(row.get("risk_tags", "") or "风险项偏多"))
+    if crowding >= 55:
+        risks.append("拥挤度偏高")
+    if _safe_float(row.get("ret_20_pct")) > 0.18:
+        risks.append("20日涨幅偏热")
+    if _safe_float(row.get("volume_ratio")) > 2.2:
+        risks.append("量能偏热")
+    return [item for item in risks if item]
+
+
+def _factor_name(row: pd.Series) -> str:
+    for column in (
+        "tier",
+        "action_bucket",
+        "model_bucket",
+        "stage",
+        "loss_reason",
+        "miss_reason",
+        "risk_level",
+        "table",
+    ):
+        value = str(row.get(column, "") or "").strip()
+        if value:
+            return value
+    return "overall"
+
+
+def _strategy_verdict(row: pd.Series) -> str:
+    count = _safe_float(row.get("count"))
+    avg_ret = _first_numeric(row, "avg_ret", "avg_next_ret", "avg_preferred_ret")
+    win_rate = _first_numeric(row, "win_rate")
+    loss_rate = _first_numeric(row, "lt_minus5_rate", "loss_rate")
+    if count and count < 3:
+        return "样本不足"
+    if avg_ret >= 0.03 and (win_rate == 0 or win_rate >= 0.55):
+        return "有效"
+    if avg_ret <= -0.02 or loss_rate >= 0.25:
+        return "拖后腿"
+    return "中性"
+
+
+def _strategy_review_note(row: pd.Series) -> str:
+    verdict = _strategy_verdict(row)
+    name = _factor_name(row)
+    horizon = str(row.get("horizon", "") or "")
+    suffix = f"，周期 {horizon}" if horizon else ""
+    if verdict == "有效":
+        return f"{name}{suffix} 表现较好，保留为正向证据。"
+    if verdict == "拖后腿":
+        return f"{name}{suffix} 表现偏弱，后续复盘风险标签和过滤条件。"
+    if verdict == "样本不足":
+        return f"{name}{suffix} 样本不足，只记录不下结论。"
+    return f"{name}{suffix} 表现中性，继续观察。"
+
+
+def _constant_series(frame: pd.DataFrame, value: object) -> pd.Series:
+    return pd.Series([value] * len(frame), index=frame.index)
+
+
+def _column(frame: pd.DataFrame, *names: str, default: object = "") -> pd.Series:
+    for name in names:
+        if name in frame.columns:
+            return frame[name].fillna(default)
+    return _constant_series(frame, default)
+
+
+def _numeric_column(frame: pd.DataFrame, *names: str, default: float = 0.0) -> pd.Series:
+    return pd.to_numeric(_column(frame, *names, default=default), errors="coerce").fillna(default)
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    parsed = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.isna(parsed):
+        return default
+    return float(parsed)
+
+
+def _first_numeric(row: pd.Series, *names: str) -> float:
+    for name in names:
+        if name in row.index:
+            value = _safe_float(row.get(name))
+            if value:
+                return value
+    return 0.0
+
+
+def _clip(value: float, lower: float = 0.0, upper: float = 100.0) -> float:
+    return max(lower, min(upper, float(value)))
 
 
 def _latest_file(root: Path, pattern: str) -> Path | None:

@@ -14,7 +14,7 @@ from quant_a_stock.research.snapshot import SNAPSHOT_ROOT
 
 CORE_TIERS = ("A", "B", "A1", "A2", "A3", "B1", "B2")
 ACTION_TIERS = ("A", "B", "A1", "A2", "A3", "B1")
-FORWARD_HORIZONS = (1, 3, 5)
+FORWARD_HORIZONS = (1, 3, 5, 10, 15, 20, 30)
 TIER_ORDER = {
     "A": 1,
     "A1": 1,
@@ -271,9 +271,12 @@ def build_research_review(
     )
 
 
-def save_research_review_reports(review: ResearchReview) -> tuple[Path, Path, Path]:
+def save_research_review_reports(review: ResearchReview, *, date_prefix: str | None = None) -> tuple[Path, Path, Path]:
     DEFAULT_PATHS.reports.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if date_prefix:
+        stamp = f"{date_prefix.replace('-', '')}_{datetime.now().strftime('%H%M%S')}"
+    else:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     details_path = DEFAULT_PATHS.reports / f"research_review_details_{stamp}.csv"
     summary_path = DEFAULT_PATHS.reports / f"research_review_summary_{stamp}.csv"
     missed_path = DEFAULT_PATHS.reports / f"research_review_missed_{stamp}.csv"
@@ -343,21 +346,21 @@ def _review_markdown(
         "## 核心结论",
         "",
         "- A2、A3、B2a/B2b 要分开评价：A2 看潜伏转强，A3 看趋势延续，B2a 看主线扩散补涨，B2b 看是否升级。",
-        "- 如果 A3 和趋势回踩表现靠前，说明当前市场更奖励主线趋势；如果 A2 次日表现滞后，要继续看 3/5 日窗口，避免误杀潜伏模型。",
+        "- 如果 A3 和趋势回踩表现靠前，说明当前市场更奖励主线趋势；如果 A2/A1 短期滞后，要继续看 10/15/20/30 日窗口，避免误杀潜伏模型。",
         "- 市场强票捕获数偏低时，说明突发催化和 20cm 弹性没有被形态池提前覆盖，需要补“主线突发补票”。",
-        "- 这版复盘同时看 1/3/5 个交易日：A2 重点看 3/5 日，A3 重点看 1/3 日，B2a 看补涨兑现，B2b 只看升级线索。",
+        "- 这版复盘同时看 1/3/5/10/15/20/30 个交易日：A3 看 1-10 日，A2 看 3-15 日，A1 看 10-30 日，B2a/B2b 重点看是否升级和兑现。",
         "",
         "## 模型桶评价口径",
         "",
         "| model_bucket | 中文口径 | 评价窗口 | 用途 |",
         "| --- | --- | --- | --- |",
-        "| A1/A2_early_setup | 早期潜伏/启动确认 | 3-5 日 | 看是否从低位或临界突破转强 |",
+        "| A1/A2_early_setup | 早期潜伏/启动确认 | A1 看 10-30 日，A2 看 3-15 日 | 看是否从低位或临界突破转强 |",
         "| A3_trend_follow | 主线趋势延续 | 1-3 日 | 看主线强趋势是否延续，重点防追高 |",
         "| B_watchlist | 观察补票池 | 1-3 日 | 只评估是否值得升级，不直接当买点 |",
         "| miss_learnable | 可学习 miss | 1 日 | 反推突发主线补票条件 |",
         "| miss_event_only | 不可归因 miss | 1 日 | 复权、事件、低流动性、次新等剔除出策略归因 |",
         "",
-        "## 模型桶 1/3/5 日表现",
+        "## 模型桶多周期表现",
         "",
         _markdown_table(
             review.by_model_bucket_horizon,
@@ -391,7 +394,7 @@ def _review_markdown(
             ],
         ),
         "",
-        "## 动作分组 1/3/5 日表现",
+        "## 动作分组多周期表现",
         "",
         _markdown_table(
             review.by_action_bucket_horizon,
@@ -425,7 +428,7 @@ def _review_markdown(
             ],
         ),
         "",
-        "## 分层 1/3/5 日表现",
+        "## 分层多周期表现",
         "",
         _markdown_table(
             review.by_tier_horizon,
@@ -493,7 +496,7 @@ def _review_markdown(
             ],
         ),
         "",
-        "## 阶段 1/3/5 日表现",
+        "## 阶段多周期表现",
         "",
         _markdown_table(
             review.by_stage_horizon,
@@ -615,7 +618,7 @@ def _review_markdown(
         "## 下一轮调整",
         "",
         "- A3：保留趋势延续能力，但加高位拥挤、放量滞涨和风险公告过滤。",
-        "- A2：用 3-5 日窗口复盘，避免用次日涨跌误判潜伏票。",
+        "- A2：用 3-15 日窗口复盘；A1 用 10-30 日窗口复盘，避免用次日涨跌误判潜伏票。",
         "- B2a：作为主线扩散补票池复盘；B2b：作为主题待确认观察池，不直接当作买点。",
         "- Miss：先剔除复权/除权/特殊事件疑似样本，再反推正常涨停票的主线补票条件。",
         "- 风险：所有补票样本先做公告、质押、减持、问询和流动性核验，不能只因次日大涨就追高。",
@@ -749,17 +752,29 @@ def _merge_risk_level(*levels: object) -> str:
 
 def _evaluation_horizon(tier: object) -> str:
     value = str(tier)
-    if value in {"A", "A1", "A2"}:
-        return "3d_5d"
+    if value == "A1":
+        return "10d_20d_30d"
+    if value in {"A", "A2"}:
+        return "3d_5d_10d_15d"
     if value == "A3":
-        return "1d_3d"
+        return "1d_3d_5d_10d"
     if value in {"B", "B1", "B2"}:
-        return "observe_1d_3d"
+        return "observe_1d_3d_5d_10d"
     return "1d"
 
 
 def _preferred_outcome(tier: object, outcome: dict) -> dict:
-    horizons = (5, 3, 1) if str(tier) in {"A", "A1", "A2"} else (3, 1, 5)
+    value = str(tier)
+    if value == "A1":
+        horizons = (30, 20, 15, 10, 5, 3, 1)
+    elif value in {"A", "A2"}:
+        horizons = (15, 10, 5, 3, 1)
+    elif value == "A3":
+        horizons = (10, 5, 3, 1)
+    elif value in {"B", "B1", "B2"}:
+        horizons = (10, 5, 3, 1)
+    else:
+        horizons = (1,)
     for horizon in horizons:
         prefix = f"{horizon}d"
         ret_key = f"ret_{prefix}"
