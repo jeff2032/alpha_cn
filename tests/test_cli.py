@@ -212,6 +212,31 @@ def test_sync_stock_universe_command_parses_incremental_arguments() -> None:
     assert args.workers == 1
 
 
+def test_refresh_stock_universe_command_parses_arguments() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "refresh-stock-universe",
+            "--providers",
+            "exchange",
+            "sina",
+            "--existing-file",
+            "data/universe/a_stock.csv",
+            "--manual-files",
+            "config/required_symbols.csv",
+            "data/manual/focus_symbols.csv",
+            "--output",
+            "data/universe/a_stock.csv",
+        ]
+    )
+
+    assert args.command == "refresh-stock-universe"
+    assert args.providers == ["exchange", "sina"]
+    assert args.manual_files == ["config/required_symbols.csv", "data/manual/focus_symbols.csv"]
+    assert args.output == "data/universe/a_stock.csv"
+
+
 def test_sync_daily_command_parses_incremental_arguments() -> None:
     parser = build_parser()
 

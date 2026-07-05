@@ -115,6 +115,27 @@ def filter_universe(
     return output.drop_duplicates(subset=["symbol"], keep="first").reset_index(drop=True)
 
 
+def merge_universe_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    """Merge universe snapshots without dropping symbols from older snapshots."""
+
+    standardized = []
+    for frame in frames:
+        if frame is None or frame.empty:
+            continue
+        standardized.append(_standardize_universe_frame(frame, provider="merge").frame)
+
+    if not standardized:
+        return pd.DataFrame(columns=["symbol", "name", "market"])
+
+    output = pd.concat(standardized, ignore_index=True, sort=False)
+    output["symbol"] = output["symbol"].map(normalize_symbol)
+    output["market"] = output["symbol"].map(infer_market)
+    output["name"] = output["name"].fillna("").astype(str)
+    output = output.sort_values(["symbol", "name"], ascending=[True, False])
+    output = output.drop_duplicates(subset=["symbol"], keep="first")
+    return output.sort_values("symbol").reset_index(drop=True)[["symbol", "name", "market"]]
+
+
 def load_universe_file(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"Universe file not found: {path}")

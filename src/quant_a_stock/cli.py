@@ -25,6 +25,7 @@ from quant_a_stock.data_lifecycle import build_retention_plan
 from quant_a_stock.data.universe import fetch_stock_universe
 from quant_a_stock.data.universe import filter_universe
 from quant_a_stock.data.universe import load_universe_file
+from quant_a_stock.data.universe import merge_universe_frames
 from quant_a_stock.data.universe import save_universe_file
 from quant_a_stock.research.candidates import ResearchCandidateConfig
 from quant_a_stock.research.candidates import build_research_candidates
@@ -501,6 +502,81 @@ def list_stock_universe(args: argparse.Namespace) -> None:
     print(f"数据源: {universe.provider}")
     print(f"标的数量: {len(filtered)}")
     print(f"已保存: {output_path}")
+
+
+def refresh_stock_universe(args: argparse.Namespace) -> None:
+    frames = []
+    provider_rows = []
+    existing_path = Path(args.existing_file)
+    if existing_path.exists():
+        existing = load_universe_file(existing_path)
+        frames.append(existing)
+        provider_rows.append({"source": str(existing_path), "status": "保留旧池", "symbols": len(existing), "error": ""})
+    elif args.require_existing:
+        raise SystemExit(f"Universe file not found: {existing_path}")
+    else:
+        provider_rows.append({"source": str(existing_path), "status": "旧池不存在", "symbols": 0, "error": ""})
+
+    for provider in args.providers:
+        try:
+            universe = fetch_stock_universe(provider)
+            frames.append(universe.frame)
+            provider_rows.append(
+                {"source": provider, "status": "已获取", "symbols": len(universe.frame), "error": ""}
+            )
+        except Exception as exc:
+            provider_rows.append(
+                {"source": provider, "status": "失败", "symbols": 0, "error": f"{type(exc).__name__}: {exc}"}
+            )
+            if args.strict:
+                raise
+
+    manual_files = [Path(value) for value in args.manual_files]
+    for manual_path in manual_files:
+        if not manual_path.exists():
+            provider_rows.append({"source": str(manual_path), "status": "手动清单不存在", "symbols": 0, "error": ""})
+            continue
+        manual = load_universe_file(manual_path)
+        frames.append(manual)
+        provider_rows.append({"source": str(manual_path), "status": "已合并手动清单", "symbols": len(manual), "error": ""})
+
+    merged = merge_universe_frames(frames)
+    filtered = filter_universe(
+        merged,
+        markets=_parse_markets(args.markets),
+        exclude_st=not args.include_st,
+    )
+    if args.limit:
+        filtered = filtered.head(args.limit)
+
+    old_symbols = set(existing["symbol"].astype(str)) if existing_path.exists() else set()
+    new_symbols = set(filtered["symbol"].astype(str))
+    added = sorted(new_symbols - old_symbols)
+    removed = sorted(old_symbols - new_symbols)
+
+    output_path = save_universe_file(filtered, path=Path(args.output))
+    report_path = save_report(
+        provider_rows,
+        report_type="refresh_stock_universe_sources",
+    )
+    print(f"股票池刷新完成: {output_path}")
+    print(f"合并后标的: {len(filtered)}")
+    print(f"新增标的: {len(added)}")
+    if added:
+        print("新增示例:")
+        print(", ".join(added[:30]))
+    print(f"不再保留: {len(removed)}")
+    if removed:
+        removed_path = Path(args.removed_output)
+        removed_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"symbol": removed}).to_csv(removed_path, index=False)
+        print(f"不再保留清单: {removed_path}")
+    failed_sources = [row for row in provider_rows if row["status"] == "失败"]
+    if failed_sources:
+        print("失败数据源:")
+        for row in failed_sources:
+            print(f"  {row['source']}: {row['error']}")
+    print(f"数据源报告: {report_path}")
 
 
 def _symbols_from_batch_args(args: argparse.Namespace) -> pd.DataFrame:
@@ -1749,6 +1825,22 @@ def build_parser() -> argparse.ArgumentParser:
     universe.add_argument("--limit", type=int, default=None)
     universe.add_argument("--output", default="data/universe/a_stock.csv")
     universe.set_defaults(func=list_stock_universe)
+
+    refresh_universe = subparsers.add_parser(
+        "refresh-stock-universe",
+        help="合并多个数据源、旧股票池和必保清单，刷新 A 股股票池",
+    )
+    refresh_universe.add_argument("--providers", nargs="+", choices=["eastmoney", "exchange", "sina"], default=["eastmoney", "exchange", "sina"])
+    refresh_universe.add_argument("--existing-file", default="data/universe/a_stock.csv")
+    refresh_universe.add_argument("--manual-files", nargs="*", default=["config/required_symbols.csv"])
+    refresh_universe.add_argument("--markets", nargs="+", default=["sh", "sz"])
+    refresh_universe.add_argument("--include-st", action="store_true")
+    refresh_universe.add_argument("--limit", type=int, default=None)
+    refresh_universe.add_argument("--output", default="data/universe/a_stock.csv")
+    refresh_universe.add_argument("--removed-output", default="data/universe/universe_removed.csv")
+    refresh_universe.add_argument("--strict", action="store_true", help="任一数据源失败就退出；默认保留旧池继续")
+    refresh_universe.add_argument("--require-existing", action="store_true")
+    refresh_universe.set_defaults(func=refresh_stock_universe)
 
     sync_universe = subparsers.add_parser(
         "sync-stock-universe",

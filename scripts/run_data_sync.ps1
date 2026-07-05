@@ -10,6 +10,7 @@
     [int]$FallbackWorkers = 6,
     [double]$SleepSeconds = 0.05,
     [int]$LookbackDays = 60,
+    [switch]$SkipUniverseRefresh,
     [switch]$NoFallback
 )
 
@@ -131,6 +132,20 @@ try {
         $script:PythonExe = "python"
     }
     $env:PYTHONPATH = (Join-Path $ProjectRoot "src") + [IO.Path]::PathSeparator + $env:PYTHONPATH
+
+    if (-not $SkipUniverseRefresh) {
+        Invoke-Quant @(
+            "refresh-stock-universe",
+            "--existing-file", $UniverseFile,
+            "--output", $UniverseFile,
+            "--manual-files", "config/required_symbols.csv"
+        ) -AllowFailure
+        if (-not $script:LastQuantSucceeded) {
+            Write-Step "Universe refresh failed. Keep existing universe file and continue data sync."
+        }
+    } else {
+        Write-Step "Universe refresh skipped by parameter."
+    }
 
     $stalePath = Join-Path $ProjectRoot "data/universe/stale.csv"
     Invoke-CacheDateStatus -OutputStale "data/universe/stale.csv" -Top "30"

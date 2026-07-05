@@ -12,6 +12,18 @@ A 股日线数据只能更新到最近一个交易日。
 
 注意：不要只按周一到周五判断。端午、春节、国庆等交易所休市日也要避开。项目会优先根据本地全市场缓存推断真实交易日；如果传入的是节假日或非交易日，会自动回退到最近一个已缓存交易日。
 
+## 刷新股票池
+
+先刷新股票池，避免旧股票池漏掉能下载的标的：
+
+```powershell
+python -m quant_a_stock.cli refresh-stock-universe --existing-file data/universe/a_stock.csv --output data/universe/a_stock.csv --manual-files config/required_symbols.csv
+```
+
+`refresh-stock-universe` 会合并旧股票池、多个在线数据源和 `config/required_symbols.csv`。某个在线数据源失败时，默认保留旧股票池继续，不会因为接口波动把已有标的删掉。
+
+你临时重点研究的票，可以加到 `config/required_symbols.csv`，后续夜间补数会强制纳入股票池。原则是：只要数据源能下载，就不能因为股票池旧、代码漏或单次接口失败而长期漏数。
+
 ## 检查是否全部下载
 
 检查股票池里的每个标的是否都有本地 CSV 缓存：
