@@ -126,22 +126,20 @@ function Show-ObsidianTree {
         Select-Object Name, LastWriteTime |
         Format-Table -AutoSize
 
-    $reviewRoot = Join-Path $root "每日复盘"
-    if (Test-Path -LiteralPath $reviewRoot) {
-        Write-Section "每日复盘"
-        Get-ChildItem -LiteralPath $reviewRoot -Force |
-            Sort-Object Name -Descending |
-            Select-Object -First $Top Name, LastWriteTime |
-            Format-Table -AutoSize
-    }
+    $sections = @(
+        @{ Name = "开盘决策"; Path = Join-Path $root "开盘决策" },
+        @{ Name = "持仓观察"; Path = Join-Path $root "持仓观察" },
+        @{ Name = "复盘摘要"; Path = Join-Path $root "复盘摘要" }
+    )
 
-    $planRoot = Join-Path $root "开盘计划"
-    if (Test-Path -LiteralPath $planRoot) {
-        Write-Section "开盘计划"
-        Get-ChildItem -LiteralPath $planRoot -Force |
-            Sort-Object Name -Descending |
-            Select-Object -First $Top Name, LastWriteTime, Length |
-            Format-Table -AutoSize
+    foreach ($section in $sections) {
+        if (Test-Path -LiteralPath $section.Path) {
+            Write-Section $section.Name
+            Get-ChildItem -LiteralPath $section.Path -Force |
+                Sort-Object Name -Descending |
+                Select-Object -First $Top Name, LastWriteTime, Length |
+                Format-Table -AutoSize
+        }
     }
 }
 

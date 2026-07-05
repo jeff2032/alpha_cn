@@ -12,6 +12,7 @@
     [string]$ObsidianVaultPath = "G:\Program Files (x86)\Obsidian_base",
     [string]$ObsidianExportDir = "中国A股荐股",
     [switch]$NoObsidianExport,
+    [switch]$ExportOnly,
     [switch]$Force
 )
 
@@ -262,15 +263,15 @@ function Format-CandidateTable {
     }
 
     $lines = @(
-        "| 代码 | 名称 | 分层 | 研究分 | 主题簇 | 阶段 | 节奏 | 扣分 |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- |"
+        "| 代码 | 名称 | 分层 | 研究分 | 主题簇 | 阶段 | 节奏 | 扣分 | 风险 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
     )
     foreach ($row in $items) {
         $score = ""
         $penalty = ""
         try { $score = ([math]::Round([double]$row.research_score, 2)).ToString([Globalization.CultureInfo]::InvariantCulture) } catch {}
         try { $penalty = ([math]::Round([double]$row.total_penalty, 2)).ToString([Globalization.CultureInfo]::InvariantCulture) } catch {}
-        $lines += "| $($row.symbol) | $($row.name) | $($row.research_tier) | $score | $($row.theme_cluster) | $($row.stage) | $($row.setup_phase) | $penalty |"
+        $lines += "| $($row.symbol) | $($row.name) | $($row.research_tier) | $score | $($row.theme_cluster) | $($row.stage) | $($row.setup_phase) | $penalty | $($row.risk_level) |"
     }
     return ($lines -join "`r`n")
 }
@@ -317,6 +318,22 @@ function Format-LifecycleEventTable {
     return ($lines -join "`r`n")
 }
 
+function Test-MinReturn {
+    param(
+        [object]$Value,
+        [double]$MinValue
+    )
+
+    try {
+        if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
+            return $true
+        }
+        return ([double]$Value -ge $MinValue)
+    } catch {
+        return $true
+    }
+}
+
 function Format-PercentText {
     param([object]$Value)
 
@@ -354,6 +371,74 @@ function Format-ThemeTable {
     return ($lines -join "`r`n")
 }
 
+function Format-CandidateDecisionCards {
+    param(
+        [object[]]$Rows,
+        [string]$Mode = "main"
+    )
+
+    $items = @($Rows)
+    if ($items.Count -eq 0) {
+        return "- 暂无"
+    }
+
+    $lines = @()
+    foreach ($row in $items) {
+        $score = ""
+        $penalty = ""
+        try { $score = ([math]::Round([double]$row.research_score, 2)).ToString([Globalization.CultureInfo]::InvariantCulture) } catch {}
+        try { $penalty = ([math]::Round([double]$row.total_penalty, 2)).ToString([Globalization.CultureInfo]::InvariantCulture) } catch {}
+        $theme = if ([string]::IsNullOrWhiteSpace([string]$row.theme_cluster)) { "未命中主线" } else { $row.theme_cluster }
+        $risk = if ([string]::IsNullOrWhiteSpace([string]$row.risk_tags)) { "无明显风险" } else { $row.risk_tags }
+        $observe = if ($Mode -eq "upgrade") {
+            "只看次日持续性、盘中承接和是否升级，不直接当买点。"
+        } else {
+            "看开盘承接、回踩不破和量能不过热。"
+        }
+        $invalid = if ($Mode -eq "upgrade") {
+            "主线转弱、放量滞涨、冲高回落或风险标签加重。"
+        } else {
+            "高开过多后放量滞涨、跌破关键承接位或主线明显转弱。"
+        }
+        $lines += "### $($row.symbol) $($row.name)"
+        $lines += ""
+        $lines += "- 看点：$($row.research_tier) / $($row.action_bucket)，研究分 $score，主题 $theme，风险 $($row.risk_level)，扣分 $penalty。"
+        $lines += "- 观察：$observe"
+        $lines += "- 失效：$invalid"
+        $lines += "- 风险：$risk"
+        $lines += ""
+    }
+    return ($lines -join "`r`n")
+}
+
+function Format-LifecycleDecisionCards {
+    param([object[]]$Rows)
+
+    $items = @($Rows)
+    if ($items.Count -eq 0) {
+        return "- 暂无"
+    }
+
+    $lines = @()
+    foreach ($row in $items) {
+        $ret3 = Format-PercentText $row.ret_3d
+        $ret5 = Format-PercentText $row.ret_5d
+        $ret10 = Format-PercentText $row.ret_10d
+        $returns = @()
+        if ($ret3) { $returns += "3日 $ret3" }
+        if ($ret5) { $returns += "5日 $ret5" }
+        if ($ret10) { $returns += "10日 $ret10" }
+        $returnText = if ($returns.Count -gt 0) { $returns -join "，" } else { "暂无完整收益窗口" }
+        $lines += "### $($row.symbol) $($row.name)"
+        $lines += ""
+        $lines += "- 状态：$($row.current_action_bucket)，已走 $($row.days_since_entry)/$($row.primary_horizon_days) 个交易日，结果 $($row.result_label)。"
+        $lines += "- 观察：仍在观察窗口内，重点看趋势承接和主线是否延续；$returnText。"
+        $lines += "- 失效：回撤继续扩大、降级、命中失败标签或主线退潮。"
+        $lines += ""
+    }
+    return ($lines -join "`r`n")
+}
+
 function New-PreMarketPlanReport {
     param(
         [string]$TargetDir,
@@ -374,7 +459,7 @@ function New-PreMarketPlanReport {
     $marketLine = "- 市场温度：待查看当天复盘"
     $actionLine = "- 操作口径：先看候选分层，再结合开盘强弱确认"
     if ($summary) {
-        $summaryLines = Get-Content -LiteralPath $summary.FullName
+        $summaryLines = Get-Content -LiteralPath $summary.FullName -Encoding UTF8
         $foundMarket = $summaryLines | Where-Object { $_ -like "- 市场温度：*" } | Select-Object -First 1
         $foundAction = $summaryLines | Where-Object { $_ -like "- 操作口径：*" } | Select-Object -First 1
         if ($foundMarket) { $marketLine = $foundMarket }
@@ -383,45 +468,80 @@ function New-PreMarketPlanReport {
 
     $themes = @()
     if ($themeCsv) {
-        $themes = @(Import-Csv -LiteralPath $themeCsv.FullName | Select-Object -First 10)
+        $themes = @(Import-Csv -LiteralPath $themeCsv.FullName -Encoding UTF8 | Select-Object -First 10)
     }
 
     $candidates = @()
     if ($candidateCsv) {
-        $candidates = @(Import-Csv -LiteralPath $candidateCsv.FullName)
+        $candidates = @(Import-Csv -LiteralPath $candidateCsv.FullName -Encoding UTF8)
     }
-    $a12 = @($candidates | Where-Object { $_.research_tier -in @("A1", "A2") } | Select-Object -First 12)
-    $a3 = @($candidates | Where-Object { $_.research_tier -eq "A3" } | Select-Object -First 18)
-    $watch = @($candidates | Where-Object { $_.research_tier -in @("B1", "B2") } | Select-Object -First 12)
+    $mainBuckets = @("主攻-A2启动确认", "主攻-A3趋势延续")
+    $mainAttack = @(
+        $candidates |
+            Where-Object { $_.action_bucket -in $mainBuckets -and $_.risk_level -in @("低", "中") } |
+            Select-Object -First 5
+    )
+    if ($mainAttack.Count -eq 0) {
+        $mainAttack = @($candidates | Where-Object { $_.research_tier -in @("A2", "A3") } | Select-Object -First 5)
+    }
+
+    $upgradeBuckets = @(
+        "观察-A1低位潜伏",
+        "观察-A3高波动",
+        "观察-B2a主线扩散待升级",
+        "观察-B2s主线突发待确认",
+        "补票-B2a主线扩散",
+        "补票-主线突发",
+        "补票-B2强主题",
+        "观察-B2b主题待确认"
+    )
+    $upgradeWatch = @(
+        $candidates |
+            Where-Object { $_.action_bucket -in $upgradeBuckets -and $_.risk_level -ne "高" } |
+            Select-Object -First 10
+    )
 
     $lifecycles = @()
     if ($lifecycleCsv) {
-        $lifecycles = @(Import-Csv -LiteralPath $lifecycleCsv.FullName)
+        $lifecycles = @(Import-Csv -LiteralPath $lifecycleCsv.FullName -Encoding UTF8)
     }
-    $mainTracking = @(
+    $holdTracking = @(
         $lifecycles |
             Where-Object {
                 $_.status -eq "active" -and
                 $_.result_label -in @("pending", "neutral") -and
-                $_.current_action_bucket -in @("主攻-A2启动确认", "主攻-A3趋势延续")
+                $_.current_action_bucket -in @("主攻-A2启动确认", "主攻-A3趋势延续") -and
+                $_.days_since_entry -gt 0 -and
+                $_.risk_level -in @("低", "中") -and
+                (Test-MinReturn $_.ret_3d -0.06) -and
+                (Test-MinReturn $_.ret_5d -0.08)
             } |
             Sort-Object @{ Expression = { try { -[double]$_.current_score } catch { 0 } } } |
-            Select-Object -First 8
+            Select-Object -First 5
     )
     $watchTracking = @(
         $lifecycles |
             Where-Object {
                 $_.status -eq "active" -and
                 $_.result_label -in @("pending", "neutral") -and
-                $_.current_action_bucket -in @("观察-A1低位潜伏", "补票-B2a主线扩散", "补票-B2强主题", "观察-B2b主题待确认")
+                $_.current_action_bucket -in @(
+                    "观察-A1低位潜伏",
+                    "观察-A3高波动",
+                    "观察-B2a主线扩散待升级",
+                    "观察-B2s主线突发待确认",
+                    "补票-B2a主线扩散",
+                    "补票-主线突发",
+                    "补票-B2强主题",
+                    "观察-B2b主题待确认"
+                )
             } |
             Sort-Object @{ Expression = { try { -[double]$_.current_score } catch { 0 } } } |
-            Select-Object -First 12
+            Select-Object -First 8
     )
     $changes = @()
     if ($lifecycleDailyCsv) {
         $changes = @(
-            Import-Csv -LiteralPath $lifecycleDailyCsv.FullName |
+            Import-Csv -LiteralPath $lifecycleDailyCsv.FullName -Encoding UTF8 |
                 Where-Object { $_.target_date -eq $DataDate -and $_.day_status -in @("new", "upgraded", "downgraded") } |
                 Sort-Object day_status, @{ Expression = { try { -[double]$_.research_score } catch { 0 } } } |
                 Select-Object -First 15
@@ -429,72 +549,232 @@ function New-PreMarketPlanReport {
     }
 
     $planPath = Join-Path $TargetDir "$ReportDate.md"
-    $dataReviewLink = "../每日复盘/$DataDate/每日推荐复盘.md"
-    $candidateLink = "../每日复盘/$DataDate/最终候选池.md"
-    $trackingLink = "../每日复盘/$DataDate/滚动跟踪.md"
+    $digestLink = "../复盘摘要/$DataDate.md"
 
     @"
-# 开盘前推荐计划
+# $ReportDate 开盘决策
 
 计划日期：$ReportDate
-数据截至：$DataDate
+数据来源：$DataDate 收盘后
 
-这份是次日开盘前计划，不是 $DataDate 当天复盘。完整当天复盘见：[$DataDate 每日推荐复盘]($dataReviewLink)，候选明细见：[$DataDate 最终候选池]($candidateLink)。
-滚动生命周期跟踪见：[$DataDate 滚动跟踪]($trackingLink)。
+这份是给 $ReportDate 开盘前使用的决策页，只保留少量主攻、可继续观察和升级观察。完整内部报告仍保留在项目 reports/ 和数仓里。
+$DataDate 的简短复盘见：[$DataDate 复盘摘要]($digestLink)。
 
-## 市场口径
+## $DataDate 收盘市场口径
+
+下面是 $DataDate 每日复盘里的市场温度和操作口径，用于 $ReportDate 开盘前参考；这不是 $ReportDate 盘中实时判断。
 
 $marketLine
 $actionLine
 
-## 重点主线
+## $DataDate 收盘主线回顾
+
+下面是 $DataDate 收盘后缓存的市场主线事实，用于 $ReportDate 开盘前参考；这不是 $ReportDate 的盘中实时主线，开盘后如果主线切换，以盘中强弱为准。
 
 $(Format-ThemeTable -Rows $themes)
 
-## A1/A2 潜伏与启动
+## $ReportDate 今日主攻
 
-看 3-5 个交易日是否转强，不用单日涨跌否定。
+只放 A2 启动确认和风险干净的 A3 趋势延续。数量故意压缩，开盘后先看承接，不高开硬追。
 
-$(Format-CandidateTable -Rows $a12)
+$(Format-CandidateDecisionCards -Rows $mainAttack -Mode "main")
 
-## A3 主线趋势
+## $ReportDate 可稍微拿一拿（基于 $DataDate 生命周期跟踪）
 
-看 1-2 个交易日趋势延续和回踩不破，避免高开过热追买。
+这里不是新增推荐，只处理前几天入池后仍在观察窗口、还没命中或失败的主攻票。
 
-$(Format-CandidateTable -Rows $a3)
+$(Format-LifecycleDecisionCards -Rows $holdTracking)
 
-## 旧票滚动跟踪
+## $ReportDate 短线机会和升级观察（基于 $DataDate 候选池）
 
-这里不是新增推荐，只处理前几天入池后仍在生命周期里的票。
+B2a/B2s/B2b 和 A1 都是观察升级池，不直接当买点；只看次日持续性、盘中承接和风险核验。
 
-### 主攻继续跟踪
+$(Format-CandidateDecisionCards -Rows $upgradeWatch -Mode "upgrade")
 
-$(Format-LifecycleTable -Rows $mainTracking)
+## $DataDate 旧票滚动状态
 
-### 观察继续跟踪
+这里是 $DataDate 生命周期中间跟踪结果，只保留给我们判断旧池是否在变好或变坏。
+
+### $DataDate 观察池状态
 
 $(Format-LifecycleTable -Rows $watchTracking)
 
-### 今日变化
+### $DataDate 生命周期变化
 
 $(Format-LifecycleEventTable -Rows $changes)
 
-## B1/B2 观察补票
-
-只做人工复盘和主线补票，不直接当作买点。
-
-$(Format-CandidateTable -Rows $watch)
-
-## 风险口径
+## $ReportDate 风险和失效条件
 
 - 高开过多、放量滞涨、冲高回落的票先观察，不追。
 - 有公告风险、减持、问询、低流动性或疑似复权/特殊事件的样本，只做复盘，不纳入常规决策。
-- A3 当前弹性最好，但波动也最大；A1/A2 更偏潜伏，需要给 3-5 日验证窗口。
+- 主攻 A3 必须低风险、低扣分、不过热、不拥挤；观察-A3高波动只看分歧承接，不追高。
+- A2 看 3-15 日，A1 看 10-30 日；B2 只做升级观察，不能因为在观察池就直接当买点。
 
-这份文档只做研究复盘，不构成买卖建议。
+这份文档只做研究辅助，不构成买卖建议。
 "@ | Set-Content -LiteralPath $planPath -Encoding UTF8
 
     Write-Step "Obsidian export: created pre-market plan -> $planPath"
+}
+
+function New-DailyReviewDigestReport {
+    param(
+        [string]$TargetDir,
+        [string]$DataDate
+    )
+
+    $dateStamp = $DataDate -replace "-", ""
+    $summary = Get-LatestReportFile -Pattern "daily_research_summary_${dateStamp}_*.md"
+    $candidateCsv = Get-LatestReportFile -Pattern "daily_research_candidates_${dateStamp}_*.csv"
+    if ($null -eq $candidateCsv) {
+        $candidateCsv = Get-LatestReportFile -Pattern "research_candidates_${dateStamp}_*.csv"
+    }
+    $themeCsv = Get-LatestReportFile -Pattern "market_theme_${dateStamp}_*.csv"
+    $reviewCsv = Get-LatestReportFile -Pattern "research_review_summary_${dateStamp}_*.csv"
+
+    $marketLine = "- 市场温度：待查看当天复盘"
+    $actionLine = "- 操作口径：先看候选分层，再结合开盘强弱确认"
+    if ($summary) {
+        $summaryLines = Get-Content -LiteralPath $summary.FullName -Encoding UTF8
+        $foundMarket = $summaryLines | Where-Object { $_ -like "- 市场温度：*" } | Select-Object -First 1
+        $foundAction = $summaryLines | Where-Object { $_ -like "- 操作口径：*" } | Select-Object -First 1
+        if ($foundMarket) { $marketLine = $foundMarket }
+        if ($foundAction) { $actionLine = $foundAction }
+    }
+
+    $themes = @()
+    if ($themeCsv) {
+        $themes = @(Import-Csv -LiteralPath $themeCsv.FullName -Encoding UTF8 | Select-Object -First 6)
+    }
+
+    $candidates = @()
+    if ($candidateCsv) {
+        $candidates = @(Import-Csv -LiteralPath $candidateCsv.FullName -Encoding UTF8)
+    }
+    $mainCount = @($candidates | Where-Object { $_.action_bucket -in @("主攻-A2启动确认", "主攻-A3趋势延续") }).Count
+    $upgradeCount = @($candidates | Where-Object { $_.action_bucket -like "观察-B2*" -or $_.action_bucket -eq "观察-A1低位潜伏" }).Count
+    $riskCount = @($candidates | Where-Object { $_.risk_level -in @("中高", "高") -or $_.action_bucket -eq "回避-风险优先" }).Count
+
+    $reviewLine = "- 策略复盘：待查看滚动复盘"
+    if ($reviewCsv) {
+        $reviewRows = @(Import-Csv -LiteralPath $reviewCsv.FullName -Encoding UTF8)
+        $a2 = $reviewRows | Where-Object { $_.table -eq "by_tier_horizon" -and $_.tier -eq "A2" -and $_.horizon -eq "5d" } | Select-Object -First 1
+        $a3 = $reviewRows | Where-Object { $_.table -eq "by_tier_horizon" -and $_.tier -eq "A3" -and $_.horizon -eq "5d" } | Select-Object -First 1
+        if ($a2 -or $a3) {
+            $parts = @()
+            if ($a2) { $parts += "A2 五日均值 $($a2.avg_ret)" }
+            if ($a3) { $parts += "A3 五日均值 $($a3.avg_ret)" }
+            $reviewLine = "- 策略复盘：" + ($parts -join "；")
+        }
+    }
+
+    $digestPath = Join-Path $TargetDir "$DataDate.md"
+    @"
+# $DataDate 复盘摘要
+
+数据日期：$DataDate
+
+## 收盘口径
+
+$marketLine
+$actionLine
+
+## 主线事实
+
+$(Format-ThemeTable -Rows $themes)
+
+## 候选压缩结果
+
+- 主攻候选：$mainCount
+- 升级观察：$upgradeCount
+- 风险/回避样本：$riskCount
+
+## 策略反馈
+
+$reviewLine
+
+详细候选、情绪、滚动复盘和生命周期明细保留在项目内部 reports/ 与数仓中；这页只给用户看结论。
+"@ | Set-Content -LiteralPath $digestPath -Encoding UTF8
+
+    Write-Step "Obsidian export: created review digest -> $digestPath"
+}
+
+function New-HoldingObservationReport {
+    param(
+        [string]$TargetDir,
+        [string]$ReportDate,
+        [string]$DataDate
+    )
+
+    $dateStamp = $DataDate -replace "-", ""
+    $candidateCsv = Get-LatestReportFile -Pattern "daily_research_candidates_${dateStamp}_*.csv"
+    if ($null -eq $candidateCsv) {
+        $candidateCsv = Get-LatestReportFile -Pattern "research_candidates_${dateStamp}_*.csv"
+    }
+    $lifecycleCsv = Get-LatestReportFile -Pattern "candidate_lifecycles_${dateStamp}_*.csv"
+    $holdingsPath = Join-Path $ProjectRoot "data/manual/holdings.csv"
+
+    $candidates = @()
+    if ($candidateCsv) {
+        $candidates = @(Import-Csv -LiteralPath $candidateCsv.FullName -Encoding UTF8)
+    }
+    $lifecycles = @()
+    if ($lifecycleCsv) {
+        $lifecycles = @(Import-Csv -LiteralPath $lifecycleCsv.FullName -Encoding UTF8)
+    }
+
+    $holdingLines = @()
+    if (-not (Test-Path -LiteralPath $holdingsPath)) {
+        $holdingLines += "- 未找到持仓清单：data/manual/holdings.csv。"
+        $holdingLines += "- 需要持仓辅助时，按 config/holdings.example.csv 建一个本地清单；data/ 不提交 git。"
+    } else {
+        $holdings = @(Import-Csv -LiteralPath $holdingsPath -Encoding UTF8)
+        if ($holdings.Count -eq 0) {
+            $holdingLines += "- 持仓清单为空。"
+        }
+        foreach ($holding in $holdings) {
+            $symbol = [string]$holding.symbol
+            $candidate = $candidates | Where-Object { $_.symbol -eq $symbol } | Select-Object -First 1
+            $life = $lifecycles | Where-Object { $_.symbol -eq $symbol } | Select-Object -First 1
+            $name = if ($holding.name) { $holding.name } elseif ($candidate) { $candidate.name } elseif ($life) { $life.name } else { $symbol }
+            $bucket = if ($candidate) { $candidate.action_bucket } elseif ($life) { $life.current_action_bucket } else { "未进入候选/生命周期" }
+            $risk = if ($candidate) { $candidate.risk_level } elseif ($life) { $life.risk_level } else { "未标注" }
+            $tags = if ($candidate -and $candidate.risk_tags) { $candidate.risk_tags } else { "无明显风险标签" }
+            $stance = "等反抽处理"
+            if ($bucket -in @("主攻-A2启动确认", "主攻-A3趋势延续") -and $risk -in @("低", "中")) {
+                $stance = "继续观察"
+            } elseif ($risk -in @("中高", "高") -or $bucket -eq "回避-风险优先") {
+                $stance = "风险退出观察"
+            } elseif ($bucket -like "观察-B2*" -or $bucket -eq "观察-A1低位潜伏") {
+                $stance = "减仓观察"
+            }
+
+            $costText = if ($holding.cost) { "，成本 $($holding.cost)" } else { "" }
+            $holdingLines += "### $symbol $name"
+            $holdingLines += ""
+            $holdingLines += "- 当前口径：$stance。"
+            $holdingLines += "- 原因：$bucket，风险 $risk$costText。"
+            $holdingLines += "- 改善：重新进入主攻、放量承接、风险标签不加重。"
+            $holdingLines += "- 失效：继续破位、反抽无量、主线转弱或公告风险加重。"
+            $holdingLines += "- 风险：$tags"
+            $holdingLines += ""
+        }
+    }
+
+    $holdingPath = Join-Path $TargetDir "$ReportDate.md"
+    @"
+# $ReportDate 持仓观察
+
+计划日期：$ReportDate
+数据来源：$DataDate 收盘后
+
+这页只处理已有持仓，不是新增推荐。输出口径用于观察和复盘，不构成买卖建议。
+
+## 持仓处理
+
+$($holdingLines -join "`r`n")
+"@ | Set-Content -LiteralPath $holdingPath -Encoding UTF8
+
+    Write-Step "Obsidian export: created holding observation -> $holdingPath"
 }
 
 function Export-DailyReportsToObsidian {
@@ -517,69 +797,41 @@ function Export-DailyReportsToObsidian {
     }
 
     $exportRoot = Join-Path $ObsidianVaultPath $ObsidianExportDir
-    $reviewRoot = Join-Path $exportRoot "每日复盘"
-    $planRoot = Join-Path $exportRoot "开盘计划"
-    $strategyRoot = Join-Path $exportRoot "策略迭代"
-    New-Item -ItemType Directory -Force -Path $reviewRoot, $planRoot, $strategyRoot | Out-Null
+    $decisionRoot = Join-Path $exportRoot "开盘决策"
+    $holdingRoot = Join-Path $exportRoot "持仓观察"
+    $digestRoot = Join-Path $exportRoot "复盘摘要"
+    New-Item -ItemType Directory -Force -Path $decisionRoot, $holdingRoot, $digestRoot | Out-Null
 
     $dateStamp = $DataDate -replace "-", ""
-    $dataDir = Join-Path $reviewRoot $DataDate
-    New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
 
     $indexPath = Join-Path $exportRoot "README.md"
-    @"
+    try {
+        @"
 # 中国A股荐股
 
 这个目录由 alpha_cn 研究流程同步生成。
 
 ## 怎么看
 
-- `开盘计划/YYYY-MM-DD.md`：早上最先看的一页纸，给当天开盘前使用。
-- `每日复盘/YYYY-MM-DD/`：收盘后按数据日归档的完整复盘材料。
-- `策略迭代/`：长期沉淀规则复盘、miss 样本反推和风险过滤。
+- `开盘决策/YYYY-MM-DD.md`：每天早上最先看，只保留主攻、可继续观察、升级观察和风险条件。
+- `持仓观察/YYYY-MM-DD.md`：只处理已有持仓，给出继续观察、减仓观察、等反抽处理或风险退出观察口径。
+- `复盘摘要/YYYY-MM-DD.md`：收盘后按数据日归档的一页复盘摘要。
 
 ## 日期口径
 
-- 每日复盘日期 = 数据截至日期，例如 `每日复盘/2026-06-22/`。
-- 开盘计划日期 = 准备交易的日期，例如 `开盘计划/2026-06-23.md`，内容基于上一交易日数据。
+- 复盘摘要日期 = 数据截至日期，例如 `复盘摘要/2026-06-22.md`。
+- 开盘决策和持仓观察日期 = 准备交易的日期，例如 `开盘决策/2026-06-23.md`，内容基于上一交易日数据。
+- 详细候选、情绪、滚动复盘和生命周期明细保留在项目内部 reports/ 与数仓中，不在 Obsidian 日常入口展开。
 "@ | Set-Content -LiteralPath $indexPath -Encoding UTF8
-
-    Copy-LatestMarkdownReport -Pattern "daily_research_summary_${dateStamp}_*.md" -DestinationName "每日推荐复盘.md" -TargetDir $dataDir
-    Copy-LatestMarkdownReport -Pattern "research_candidates_${dateStamp}_*.md" -DestinationName "最终候选池.md" -TargetDir $dataDir
-    Copy-LatestMarkdownReport -Pattern "market_theme_${dateStamp}_*.md" -DestinationName "市场主线.md" -TargetDir $dataDir
-    Copy-LatestMarkdownReport -Pattern "sentiment_watchlist_${dateStamp}_*.md" -DestinationName "情绪观察.md" -TargetDir $dataDir
-    Copy-LatestMarkdownReport -Pattern "research_review_${dateStamp}_*.md" -DestinationName "滚动复盘.md" -TargetDir $dataDir
-    Copy-LatestMarkdownReport -Pattern "candidate_lifecycle_tracking_${dateStamp}_*.md" -DestinationName "滚动跟踪.md" -TargetDir $dataDir
-
-    $reflectionPath = Join-Path $dataDir "策略反思.md"
-    if (-not (Test-Path -LiteralPath $reflectionPath)) {
-        @"
-# 策略反思
-
-计划日期：$DataDate
-数据截至：$DataDate
-
-## 今日候选反馈
-
-- 
-
-## 命中与错过
-
-- 
-
-## 规则调整
-
-- 
-
-## 明日观察
-
-- 
-"@ | Set-Content -LiteralPath $reflectionPath -Encoding UTF8
-        Write-Step "Obsidian export: created reflection note -> $reflectionPath"
+    } catch {
+        Write-Step "Obsidian export: README skipped, file is busy: $indexPath"
     }
 
+    New-DailyReviewDigestReport -TargetDir $digestRoot -DataDate $DataDate
+
     if ($ReportDate -ne $DataDate) {
-        New-PreMarketPlanReport -TargetDir $planRoot -ReportDate $ReportDate -DataDate $DataDate
+        New-PreMarketPlanReport -TargetDir $decisionRoot -ReportDate $ReportDate -DataDate $DataDate
+        New-HoldingObservationReport -TargetDir $holdingRoot -ReportDate $ReportDate -DataDate $DataDate
     }
 }
 
@@ -610,7 +862,7 @@ try {
     $env:PYTHONPATH = (Join-Path $ProjectRoot "src") + [IO.Path]::PathSeparator + $env:PYTHONPATH
 
     $universePath = Join-Path $ProjectRoot $UniverseFile
-    if (-not (Test-Path $universePath)) {
+    if (-not $ExportOnly -and -not (Test-Path $universePath)) {
         throw "Universe file not found: $universePath"
     }
 
@@ -626,6 +878,14 @@ try {
     }
     Write-Step "Data target date: $targetDate"
     Write-Step "Plan/output date: $planDate"
+
+    if ($ExportOnly) {
+        Write-Step "ExportOnly enabled; skip data sync and research generation."
+        Export-DailyReportsToObsidian -ReportDate $planDate -DataDate $targetDate
+        Write-Step "ExportOnly completed. Log: $logPath"
+        return
+    }
+
     $probeBefore = Get-CacheLastDate -Symbol $ProbeSymbol
     Write-Step "Probe $ProbeSymbol last date before sync: $probeBefore"
     Invoke-Quant @(

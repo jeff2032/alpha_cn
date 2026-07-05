@@ -215,23 +215,32 @@ def _build_checks(
             rows.append(_check_row(f"warehouse_table:{table}", "OK", f"最后日期 {last_date}。", target_date))
 
     if target_date:
-        review_dir = obsidian_root / "每日复盘" / target_date
+        digest_path = obsidian_root / "复盘摘要" / f"{target_date}.md"
         rows.append(
             _check_row(
-                "obsidian_daily_review",
-                "OK" if review_dir.exists() else "WARN",
-                str(review_dir),
+                "obsidian_review_digest",
+                "OK" if digest_path.exists() else "WARN",
+                str(digest_path),
                 target_date,
             )
         )
 
     if plan_date:
-        plan_path = obsidian_root / "开盘计划" / f"{plan_date}.md"
+        plan_path = obsidian_root / "开盘决策" / f"{plan_date}.md"
         rows.append(
             _check_row(
-                "obsidian_premarket_plan",
+                "obsidian_open_decision",
                 "OK" if plan_path.exists() else "WARN",
                 str(plan_path),
+                target_date,
+            )
+        )
+        holding_path = obsidian_root / "持仓观察" / f"{plan_date}.md"
+        rows.append(
+            _check_row(
+                "obsidian_holding_observation",
+                "OK" if holding_path.exists() else "WARN",
+                str(holding_path),
                 target_date,
             )
         )

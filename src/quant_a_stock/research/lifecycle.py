@@ -18,7 +18,10 @@ TRACKED_ACTION_BUCKETS = (
     "观察-A1低位潜伏",
     "主攻-A2启动确认",
     "主攻-A3趋势延续",
+    "观察-B2a主线扩散待升级",
+    "观察-B2s主线突发待确认",
     "补票-B2a主线扩散",
+    "补票-主线突发",
     "补票-B2强主题",
     "观察-B2b主题待确认",
 )
@@ -30,8 +33,11 @@ DEFAULT_STRATEGY_VERSION = "research_candidates_v1"
 ACTION_STAGE_RANK = {
     "观察-A1低位潜伏": 1,
     "观察-B2b主题待确认": 1,
+    "观察-B2a主线扩散待升级": 2,
+    "观察-B2s主线突发待确认": 2,
     "补票-B2强主题": 2,
     "补票-B2a主线扩散": 2,
+    "补票-主线突发": 2,
     "主攻-A2启动确认": 3,
     "主攻-A3趋势延续": 4,
 }
@@ -49,7 +55,10 @@ PRIMARY_HORIZON_BY_BUCKET = {
     "A2": 15,
     "主攻-A3趋势延续": 10,
     "A3": 10,
+    "观察-B2a主线扩散待升级": 10,
+    "观察-B2s主线突发待确认": 5,
     "补票-B2a主线扩散": 10,
+    "补票-主线突发": 5,
     "补票-B2强主题": 10,
     "观察-B2b主题待确认": 5,
     "B2": 10,
@@ -62,7 +71,10 @@ TRACKING_WINDOW_BY_BUCKET = {
     "A2": 15,
     "主攻-A3趋势延续": 10,
     "A3": 10,
+    "观察-B2a主线扩散待升级": 10,
+    "观察-B2s主线突发待确认": 5,
     "补票-B2a主线扩散": 10,
+    "补票-主线突发": 5,
     "补票-B2强主题": 10,
     "观察-B2b主题待确认": 5,
     "B2": 10,
@@ -781,7 +793,15 @@ def _render_lifecycle_markdown(tracking: CandidateLifecycleTracking, *, top: int
     active = lifecycles[lifecycles["status"] == "active"].copy()
     actionable_labels = ["pending", "neutral"]
     main_buckets = {"主攻-A2启动确认", "主攻-A3趋势延续"}
-    secondary_buckets = {"补票-B2a主线扩散", "补票-B2强主题", "观察-B2b主题待确认", "观察-A1低位潜伏"}
+    secondary_buckets = {
+        "观察-B2a主线扩散待升级",
+        "观察-B2s主线突发待确认",
+        "补票-B2a主线扩散",
+        "补票-主线突发",
+        "补票-B2强主题",
+        "观察-B2b主题待确认",
+        "观察-A1低位潜伏",
+    }
 
     main = active[
         active["current_action_bucket"].isin(main_buckets)
@@ -964,7 +984,7 @@ def _render_lifecycle_markdown(tracking: CandidateLifecycleTracking, *, top: int
             "",
             "- `active` 表示仍在观察窗口内，且最近消失不超过 3 个交易日。",
             "- `expired` 表示观察窗口已经走完，后续主要进入策略复盘。",
-            "- A3 主要看 1/3/5/10 日，A2 看 3/5/10/15 日，A1 看 10/20/30 日，B2b 只给 3/5 日升级窗口。",
+            "- A3 主要看 1/3/5/10 日，A2 看 3/5/10/15 日，A1 看 10/20/30 日，B2a 只做 3/5/10 日升级观察，B2s/B2b 只给 3/5 日升级窗口。",
             "- `strong_hit` / `hit` / `failed` 根据各分组主要观察窗口的最大浮盈和最大回撤打标。",
             "- 这份报告用于复盘和跟踪，不构成买卖建议。",
         ]
@@ -1108,7 +1128,10 @@ def _first_text(*values: object) -> str:
 def _bucket_code(bucket_or_tier: str, tier: str) -> str:
     mapping = {
         "补票-B2强主题": "B2",
+        "观察-B2a主线扩散待升级": "B2a",
         "补票-B2a主线扩散": "B2a",
+        "观察-B2s主线突发待确认": "B2s",
+        "补票-主线突发": "B2s",
         "观察-B2b主题待确认": "B2b",
         "主攻-A2启动确认": "A2",
         "主攻-A3趋势延续": "A3",

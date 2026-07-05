@@ -29,24 +29,38 @@ TIER_ORDER = {
 MODEL_BUCKET_ORDER = {
     "A1/A2_early_setup": 1,
     "A3_trend_follow": 2,
-    "B_watchlist": 3,
-    "miss_learnable": 4,
-    "miss_event_only": 5,
+    "B2a_theme_spread": 3,
+    "B_surge_replenish": 4,
+    "B2b_theme_watch": 5,
+    "B_watchlist": 6,
+    "miss_learnable": 7,
+    "miss_event_only": 8,
     "other": 9,
 }
 ACTION_BUCKET_ORDER = {
     "主攻-A2启动确认": 1,
     "主攻-A3趋势延续": 2,
+    "观察-B2a主线扩散待升级": 3,
     "补票-B2a主线扩散": 3,
-    "补票-B2强主题": 3,
-    "观察-B2b主题待确认": 4,
-    "观察-A1低位潜伏": 5,
-    "观察-A3高波动": 6,
-    "观察-B级候选": 7,
-    "观察-低优先级": 8,
+    "观察-B2s主线突发待确认": 4,
+    "补票-主线突发": 4,
+    "补票-B2强主题": 4,
+    "观察-B2b主题待确认": 5,
+    "观察-A1低位潜伏": 6,
+    "观察-A3高波动": 7,
+    "观察-B级候选": 8,
+    "观察-低优先级": 9,
     "回避-风险优先": 9,
 }
-ACTION_BUCKETS = ("主攻-A2启动确认", "主攻-A3趋势延续", "补票-B2a主线扩散", "补票-B2强主题")
+ACTION_BUCKETS = (
+    "主攻-A2启动确认",
+    "主攻-A3趋势延续",
+    "观察-B2a主线扩散待升级",
+    "观察-B2s主线突发待确认",
+    "补票-B2a主线扩散",
+    "补票-主线突发",
+    "补票-B2强主题",
+)
 
 
 @dataclass(frozen=True)
@@ -111,9 +125,9 @@ def build_research_review(
             )
             if not outcome:
                 continue
-            model_bucket = _model_bucket(row["research_tier"])
-            preferred = _preferred_outcome(row["research_tier"], outcome)
             action_bucket = _clean_text(row.get("action_bucket", "")) or _fallback_action_bucket(row["research_tier"])
+            model_bucket = _model_bucket(row["research_tier"], action_bucket)
+            preferred = _preferred_outcome(row["research_tier"], outcome)
             risk_tags = _merge_tags(_split_tags(row.get("risk_tags", "")), _candidate_risk_tags(row, outcome))
             risk_level = _merge_risk_level(row.get("risk_level", ""), _candidate_risk_level(risk_tags))
             detail_rows.append(
@@ -345,9 +359,9 @@ def _review_markdown(
         "",
         "## 核心结论",
         "",
-        "- A2、A3、B2a/B2b 要分开评价：A2 看潜伏转强，A3 看趋势延续，B2a 看主线扩散补涨，B2b 看是否升级。",
+        "- A2、A3、B2a/B2s/B2b 要分开评价：A2 看潜伏转强，A3 看趋势延续，B2a 看主线扩散后是否升级，B2s 看主线突发是否持续，B2b 看是否确认。",
         "- 如果 A3 和趋势回踩表现靠前，说明当前市场更奖励主线趋势；如果 A2/A1 短期滞后，要继续看 10/15/20/30 日窗口，避免误杀潜伏模型。",
-        "- 市场强票捕获数偏低时，说明突发催化和 20cm 弹性没有被形态池提前覆盖，需要补“主线突发补票”。",
+        "- 市场强票捕获数偏低时，说明突发催化和 20cm 弹性没有被形态池提前覆盖，需要补“主线突发观察”，但不直接当买点。",
         "- 这版复盘同时看 1/3/5/10/15/20/30 个交易日：A3 看 1-10 日，A2 看 3-15 日，A1 看 10-30 日，B2a/B2b 重点看是否升级和兑现。",
         "",
         "## 模型桶评价口径",
@@ -356,8 +370,11 @@ def _review_markdown(
         "| --- | --- | --- | --- |",
         "| A1/A2_early_setup | 早期潜伏/启动确认 | A1 看 10-30 日，A2 看 3-15 日 | 看是否从低位或临界突破转强 |",
         "| A3_trend_follow | 主线趋势延续 | 1-3 日 | 看主线强趋势是否延续，重点防追高 |",
-        "| B_watchlist | 观察补票池 | 1-3 日 | 只评估是否值得升级，不直接当买点 |",
-        "| miss_learnable | 可学习 miss | 1 日 | 反推突发主线补票条件 |",
+        "| B2a_theme_spread | 主线扩散升级观察 | 1-10 日 | 看主题扩散后能否升级到主攻或兑现 |",
+        "| B_surge_replenish | 主线突发待确认 | 1-5 日 | 反推明显 miss 的正常形态观察条件，不直接当买点 |",
+        "| B2b_theme_watch | 主题待确认观察 | 1-5 日 | 看是否升级，不直接当买点 |",
+        "| B_watchlist | 普通观察池 | 1-3 日 | 只评估是否值得升级，不直接当买点 |",
+        "| miss_learnable | 可学习 miss | 1 日 | 反推突发主线观察条件 |",
         "| miss_event_only | 不可归因 miss | 1 日 | 复权、事件、低流动性、次新等剔除出策略归因 |",
         "",
         "## 模型桶多周期表现",
@@ -619,9 +636,9 @@ def _review_markdown(
         "",
         "- A3：保留趋势延续能力，但加高位拥挤、放量滞涨和风险公告过滤。",
         "- A2：用 3-15 日窗口复盘；A1 用 10-30 日窗口复盘，避免用次日涨跌误判潜伏票。",
-        "- B2a：作为主线扩散补票池复盘；B2b：作为主题待确认观察池，不直接当作买点。",
-        "- Miss：先剔除复权/除权/特殊事件疑似样本，再反推正常涨停票的主线补票条件。",
-        "- 风险：所有补票样本先做公告、质押、减持、问询和流动性核验，不能只因次日大涨就追高。",
+        "- B2a：作为主线扩散升级观察池复盘；B2s：作为主线突发待确认池复盘；B2b：作为主题待确认观察池，不直接当作买点。",
+        "- Miss：先剔除复权/除权/特殊事件疑似样本，再反推正常涨停票的主线观察条件。",
+        "- 风险：所有升级观察样本先做公告、质押、减持、问询和流动性核验，不能只因次日大涨就追高。",
         "",
         "这份报告只做策略复盘，不构成买卖建议。",
     ]
@@ -699,12 +716,19 @@ def _load_snapshot_scan_index(snapshot_dir: Path) -> dict[str, dict]:
     return rows
 
 
-def _model_bucket(tier: object) -> str:
+def _model_bucket(tier: object, action_bucket: object = "") -> str:
     value = str(tier)
+    bucket = _clean_text(action_bucket)
     if value in {"A", "A1", "A2"}:
         return "A1/A2_early_setup"
     if value == "A3":
         return "A3_trend_follow"
+    if "B2a" in bucket:
+        return "B2a_theme_spread"
+    if "主线突发" in bucket:
+        return "B_surge_replenish"
+    if "B2b" in bucket:
+        return "B2b_theme_watch"
     if value in {"B", "B1", "B2"}:
         return "B_watchlist"
     return "other"
@@ -972,10 +996,10 @@ def _miss_action_hint(*, risk_tags: list[str], scan_source: str) -> str:
     if "超常规涨跌幅" in joined:
         return "剔除出策略归因，按复权/事件样本单独复核。"
     if "成交额偏低" in joined or "次新" in joined:
-        return "只做事件观察，不纳入常规补票池。"
+        return "只做事件观察，不纳入常规升级观察池。"
     if scan_source:
         return "复核为何未进入最终候选，优先检查情绪、主题和风险扣分。"
-    return "纳入主线突发补票池反推，但追高前必须补情绪和公告核验。"
+    return "纳入主线突发观察池反推，但追高前必须补情绪和公告核验。"
 
 
 def _miss_is_learnable(risk_tags: list[str]) -> bool:
@@ -1254,8 +1278,16 @@ def _portfolio_summary(details: pd.DataFrame) -> pd.DataFrame:
             for buckets, bucket in (
                 (("主攻-A2启动确认", "主攻-A3趋势延续"), "主攻池"),
                 (
-                    ("主攻-A2启动确认", "主攻-A3趋势延续", "补票-B2a主线扩散", "补票-B2强主题"),
-                    "主攻+B2a补票",
+                    (
+                        "主攻-A2启动确认",
+                        "主攻-A3趋势延续",
+                        "观察-B2a主线扩散待升级",
+                        "观察-B2s主线突发待确认",
+                        "补票-B2a主线扩散",
+                        "补票-主线突发",
+                        "补票-B2强主题",
+                    ),
+                    "主攻+B2升级观察",
                 ),
                 (("观察-A1低位潜伏", "观察-A3高波动", "观察-B2b主题待确认", "观察-B级候选"), "观察池"),
             ):

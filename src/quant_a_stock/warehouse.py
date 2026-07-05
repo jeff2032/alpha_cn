@@ -102,9 +102,12 @@ def ingest_latest_reports(
     loaded_reports: dict[str, pd.DataFrame] = {}
 
     for table_name, pattern in CSV_REPORT_SPECS.items():
-        path = _latest_file(reports_root, pattern)
+        path = _latest_file_for_date(reports_root, pattern, target_date)
         if path is None:
-            report_rows.append(_report_row(resolved_run_id, target_date, table_name, None, 0, "missing", ingested_at))
+            latest_path = _latest_file(reports_root, pattern)
+            status = "missing_for_date" if latest_path is not None else "missing"
+            _clear_target_partition(table_name, target_date=target_date, warehouse_dir=warehouse_dir)
+            report_rows.append(_report_row(resolved_run_id, target_date, table_name, latest_path, 0, status, ingested_at))
             continue
         frame = pd.read_csv(path, dtype={"symbol": str})
         output = _with_metadata(
@@ -131,8 +134,11 @@ def ingest_latest_reports(
     )
 
     for report_type, pattern in MARKDOWN_REPORT_SPECS.items():
-        path = _latest_file(reports_root, pattern)
+        path = _latest_file_for_date(reports_root, pattern, target_date)
         status = "indexed" if path else "missing"
+        if path is None:
+            path = _latest_file(reports_root, pattern)
+            status = "missing_for_date" if path else "missing"
         report_rows.append(_report_row(resolved_run_id, target_date, report_type, path, 0, status, ingested_at))
 
     report_index = pd.DataFrame(report_rows)
@@ -185,7 +191,13 @@ def backfill_research_snapshots(
                 snapshot_rows.append(row)
                 all_rows.append(row)
                 continue
-            frame = pd.read_csv(path, dtype={"symbol": str})
+            try:
+                frame = pd.read_csv(path, dtype={"symbol": str})
+            except pd.errors.EmptyDataError:
+                row = _report_row(resolved_run_id, target_date, table_name, path, 0, "empty", ingested_at)
+                snapshot_rows.append(row)
+                all_rows.append(row)
+                continue
             output = _with_metadata(
                 frame,
                 run_id=resolved_run_id,
@@ -609,6 +621,9 @@ def refresh_warehouse_views(*, warehouse_dir: Path | None = None) -> None:
             table_root = parquet_root(warehouse_dir) / table_name
             if not table_root.exists():
                 continue
+            if not any(table_root.rglob("*.parquet")):
+                conn.execute(f"DROP VIEW IF EXISTS {table_name}")
+                continue
             pattern = _duckdb_path(table_root / "**" / "*.parquet")
             conn.execute(
                 f"""
@@ -899,6 +914,12 @@ def _candidate_model_bucket(tier: object, action_bucket: object) -> str:
         return "A1/A2_early_setup"
     if tier_text == "A3":
         return "A3_trend_follow"
+    if "B2a" in bucket_text:
+        return "B2a_theme_spread"
+    if "主线突发" in bucket_text:
+        return "B_surge_replenish"
+    if "B2b" in bucket_text:
+        return "B2b_theme_watch"
     if tier_text.startswith("B") or "B2" in bucket_text:
         return "B_watchlist"
     return "other"
@@ -915,6 +936,8 @@ def _expected_horizon(tier: object, action_bucket: object) -> str:
         return "1-10d"
     if "B2a" in bucket_text:
         return "3-10d"
+    if "主线突发" in bucket_text:
+        return "1-5d"
     if "B2b" in bucket_text:
         return "1-5d"
     if tier_text.startswith("B"):
@@ -1225,6 +1248,19 @@ def _latest_file(root: Path, pattern: str) -> Path | None:
     return matches[0] if matches else None
 
 
+def _latest_file_for_date(root: Path, pattern: str, target_date: str) -> Path | None:
+    if not root.exists():
+        return None
+    date_token = target_date.replace("-", "")
+    matches = [
+        path
+        for path in root.glob(pattern)
+        if date_token in path.name
+    ]
+    matches = sorted(matches, key=lambda path: path.stat().st_mtime, reverse=True)
+    return matches[0] if matches else None
+
+
 def _with_metadata(
     frame: pd.DataFrame,
     *,
@@ -1259,6 +1295,11 @@ def _write_parquet(
         conn.register("warehouse_frame", frame)
         conn.execute(f"COPY warehouse_frame TO '{_duckdb_path(output_path)}' (FORMAT PARQUET)")
     return output_path
+
+
+def _clear_target_partition(table_name: str, *, target_date: str, warehouse_dir: Path | None) -> None:
+    output_dir = parquet_root(warehouse_dir) / table_name / f"target_date={target_date}"
+    _replace_target_partition(output_dir, warehouse_dir=warehouse_dir)
 
 
 def _report_row(

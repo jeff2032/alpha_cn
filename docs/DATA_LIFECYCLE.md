@@ -6,7 +6,7 @@
 
 | 层 | 路径 | 定位 | 保留策略 |
 | --- | --- | --- | --- |
-| 用户结论层 | `G:\Program Files (x86)\Obsidian_base\中国A股荐股\` | 给持仓人/使用者看的短结论：明日主攻、可拿一拿、短线机会、观察池、风险/失效条件、昨日推荐复盘摘要 | 人工保留，不自动清理 |
+| 用户结论层 | `G:\Program Files (x86)\Obsidian_base\中国A股荐股\` | 给持仓人/使用者看的短结论：开盘决策、持仓观察、复盘摘要 | 人工保留，不自动清理 |
 | 中间复盘层 | `data/warehouse/parquet/` + `data/warehouse/alpha_cn.duckdb` | 给我们复盘、聚合、反推和因子挖掘用，稳定保存候选、生命周期、miss、因子诊断和策略复盘事实表 | 长期保留；DuckDB 可重建，Parquet 是主存储 |
 | 原始数据层 | `data/cache/`、`data/snapshots/research/`、`reports/`、`logs/` | 行情、行业、公告、主题、候选快照、运行报告和日志；用于排障、回填和可追溯 | 行情缓存暂不清理；快照、reports 和 logs 按保留策略清理 |
 
@@ -22,7 +22,7 @@
 6. `warehouse-backfill-snapshots` 已把研究快照写入仓库，并派生 `research_candidate_daily`、`stock_market_attitude_daily`。
 7. `track-candidates` 已把 A1/A2/A3/B2 候选生命周期写入仓库。
 8. `warehouse-ingest` 已索引最新报告和研究结果，并派生 miss、因子诊断、策略复盘中间层。
-9. Obsidian 中有 `每日复盘/数据截至日/` 和必要时的 `开盘计划/计划日期.md`。
+9. Obsidian 中有 `复盘摘要/数据截至日.md`、`开盘决策/计划日期.md` 和 `持仓观察/计划日期.md`。
 
 ## 日常检查
 
@@ -52,7 +52,7 @@
 - 不再从散落的 `reports/*.csv` 拼长期统计。
 - `reports/` 只作为当天运行产物和排障入口。
 - `data/snapshots/` 只作为快照过渡层，不作为最终主存储。
-- 开盘计划和人工判断进入 Obsidian；后续如果要量化“人工是否采纳”，再单独入仓。
+- 开盘决策、持仓观察和复盘摘要进入 Obsidian；后续如果要量化“人工是否采纳”，再单独入仓。
 
 ## 中间层事实表
 
@@ -76,8 +76,8 @@
 | 字段 | 含义 |
 | --- | --- |
 | `sample_type` | 样本类型，当前候选为 `candidate`，错过样本为 `miss` |
-| `model_bucket` | 模型桶：`A1/A2_early_setup`、`A3_trend_follow`、`B_watchlist`、`miss_learnable`、`miss_event_only` |
-| `action_bucket` | 动作分组：主攻-A2启动确认、主攻-A3趋势延续、补票-B2a主线扩散、观察-B2b主题待确认、观察或回避 |
+| `model_bucket` | 模型桶：`A1/A2_early_setup`、`A3_trend_follow`、`B2a_theme_spread`、`B_surge_replenish`、`B2b_theme_watch`、`B_watchlist`、`miss_learnable`、`miss_event_only` |
+| `action_bucket` | 动作分组：主攻-A2启动确认、主攻-A3趋势延续、观察-B2a主线扩散待升级、观察-B2s主线突发待确认、观察-B2b主题待确认、观察或回避 |
 | `evaluation_horizon` | 评价窗口：A1 看 10/20/30 日，A2 看 3/5/10/15 日，A3 看 1/3/5/10 日，观察池先看是否升级 |
 | `preferred_horizon` | 当前样本优先评价周期 |
 | `preferred_ret` | 当前样本优先评价周期收益 |
@@ -110,7 +110,10 @@
 
 - `主攻-A2启动确认`
 - `主攻-A3趋势延续`
-- `补票-B2a主线扩散`
+- `观察-B2a主线扩散待升级`
+- `观察-B2s主线突发待确认`
+- `补票-B2a主线扩散`，历史兼容桶名
+- `补票-主线突发`，历史兼容桶名
 - `补票-B2强主题`，历史兼容桶名
 - `观察-B2b主题待确认`
 

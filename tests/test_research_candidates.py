@@ -160,6 +160,107 @@ def test_build_research_candidates_classifies_trend_pullback_as_a3() -> None:
     assert leader["stage_bonus"] > 0
 
 
+def test_build_research_candidates_demotes_crowded_a3_to_watch() -> None:
+    scan = pd.DataFrame(
+        [
+            {
+                "symbol": "300549",
+                "timestamp": "2026-06-12",
+                "stage": "trend_resume",
+                "setup_phase": "强趋势再启动",
+                "score": 72.0,
+                "volume_ratio": 1.4,
+                "ret_20_pct": 0.08,
+                "ret_60_pct": 0.50,
+                "drawdown_from_high_pct": -0.08,
+                "close_vs_trend_pct": 0.22,
+                "monthly_position_pct": 0.79,
+                "price_position_pct": 0.70,
+                "amount_ma20": 1_000_000_000,
+            }
+        ]
+    )
+    sentiment = pd.DataFrame(
+        [
+            {
+                "symbol": "300549",
+                "name": "高位趋势",
+                "sentiment_score": 70.0,
+                "core_news_count": 1,
+                "top_keywords": "光通信、半导体",
+            }
+        ]
+    )
+    theme = pd.DataFrame([{"theme": "半导体", "theme_score": 60.0}])
+    profiles = pd.DataFrame(
+        [{"symbol": "300549", "industry": "计算机、通信和其他电子设备制造业", "listing_date": "2016-08-12"}]
+    )
+
+    result = build_research_candidates(
+        scan,
+        sentiment,
+        theme=theme,
+        profiles=profiles,
+        target_date="2026-06-12",
+    )
+
+    row = result.iloc[0]
+    assert row["research_tier"] == "A3"
+    assert row["action_bucket"] == "观察-A3高波动"
+    assert "趋势高位拥挤" in row["risk_tags"]
+
+
+def test_build_research_candidates_keeps_hot_a3_out_of_main_attack() -> None:
+    scan = pd.DataFrame(
+        [
+            {
+                "symbol": "300550",
+                "timestamp": "2026-06-12",
+                "stage": "trend_resume",
+                "setup_phase": "强趋势再启动",
+                "score": 72.0,
+                "volume_ratio": 1.5,
+                "ret_20_pct": 0.16,
+                "ret_60_pct": 0.42,
+                "drawdown_from_high_pct": -0.08,
+                "close_vs_trend_pct": 0.22,
+                "monthly_position_pct": 0.55,
+                "price_position_pct": 0.60,
+                "amount_ma20": 1_000_000_000,
+            }
+        ]
+    )
+    sentiment = pd.DataFrame(
+        [
+            {
+                "symbol": "300550",
+                "name": "偏热趋势",
+                "sentiment_score": 70.0,
+                "core_news_count": 1,
+                "top_keywords": "光通信、半导体",
+            }
+        ]
+    )
+    theme = pd.DataFrame([{"theme": "半导体", "theme_score": 60.0}])
+    profiles = pd.DataFrame(
+        [{"symbol": "300550", "industry": "计算机、通信和其他电子设备制造业", "listing_date": "2016-08-12"}]
+    )
+
+    result = build_research_candidates(
+        scan,
+        sentiment,
+        theme=theme,
+        profiles=profiles,
+        target_date="2026-06-12",
+    )
+
+    row = result.iloc[0]
+    assert row["research_tier"] == "A3"
+    assert row["risk_level"] == "中"
+    assert row["action_bucket"] == "观察-A3高波动"
+    assert "20日涨幅偏热" in row["risk_tags"]
+
+
 def test_build_research_candidates_marks_strong_theme_b2_as_replenish_watch() -> None:
     scan = pd.DataFrame(
         [
@@ -184,6 +285,7 @@ def test_build_research_candidates_marks_strong_theme_b2_as_replenish_watch() ->
                 "symbol": "688001",
                 "name": "强芯科技",
                 "sentiment_score": 40.0,
+                "core_news_count": 1,
                 "top_keywords": "半导体、存储芯片",
             }
         ]
@@ -205,8 +307,57 @@ def test_build_research_candidates_marks_strong_theme_b2_as_replenish_watch() ->
     assert row["research_tier"] == "B2"
     assert bool(row["is_strong_theme_candidate"]) is True
     assert row["b2_subtype"] == "B2a"
-    assert row["action_bucket"] == "补票-B2a主线扩散"
-    assert "主线扩散补涨" in row["upgrade_hint"]
+    assert row["action_bucket"] == "观察-B2a主线扩散待升级"
+    assert "主线扩散观察" in row["upgrade_hint"]
+
+
+def test_build_research_candidates_marks_mainline_surge_replenish() -> None:
+    scan = pd.DataFrame(
+        [
+            {
+                "symbol": "688003",
+                "timestamp": "2026-06-12",
+                "stage": "near_breakout",
+                "setup_phase": "接近突破确认",
+                "score": 36.0,
+                "volume_ratio": 2.7,
+                "ret_20_pct": 0.14,
+                "ret_60_pct": 0.12,
+                "drawdown_from_high_pct": -0.08,
+                "close_vs_trend_pct": 0.10,
+                "price_position_pct": 0.72,
+                "amount_ma20": 300_000_000,
+            }
+        ]
+    )
+    sentiment = pd.DataFrame(
+        [
+            {
+                "symbol": "688003",
+                "name": "突发科技",
+                "sentiment_score": 58.0,
+                "top_keywords": "半导体、存储芯片",
+            }
+        ]
+    )
+    theme = pd.DataFrame([{"theme": "半导体", "theme_score": 120.0}])
+    profiles = pd.DataFrame(
+        [{"symbol": "688003", "industry": "计算机、通信和其他电子设备制造业", "listing_date": "2020-01-01"}]
+    )
+
+    result = build_research_candidates(
+        scan,
+        sentiment,
+        theme=theme,
+        profiles=profiles,
+        target_date="2026-06-12",
+    )
+
+    row = result.iloc[0]
+    assert row["research_tier"] == "B2"
+    assert row["b2_subtype"] == "B2s"
+    assert row["action_bucket"] == "观察-B2s主线突发待确认"
+    assert "主线突发观察" in row["upgrade_hint"]
 
 
 def test_build_research_candidates_splits_b2b_theme_watch() -> None:

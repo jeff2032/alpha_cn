@@ -70,7 +70,7 @@ Windows PowerShell 5.1 对无 BOM 的 UTF-8 脚本不稳定。如果 `.ps1` 里�
 .\scripts\alpha.ps1 obsidian-tree
 ```
 
-需要重新生成开盘前计划时：
+需要重新生成开盘决策、持仓观察和复盘摘要时：
 
 ```powershell
 .\scripts\alpha.ps1 daily

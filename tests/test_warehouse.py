@@ -82,7 +82,7 @@ def test_ingest_latest_reports_builds_parquet_and_review_views(tmp_path: Path) -
                 "name": "特锐德",
                 "next_ret": 0.20,
                 "risk_level": "中",
-                "miss_reason": "主线突发补票",
+                "miss_reason": "主线突发观察",
             }
         ],
     )
@@ -141,6 +141,51 @@ def test_ingest_latest_reports_builds_parquet_and_review_views(tmp_path: Path) -
     assert candidates_rows_after_rerun == 1
 
 
+def test_ingest_latest_reports_requires_matching_target_date(tmp_path: Path) -> None:
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    warehouse_dir = tmp_path / "warehouse"
+
+    _write_csv(
+        reports_dir / "research_candidates_20260618_070000.csv",
+        [{"symbol": "2137", "name": "实益达", "research_tier": "A2", "research_score": 72.5}],
+    )
+    target_sentiment = reports_dir / "sentiment_watchlist_20260618_070000.csv"
+    _write_csv(
+        target_sentiment,
+        [{"symbol": "002137", "sentiment_score": 88.0}],
+    )
+    first = ingest_latest_reports(
+        target_date="2026-06-18",
+        reports_dir=reports_dir,
+        warehouse_dir=warehouse_dir,
+        run_id="date-filter-first",
+    )
+    first_sentiment = first.ingested[first.ingested["report_type"] == "sentiment_scores"].iloc[0]
+    assert first_sentiment["status"] == "ingested"
+    target_sentiment.unlink()
+    _write_csv(
+        reports_dir / "sentiment_watchlist_20260617_070000.csv",
+        [{"symbol": "002137", "sentiment_score": 66.0}],
+    )
+
+    result = ingest_latest_reports(
+        target_date="2026-06-18",
+        reports_dir=reports_dir,
+        warehouse_dir=warehouse_dir,
+        run_id="date-filter-test",
+    )
+
+    candidates = result.ingested[result.ingested["report_type"] == "research_candidates"].iloc[0]
+    sentiment = result.ingested[result.ingested["report_type"] == "sentiment_scores"].iloc[0]
+    assert candidates["status"] == "ingested"
+    assert sentiment["status"] == "missing_for_date"
+    assert "20260617" in sentiment["source_path"]
+    status = warehouse_status(warehouse_dir=warehouse_dir)
+    sentiment_rows = status.loc[status["table"] == "sentiment_scores", "rows"].iloc[0]
+    assert sentiment_rows == 0
+
+
 def test_backfill_snapshots_syncs_research_snapshot_tables(tmp_path: Path) -> None:
     snapshot_root = tmp_path / "snapshots"
     day_dir = snapshot_root / "2026-06-18"
@@ -151,6 +196,7 @@ def test_backfill_snapshots_syncs_research_snapshot_tables(tmp_path: Path) -> No
     _write_csv(day_dir / "sentiment_watchlist.csv", [{"symbol": "002137", "sentiment_score": 66.0}])
     _write_csv(day_dir / "market_theme.csv", [{"theme": "半导体", "theme_score": 80.0}])
     _write_csv(day_dir / "scan_accumulation_setup.csv", [{"symbol": "002137", "score": 70.0}])
+    (day_dir / "scan_trend_pullback_setup.csv").write_text("", encoding="utf-8")
 
     result = backfill_research_snapshots(
         snapshot_root=snapshot_root,
@@ -170,6 +216,8 @@ def test_backfill_snapshots_syncs_research_snapshot_tables(tmp_path: Path) -> No
     assert index_rows == 8
     assert candidate_daily_rows == 1
     assert attitude_rows == 1
+    empty_row = result.ingested[result.ingested["report_type"] == "snapshot_scan_trend_pullback_setups"].iloc[0]
+    assert empty_row["status"] == "empty"
 
 
 def test_sync_universe_and_daily_candles_to_warehouse(tmp_path: Path) -> None:

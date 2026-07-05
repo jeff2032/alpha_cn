@@ -15,7 +15,7 @@
 - 日常补数使用增量模式，只刷新过期标的最近一段数据，不会每天从 2020 年全量重拉。
 - 默认用 `sina` 数据源补数；由于 `sina` 在高并发下可能触发 AKShare 依赖崩溃，脚本会自动把 Sina 的有效并发保护到 2。
 - 目标日期按 A 股真实交易日处理，不只看工作日；节假日会自动回退到本地最近一个已缓存交易日。
-- 早上手动跑荐股时，默认数据目标日取上一个交易日；Obsidian 会把完整复盘写入 `每日复盘/数据截至日/`，把开盘前一页纸写入 `开盘计划/计划日期.md`。
+- 早上手动跑荐股时，默认数据目标日取上一个交易日；Obsidian 只写用户结论层：`开盘决策/计划日期.md`、`持仓观察/计划日期.md` 和 `复盘摘要/数据截至日.md`。
 
 ## 16:30 夜间连续准备任务
 
@@ -82,7 +82,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_rese
 6. 快速合成最终研究候选池，默认跳过公司资料和公告风险联网请求。
 7. 归档到 `data/snapshots/research/YYYY-MM-DD/`。
 8. 生成每日中文复盘报告 `daily_research_summary_*.md`。
-9. 复制 Markdown 报告到 Obsidian：完整复盘进入 `中国A股荐股\每日复盘\数据截至日\`，开盘前计划进入 `中国A股荐股\开盘计划\计划日期.md`。
+9. 生成 Obsidian 用户决策层：`开盘决策\计划日期.md`、`持仓观察\计划日期.md` 和 `复盘摘要\数据截至日.md`。完整候选、情绪、滚动复盘和生命周期明细只保留在项目内部 `reports/` 与数仓。
 
 早上脚本的重点是快，不把慢接口放进决策链路；夜间准备成功时，早上主要是刷新和确认。
 
@@ -100,10 +100,19 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_rese
 Obsidian 同步位置：
 
 - `G:\Program Files (x86)\Obsidian_base\中国A股荐股\`
-- `每日复盘/YYYY-MM-DD/`：按数据截至日归档，包含 `每日推荐复盘.md`、`最终候选池.md`、`市场主线.md`、`情绪观察.md`、`滚动复盘.md`、`策略反思.md`。
-- `开盘计划/YYYY-MM-DD.md`：按计划交易日归档，是早上优先看的开盘前一页纸。
-- `策略迭代/`：长期沉淀规则复盘、miss 样本反推和风险过滤。
-- 同一个数据日重复运行会覆盖自动生成的复盘报告；同一个计划日重复运行会覆盖开盘计划文件，但不会覆盖每日复盘里的 `策略反思.md`。
+- `开盘决策/YYYY-MM-DD.md`：按计划交易日归档，是早上优先看的决策页。
+- `持仓观察/YYYY-MM-DD.md`：按计划交易日归档，只处理已有持仓。
+- `复盘摘要/YYYY-MM-DD.md`：按数据截至日归档，只放一页短复盘。
+- 同一个数据日重复运行会覆盖 `复盘摘要`；同一个计划日重复运行会覆盖 `开盘决策` 和 `持仓观察`。
+- 开盘决策要以计划交易日命名，方便用户决策；推荐和观察可以用计划日做主语，但市场温度、市场主线、滚动复盘、生命周期状态这类历史事实要用数据日做主语。例如 `2026-07-02.md` 里的市场主题应写成 `2026-07-01 收盘主线回顾`，市场判断应写成 `2026-07-01 收盘市场口径`，避免把上一交易日事实误读为计划日预测。
+
+持仓观察读取本地文件：
+
+```text
+data/manual/holdings.csv
+```
+
+字段参考 `config/holdings.example.csv`。`data/` 不提交 git，真实持仓只保存在本机。
 
 ## 手动跑荐股
 
@@ -121,6 +130,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_rese
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_research.ps1 -NoObsidianExport
+```
+
+如果项目内报告已经生成，只想把某个数据日补同步到 Obsidian，并生成对应用户决策文档：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_research.ps1 -TargetDate 2026-07-03 -PlanDate 2026-07-06 -ExportOnly
 ```
 
 如果数据源不稳定、失败数变多，可以临时降低并行数：

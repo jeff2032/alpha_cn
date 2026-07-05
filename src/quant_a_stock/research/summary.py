@@ -304,11 +304,13 @@ def save_daily_research_summary_markdown(summary: DailyResearchSummary, *, top: 
         "score_delta",
     ]
     action_core = candidates[
-        candidates["action_bucket"].isin(["主攻-A2启动确认", "主攻-A3趋势延续", "补票-B2a主线扩散", "补票-B2强主题"])
-    ].head(top)
+        candidates["action_bucket"].isin(
+            ["主攻-A2启动确认", "主攻-A3趋势延续"]
+        )
+    ].head(min(top, 12))
     if action_core.empty:
-        action_core = candidates[candidates["research_tier"].isin(["A2", "A3", "B1", "B2"])].head(top)
-    lines.extend(["## 主攻与补票候选", "", _markdown_table(action_core[_existing(action_core, display_cols)]), ""])
+        action_core = candidates[candidates["research_tier"].isin(["A2", "A3"])].head(min(top, 12))
+    lines.extend(["## 主攻候选", "", _markdown_table(action_core[_existing(action_core, display_cols)]), ""])
 
     for title, note, frame in _candidate_bucket_sections(candidates, top=top):
         lines.extend([f"## {title}", "", note, "", _markdown_table(frame[_existing(frame, display_cols)]), ""])
@@ -320,7 +322,7 @@ def save_daily_research_summary_markdown(summary: DailyResearchSummary, *, top: 
         for _, row in action_core.iterrows():
             lines.extend(_candidate_reason_lines(row))
 
-    core_buckets = ["主攻-A2启动确认", "主攻-A3趋势延续", "补票-B2a主线扩散", "补票-B2强主题"]
+    core_buckets = ["主攻-A2启动确认", "主攻-A3趋势延续"]
     watch = candidates[
         (~candidates["action_bucket"].isin(core_buckets))
         | (candidates["total_penalty"].fillna(0) > 0)
@@ -336,7 +338,19 @@ def save_daily_research_summary_markdown(summary: DailyResearchSummary, *, top: 
 def _candidate_bucket_sections(candidates: pd.DataFrame, *, top: int) -> list[tuple[str, str, pd.DataFrame]]:
     early = candidates[candidates["action_bucket"].isin(["观察-A1低位潜伏", "主攻-A2启动确认"])].head(top)
     trend = candidates[candidates["action_bucket"].isin(["主攻-A3趋势延续", "观察-A3高波动"])].head(top)
-    watch = candidates[candidates["action_bucket"].isin(["补票-B2a主线扩散", "补票-B2强主题", "观察-B2b主题待确认", "观察-B级候选"])].head(top)
+    watch = candidates[
+        candidates["action_bucket"].isin(
+            [
+                "观察-B2a主线扩散待升级",
+                "观察-B2s主线突发待确认",
+                "补票-B2a主线扩散",
+                "补票-主线突发",
+                "补票-B2强主题",
+                "观察-B2b主题待确认",
+                "观察-B级候选",
+            ]
+        )
+    ].head(top)
     return [
         (
             "A1/A2 低位潜伏与启动池",
@@ -349,8 +363,8 @@ def _candidate_bucket_sections(candidates: pd.DataFrame, *, top: int) -> list[tu
             trend,
         ),
         (
-            "B1/B2 观察补票池",
-            "B2a 是主线扩散补票观察，B2b 只是主题待确认；都不直接当作买点。",
+            "B1/B2 升级观察池",
+            "B2a/B2s/B2b 都只是升级观察池，不直接当买点；必须看次日持续性、盘中承接和风险核验。",
             watch,
         ),
     ]

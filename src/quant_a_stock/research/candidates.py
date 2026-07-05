@@ -49,6 +49,8 @@ class ResearchCandidateConfig:
     risk_notice_penalty_max: float = 20.0
     ret20_hot_threshold: float = 0.15
     ret20_extreme_threshold: float = 0.30
+    ret60_hot_threshold: float = 0.55
+    ret60_extreme_threshold: float = 0.80
     volume_hot_threshold: float = 2.20
     volume_extreme_threshold: float = 4.00
     monthly_high_position_threshold: float = 0.70
@@ -491,6 +493,7 @@ def _is_early_accumulation(row: pd.Series) -> bool:
         return False
     price_position = _safe_number(row.get("price_position_pct", 0.0))
     ret20 = _safe_number(row.get("ret_20_pct", 0.0))
+    ret60 = _safe_number(row.get("ret_60_pct", 0.0))
     volume_ratio = _safe_number(row.get("volume_ratio", 0.0))
     return 0.35 <= price_position <= 0.72 and ret20 <= 0.16 and volume_ratio <= 2.25
 
@@ -565,6 +568,7 @@ def _risk_tags(row: pd.Series, config: ResearchCandidateConfig) -> list[str]:
     risk_count = _safe_number(row.get("risk_notice_count", 0.0))
     total_penalty = _safe_number(row.get("total_penalty", 0.0))
     ret20 = _safe_number(row.get("ret_20_pct", 0.0))
+    ret60 = _safe_number(row.get("ret_60_pct", 0.0))
     volume_ratio = _safe_number(row.get("volume_ratio", 0.0))
     monthly_position = _safe_number(row.get("monthly_position_pct", 0.0))
     price_position = _safe_number(row.get("price_position_pct", 0.0))
@@ -581,6 +585,10 @@ def _risk_tags(row: pd.Series, config: ResearchCandidateConfig) -> list[str]:
         tags.append("20日涨幅过热")
     elif ret20 >= config.ret20_hot_threshold:
         tags.append("20日涨幅偏热")
+    if ret60 >= config.ret60_extreme_threshold:
+        tags.append("60日涨幅过热")
+    elif ret60 >= config.ret60_hot_threshold:
+        tags.append("60日涨幅偏热")
     if volume_ratio >= config.volume_extreme_threshold:
         tags.append("量能极端放大")
     elif volume_ratio >= config.volume_hot_threshold:
@@ -591,6 +599,10 @@ def _risk_tags(row: pd.Series, config: ResearchCandidateConfig) -> list[str]:
         tags.append("月线位置偏高")
     if price_position > config.price_high_position_threshold:
         tags.append("区间位置偏高")
+    if _is_a3_crowded(row):
+        tags.append("趋势高位拥挤")
+    if _is_volume_drawdown(row):
+        tags.append("放量回撤")
     if listing_days and listing_days < config.new_stock_days:
         tags.append("次新样本不足")
     if amount_ma20 and amount_ma20 < 100_000_000:
@@ -603,15 +615,58 @@ def _risk_level(row: pd.Series, config: ResearchCandidateConfig) -> str:
     joined = "；".join(tags)
     if any(key in joined for key in ("公告风险多项命中", "次新样本不足", "成交额偏低")):
         return "高"
-    if any(key in joined for key in ("公告风险命中", "总扣分偏高", "20日涨幅过热", "量能极端放大")):
+    if any(key in joined for key in ("公告风险命中", "总扣分偏高", "20日涨幅过热", "60日涨幅过热", "量能极端放大")):
         return "中高"
-    if any(key in joined for key in ("偏热", "位置偏高", "量价共振过热")):
+    if any(key in joined for key in ("偏热", "位置偏高", "量价共振过热", "趋势高位拥挤", "放量回撤")):
         return "中"
     return "低"
 
 
 def _is_risk_clean(row: pd.Series) -> bool:
     return str(row.get("risk_level", "")) in {"低", "中"} and _safe_number(row.get("total_penalty", 0.0)) <= 10
+
+
+def _is_a3_actionable(row: pd.Series) -> bool:
+    if str(row.get("research_tier", "")) != "A3":
+        return False
+    ret20 = _safe_number(row.get("ret_20_pct", 0.0))
+    ret60 = _safe_number(row.get("ret_60_pct", 0.0))
+    volume_ratio = _safe_number(row.get("volume_ratio", 0.0))
+    drawdown = _safe_number(row.get("drawdown_from_high_pct", 0.0))
+    total_penalty = _safe_number(row.get("total_penalty", 0.0))
+    risk_level = str(row.get("risk_level", ""))
+    return (
+        risk_level == "低"
+        and total_penalty <= 6
+        and ret20 <= 0.15
+        and ret60 <= 0.55
+        and volume_ratio <= 2.2
+        and drawdown >= -0.25
+        and not _is_a3_crowded(row)
+    )
+
+
+def _is_a3_crowded(row: pd.Series) -> bool:
+    tier = str(row.get("research_tier", ""))
+    stage = str(row.get("stage", "") or "")
+    if tier != "A3" and stage not in {"trend_pullback", "trend_resume"}:
+        return False
+    price_position = _safe_number(row.get("price_position_pct", 0.0))
+    monthly_position = _safe_number(row.get("monthly_position_pct", 0.0))
+    ret20 = _safe_number(row.get("ret_20_pct", 0.0))
+    volume_ratio = _safe_number(row.get("volume_ratio", 0.0))
+    return (
+        price_position >= 0.82
+        or monthly_position >= 0.78
+        or (ret20 >= 0.22 and volume_ratio >= 2.2)
+        or _is_volume_drawdown(row)
+    )
+
+
+def _is_volume_drawdown(row: pd.Series) -> bool:
+    drawdown = _safe_number(row.get("drawdown_from_high_pct", 0.0))
+    volume_ratio = _safe_number(row.get("volume_ratio", 0.0))
+    return drawdown <= -0.22 and volume_ratio >= 2.0
 
 
 def _is_strong_theme_candidate(row: pd.Series) -> bool:
@@ -636,9 +691,9 @@ def _is_b2_upgrade_watch(row: pd.Series) -> bool:
     return (
         _is_strong_theme_candidate(row)
         and stage in {"near_breakout", "breakout", "trend_pullback", "trend_resume", "pre_breakout"}
-        and ret20 <= 0.25
-        and volume_ratio <= 3.0
-        and (amount_ma20 == 0 or amount_ma20 >= 100_000_000)
+        and ret20 <= 0.22
+        and 0.75 <= volume_ratio <= 2.6
+        and (amount_ma20 == 0 or amount_ma20 >= 150_000_000)
     )
 
 
@@ -648,6 +703,8 @@ def _b2_subtype(row: pd.Series) -> str:
         return ""
     if _is_b2a_theme_spread(row):
         return "B2a"
+    if _is_mainline_surge_replenish(row):
+        return "B2s"
     if _is_b2b_theme_watch(row):
         return "B2b"
     return ""
@@ -672,12 +729,48 @@ def _is_b2a_theme_spread(row: pd.Series) -> bool:
     confirmations += int(core_news_count > 0 or sentiment_score >= 62)
     confirmations += int(in_strong_pool or in_limit_pool or volume_ratio >= 1.05)
     confirmations += int(stage in {"near_breakout", "breakout", "trend_resume", "trend_pullback"})
+    strongest_theme = (0 < theme_rank <= 3 and sentiment_score >= 62) or co_rise_count >= 12
 
     return (
-        confirmations >= 3
-        and ret20 <= 0.22
-        and volume_ratio <= 2.8
-        and (amount_ma20 == 0 or amount_ma20 >= 100_000_000)
+        (confirmations >= 4 or (confirmations >= 3 and strongest_theme))
+        and ret20 <= 0.18
+        and 0.80 <= volume_ratio <= 2.4
+        and (amount_ma20 == 0 or amount_ma20 >= 150_000_000)
+    )
+
+
+def _is_mainline_surge_replenish(row: pd.Series) -> bool:
+    tier = str(row.get("research_tier", ""))
+    if tier not in {"B1", "B2"} or not _is_risk_clean(row):
+        return False
+    stage = str(row.get("stage", "") or "")
+    ret20 = _safe_number(row.get("ret_20_pct", 0.0))
+    volume_ratio = _safe_number(row.get("volume_ratio", 0.0))
+    amount_ma20 = _safe_number(row.get("amount_ma20", 0.0))
+    price_position = _safe_number(row.get("price_position_pct", 0.0))
+    theme_rank = _safe_number(row.get("theme_rank", 99.0), 99.0)
+    co_rise_count = _safe_number(row.get("co_rise_count", 0.0))
+    core_news_count = _safe_number(row.get("core_news_count", 0.0))
+    research_report_count = _safe_number(row.get("research_report_count", 0.0))
+    sentiment_score = _safe_number(row.get("sentiment_score", 0.0))
+    in_strong_pool = bool(row.get("in_strong_pool", False))
+    in_limit_pool = bool(row.get("in_limit_pool", False))
+    has_theme = bool(str(row.get("matched_theme", "") or "").strip()) or co_rise_count >= 8 or 0 < theme_rank <= 5
+    has_attitude = (
+        sentiment_score >= 55
+        or core_news_count > 0
+        or research_report_count > 0
+        or in_strong_pool
+        or in_limit_pool
+    )
+    return (
+        stage in {"near_breakout", "breakout", "trend_pullback", "trend_resume", "pre_breakout"}
+        and has_theme
+        and has_attitude
+        and 1.15 <= volume_ratio <= 3.0
+        and ret20 <= 0.25
+        and price_position <= 0.88
+        and (amount_ma20 == 0 or amount_ma20 >= 150_000_000)
     )
 
 
@@ -704,11 +797,13 @@ def _action_bucket(row: pd.Series) -> str:
         return "回避-风险优先"
     if tier == "A2" and _is_risk_clean(row):
         return "主攻-A2启动确认"
-    if tier == "A3" and _is_risk_clean(row):
+    if _is_a3_actionable(row):
         return "主攻-A3趋势延续"
     b2_subtype = str(row.get("b2_subtype", ""))
     if b2_subtype == "B2a":
-        return "补票-B2a主线扩散"
+        return "观察-B2a主线扩散待升级"
+    if b2_subtype == "B2s" or _is_mainline_surge_replenish(row):
+        return "观察-B2s主线突发待确认"
     if b2_subtype == "B2b":
         return "观察-B2b主题待确认"
     if tier == "A1":
@@ -724,13 +819,16 @@ def _action_rank(bucket: str) -> int:
     return {
         "主攻-A2启动确认": 1,
         "主攻-A3趋势延续": 2,
+        "观察-B2a主线扩散待升级": 3,
         "补票-B2a主线扩散": 3,
-        "补票-B2强主题": 3,
-        "观察-B2b主题待确认": 4,
-        "观察-A1低位潜伏": 5,
-        "观察-A3高波动": 6,
-        "观察-B级候选": 7,
-        "观察-低优先级": 8,
+        "观察-B2s主线突发待确认": 4,
+        "补票-主线突发": 4,
+        "补票-B2强主题": 4,
+        "观察-B2b主题待确认": 5,
+        "观察-A1低位潜伏": 6,
+        "观察-A3高波动": 7,
+        "观察-B级候选": 8,
+        "观察-低优先级": 9,
         "回避-风险优先": 9,
     }.get(str(bucket), 9)
 
@@ -742,8 +840,10 @@ def _upgrade_hint(row: pd.Series) -> str:
         return "启动确认主攻：看突破后承接、回踩不破和量能不过热。"
     if bucket == "主攻-A3趋势延续":
         return "趋势主攻：只看分歧低吸或强承接，不追高开加速。"
-    if bucket == "补票-B2a主线扩散":
-        return "B2a 主线扩散补涨：主题和资金已确认，先核验公告与盘中承接，再决定是否升级。"
+    if bucket in {"观察-B2a主线扩散待升级", "补票-B2a主线扩散"}:
+        return "B2a 主线扩散观察：主题和资金已确认，但不是直接买点；先核验公告、盘中承接和次日持续性，满足条件再升级。"
+    if bucket in {"观察-B2s主线突发待确认", "补票-主线突发"}:
+        return "B2s 主线突发观察：形态还不是主攻，只记录突发强度；必须等承接、持续性和风险核验后再处理。"
     if bucket == "补票-B2强主题":
         return "强主题补票：历史桶名，按 B2a/B2b 复盘拆看。"
     if bucket == "观察-B2b主题待确认":
