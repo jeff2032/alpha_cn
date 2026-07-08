@@ -33,6 +33,16 @@ from quant_a_stock.research.candidates import fetch_company_profiles
 from quant_a_stock.research.candidates import fetch_risk_notices
 from quant_a_stock.research.candidates import load_cache_listing_info
 from quant_a_stock.research.candidates import load_report
+from quant_a_stock.research.context_pack import save_research_context_pack
+from quant_a_stock.research.external_data import IWENCAI_COLUMNS
+from quant_a_stock.research.external_data import MONEY_FLOW_COLUMNS
+from quant_a_stock.research.external_data import RISK_EVENT_COLUMNS
+from quant_a_stock.research.external_data import fetch_cninfo_risk_events
+from quant_a_stock.research.external_data import fetch_eastmoney_money_flow
+from quant_a_stock.research.external_data import money_flow_success_rate
+from quant_a_stock.research.external_data import normalize_iwencai_export
+from quant_a_stock.research.external_data import read_csv_flexible
+from quant_a_stock.research.external_data import summarize_risk_events
 from quant_a_stock.research.lifecycle import build_candidate_lifecycle_tracking
 from quant_a_stock.research.lifecycle import save_candidate_lifecycle_reports
 from quant_a_stock.research.report import save_research_candidates_markdown
@@ -62,6 +72,7 @@ from quant_a_stock.warehouse import ingest_latest_reports
 from quant_a_stock.warehouse import sync_candidate_lifecycles_to_warehouse
 from quant_a_stock.warehouse import sync_daily_candles_to_warehouse
 from quant_a_stock.warehouse import sync_stock_universe_to_warehouse
+from quant_a_stock.warehouse import warehouse_query as run_warehouse_query
 from quant_a_stock.warehouse import warehouse_review as build_warehouse_review
 from quant_a_stock.warehouse import warehouse_status as build_warehouse_status
 
@@ -72,6 +83,12 @@ def _parse_csv_ints(value: str) -> list[int]:
 
 def _parse_csv_floats(value: str) -> list[float]:
     return [float(part.strip()) for part in value.split(",") if part.strip()]
+
+
+def _parse_columns(value: str | None) -> list[str] | None:
+    if not value:
+        return None
+    return [part.strip() for part in value.split(",") if part.strip()]
 
 
 def _parse_markets(values: list[str] | None) -> set[str] | None:
@@ -139,6 +156,10 @@ def _latest_report_for_target(report_type: str, target_date: str | None) -> Path
     return _latest_report(f"{report_type}_*.csv")
 
 
+def _latest_report_for_exact_target(report_type: str, target_date: str) -> Path | None:
+    return _latest_report(f"{report_type}_{target_date.replace('-', '')}_*.csv")
+
+
 def _report_path_arg(value: str | None, *, latest_pattern: str, missing_message: str) -> Path:
     if value:
         return Path(value)
@@ -146,6 +167,58 @@ def _report_path_arg(value: str | None, *, latest_pattern: str, missing_message:
     if path is None:
         raise SystemExit(missing_message)
     return path
+
+
+def _save_frame_report(frame: pd.DataFrame, *, report_type: str, date_prefix: str) -> Path:
+    DEFAULT_PATHS.reports.mkdir(parents=True, exist_ok=True)
+    stamp = f"{date_prefix.replace('-', '')}_{pd.Timestamp.now().strftime('%H%M%S')}"
+    path = DEFAULT_PATHS.reports / f"{report_type}_{stamp}.csv"
+    frame.to_csv(path, index=False)
+    return path
+
+
+def _read_optional_report(path: Path | None) -> pd.DataFrame:
+    if path is None or not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path, dtype={"symbol": str, "代码": str})
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
+
+
+def _combine_risk_notice_summaries(base: pd.DataFrame, structured: pd.DataFrame) -> pd.DataFrame:
+    if base.empty:
+        return structured
+    if structured.empty:
+        return base
+    left = base.copy()
+    right = structured.copy()
+    left["symbol"] = left["symbol"].astype(str).str.zfill(6)
+    right["symbol"] = right["symbol"].astype(str).str.zfill(6)
+    merged = left.merge(right, on="symbol", how="outer", suffixes=("_base", "_event"))
+    output = pd.DataFrame()
+    output["symbol"] = merged["symbol"]
+    output["risk_notice_count"] = (
+        pd.to_numeric(merged.get("risk_notice_count_base", 0), errors="coerce").fillna(0)
+        + pd.to_numeric(merged.get("risk_notice_count_event", 0), errors="coerce").fillna(0)
+    )
+    output["risk_notice_titles"] = merged.apply(
+        lambda row: "；".join(
+            item
+            for item in [
+                str(row.get("risk_notice_titles_base", "") or ""),
+                str(row.get("risk_notice_titles_event", "") or ""),
+            ]
+            if item and item.lower() != "nan"
+        )[:240],
+        axis=1,
+    )
+    output["risk_event_score"] = pd.to_numeric(merged.get("risk_event_score", 0), errors="coerce").fillna(0)
+    output["high_risk_event_count"] = pd.to_numeric(
+        merged.get("high_risk_event_count", 0), errors="coerce"
+    ).fillna(0)
+    output["risk_event_types"] = merged.get("risk_event_types", "").fillna("")
+    return output
 
 
 def _latest_scan_report() -> Path | None:
@@ -672,24 +745,49 @@ def sync_stock_universe(args: argparse.Namespace) -> None:
     total = len(universe)
     tasks = [(idx, total, row.to_dict()) for idx, row in universe.iterrows()]
     workers = max(1, int(args.workers))
+    max_consecutive_failures = max(0, int(args.max_consecutive_failures))
+    consecutive_failures = 0
+    stopped_early = False
+
+    def record_result(idx: int, result: dict[str, object], message: str, suffix: str = "") -> None:
+        nonlocal consecutive_failures
+        result["_order"] = idx
+        rows.append(result)
+        print(f"{message}{suffix}")
+        if result.get("status") == "失败":
+            consecutive_failures += 1
+        else:
+            consecutive_failures = 0
+
     if workers > 1 and total:
         print(f"并行下载: workers={workers}, sleep={args.sleep}, total={total}")
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [
-                executor.submit(_sync_stock_universe_symbol, idx, total, row, args)
+            futures = {
+                executor.submit(_sync_stock_universe_symbol, idx, total, row, args): idx
                 for idx, total, row in tasks
-            ]
+            }
             for completed, future in enumerate(as_completed(futures), start=1):
                 idx, result, message = future.result()
-                result["_order"] = idx
-                rows.append(result)
-                print(f"{message} (完成 {completed}/{total})")
+                record_result(idx, result, message, suffix=f" (完成 {completed}/{total})")
+                if max_consecutive_failures and consecutive_failures >= max_consecutive_failures:
+                    stopped_early = True
+                    cancelled = 0
+                    for pending in futures:
+                        if pending is not future and not pending.done() and pending.cancel():
+                            cancelled += 1
+                    print(
+                        f"连续失败 {consecutive_failures} 次，提前停止本轮下载；"
+                        f"取消待处理任务 {cancelled} 个。请稍后重试或切换数据源。"
+                    )
+                    break
     else:
         for idx, total, row in tasks:
             idx, result, message = _sync_stock_universe_symbol(idx, total, row, args)
-            result["_order"] = idx
-            rows.append(result)
-            print(message)
+            record_result(idx, result, message)
+            if max_consecutive_failures and consecutive_failures >= max_consecutive_failures:
+                stopped_early = True
+                print(f"连续失败 {consecutive_failures} 次，提前停止本轮下载。请稍后重试或切换数据源。")
+                break
 
     report_rows = [
         {key: value for key, value in row.items() if key != "_order"}
@@ -699,6 +797,8 @@ def sync_stock_universe(args: argparse.Namespace) -> None:
     summary = pd.DataFrame(report_rows)["status"].value_counts().to_dict() if report_rows else {}
     print(f"汇总: {summary}")
     print(f"报告: {report_path}")
+    if stopped_early:
+        raise SystemExit("sync-stock-universe 因连续失败过多提前停止")
 
 
 def cache_status(args: argparse.Namespace) -> None:
@@ -1164,6 +1264,124 @@ def market_theme(args: argparse.Namespace) -> None:
     print(f"中文报告: {md_path}")
 
 
+def risk_events(args: argparse.Namespace) -> None:
+    target_date = _resolve_trading_date(args.target_date).date().isoformat()
+    _announce_trading_date_resolution(args.target_date, pd.Timestamp(target_date))
+    watchlist = _sentiment_watchlist_from_args(args, target_date=target_date)
+    start_date = (pd.Timestamp(target_date).normalize() - pd.Timedelta(days=args.days)).date().isoformat()
+    result = fetch_cninfo_risk_events(
+        watchlist["symbol"].tolist(),
+        start_date=start_date,
+        end_date=target_date,
+    )
+    events = result.frame if not result.frame.empty else pd.DataFrame(columns=RISK_EVENT_COLUMNS)
+    csv_path = _save_frame_report(events, report_type="risk_events", date_prefix=target_date)
+    summary = summarize_risk_events(events)
+
+    print(f"风险扫描区间: {start_date} -> {target_date}")
+    if summary.empty:
+        print("没有命中结构化公告风险事件。")
+    else:
+        display = summary.head(args.display_top).rename(
+            columns={
+                "symbol": "代码",
+                "risk_notice_count": "风险公告数",
+                "high_risk_event_count": "高风险数",
+                "risk_event_score": "风险分",
+                "risk_event_types": "风险类型",
+                "risk_notice_titles": "公告标题",
+            }
+        )
+        print(display[["代码", "风险公告数", "高风险数", "风险分", "风险类型", "公告标题"]].to_string(index=False))
+    if result.errors:
+        print(f"数据源错误: {len(result.errors)} 条，前 5 条：")
+        for error in result.errors[:5]:
+            print(f"  {error}")
+    print(f"CSV 报告: {csv_path}")
+
+
+def money_flow(args: argparse.Namespace) -> None:
+    target_date = _resolve_trading_date(args.target_date).date().isoformat()
+    _announce_trading_date_resolution(args.target_date, pd.Timestamp(target_date))
+    watchlist = _sentiment_watchlist_from_args(args, target_date=target_date)
+    result = fetch_eastmoney_money_flow(
+        watchlist["symbol"].tolist(),
+        target_date=target_date,
+        lookback_days=args.lookback_days,
+        retries=args.retries,
+        retry_wait=args.retry_wait,
+        sleep_seconds=args.sleep,
+    )
+    flows = result.frame if not result.frame.empty else pd.DataFrame(columns=MONEY_FLOW_COLUMNS)
+    flows = _add_names_from_universe(flows)
+    success_rate = money_flow_success_rate(flows)
+    csv_path = None
+    if success_rate >= args.min_success_rate or args.allow_partial:
+        csv_path = _save_frame_report(flows, report_type="money_flow", date_prefix=target_date)
+
+    if flows.empty:
+        print("没有可展示的资金流结果。")
+    else:
+        display = flows.head(args.display_top).rename(
+            columns={
+                "symbol": "代码",
+                "name": "名称",
+                "money_flow_score": "资金分",
+                "main_net_inflow": "主力净流入",
+                "main_net_inflow_pct": "主力净占比",
+                "main_net_inflow_3d": "3日净流入",
+                "positive_flow_days_5": "5日红天数",
+                "error": "错误",
+            }
+        )
+        cols = ["代码", "名称", "资金分", "主力净流入", "主力净占比", "3日净流入", "5日红天数", "错误"]
+        print(display[[column for column in cols if column in display.columns]].to_string(index=False))
+    if result.errors:
+        print(f"数据源错误: {len(result.errors)} 条，前 5 条：")
+        for error in result.errors[:5]:
+            print(f"  {error}")
+    print(f"成功率: {success_rate:.2%}")
+    if csv_path is None:
+        message = f"资金流成功率 {success_rate:.2%} 低于阈值 {args.min_success_rate:.2%}，未写入正式 money_flow 报告。"
+        if args.soft_fail:
+            print(f"WARNING: {message}")
+            return
+        raise SystemExit(message)
+    print(f"CSV 报告: {csv_path}")
+
+
+def import_iwencai(args: argparse.Namespace) -> None:
+    target_date = _resolve_trading_date(args.target_date).date().isoformat()
+    _announce_trading_date_resolution(args.target_date, pd.Timestamp(target_date))
+    source_path = Path(args.file)
+    raw = read_csv_flexible(source_path)
+    imported = normalize_iwencai_export(
+        raw,
+        target_date=target_date,
+        query=args.query or "",
+        source=str(source_path),
+    )
+    if imported.empty:
+        imported = pd.DataFrame(columns=IWENCAI_COLUMNS)
+    imported = _add_names_from_universe(imported)
+    csv_path = _save_frame_report(imported, report_type="iwencai_import", date_prefix=target_date)
+    if imported.empty:
+        print("问财导入为空。")
+    else:
+        display = imported.head(args.display_top).rename(
+            columns={
+                "symbol": "代码",
+                "name": "名称",
+                "iwencai_rank": "问财排名",
+                "iwencai_score": "问财分",
+                "iwencai_tags": "标签",
+                "iwencai_reason": "命中原因",
+            }
+        )
+        print(display[["代码", "名称", "问财排名", "问财分", "标签", "命中原因"]].to_string(index=False))
+    print(f"CSV 报告: {csv_path}")
+
+
 def research_candidates(args: argparse.Namespace) -> None:
     resolved_target = _resolve_trading_date(args.target_date)
     _announce_trading_date_resolution(args.target_date, resolved_target)
@@ -1200,6 +1418,11 @@ def research_candidates(args: argparse.Namespace) -> None:
     cache_info = load_cache_listing_info(symbols, target_date=target_date)
     profiles = pd.DataFrame()
     risk_notices = pd.DataFrame()
+    risk_events_path = Path(args.risk_events_report) if args.risk_events_report else _latest_report_for_exact_target("risk_events", target_date)
+    money_flow_path = Path(args.money_flow_report) if args.money_flow_report else _latest_report_for_exact_target("money_flow", target_date)
+    iwencai_path = Path(args.iwencai_report) if args.iwencai_report else _latest_report_for_exact_target("iwencai_import", target_date)
+    money_flow_frame = _read_optional_report(money_flow_path)
+    external_screen = _read_optional_report(iwencai_path)
     if args.fetch_profiles:
         profiles, profile_errors = fetch_company_profiles(symbols)
         errors.extend(profile_errors)
@@ -1213,6 +1436,8 @@ def research_candidates(args: argparse.Namespace) -> None:
             end_date=target_date,
         )
         errors.extend(notice_errors)
+    risk_event_summary = summarize_risk_events(_read_optional_report(risk_events_path))
+    risk_notices = _combine_risk_notice_summaries(risk_notices, risk_event_summary)
 
     candidates = build_research_candidates(
         scan,
@@ -1221,6 +1446,8 @@ def research_candidates(args: argparse.Namespace) -> None:
         profiles=profiles,
         cache_info=cache_info,
         risk_notices=risk_notices,
+        money_flow=money_flow_frame,
+        external_screen=external_screen,
         target_date=target_date,
         config=ResearchCandidateConfig(),
     )
@@ -1237,6 +1464,9 @@ def research_candidates(args: argparse.Namespace) -> None:
             "scan_report": "；".join(str(path) for path in scan_paths),
             "sentiment_report": str(sentiment_path),
             "theme_report": str(theme_path or ""),
+            "risk_events_report": str(risk_events_path or ""),
+            "money_flow_report": str(money_flow_path or ""),
+            "iwencai_report": str(iwencai_path or ""),
             "errors": errors,
         },
     )
@@ -1445,6 +1675,25 @@ def daily_research_summary(args: argparse.Namespace) -> None:
     print(f"中文复盘报告: {md_path}")
 
 
+def export_context_pack(args: argparse.Namespace) -> None:
+    resolved_target = _resolve_trading_date(args.target_date)
+    _announce_trading_date_resolution(args.target_date, resolved_target)
+    target_date = resolved_target.date().isoformat()
+    result = save_research_context_pack(
+        target_date=target_date,
+        plan_date=args.plan_date,
+        top=args.top,
+        snapshot_dir=Path(args.snapshot_dir) if args.snapshot_dir else None,
+        reports_dir=Path(args.reports_dir) if args.reports_dir else None,
+        output_root=Path(args.output_root) if args.output_root else None,
+    )
+    metadata = result.pack.get("metadata", {})
+    candidates = result.pack.get("candidate_context", {})
+    print(f"Context Pack: {result.path}")
+    print(f"数据截至: {metadata.get('target_date')}，计划日期: {metadata.get('plan_date')}")
+    print(f"候选数量: {candidates.get('total', 0)}")
+
+
 def research_review(args: argparse.Namespace) -> None:
     review = build_research_review(
         since=args.since,
@@ -1558,6 +1807,7 @@ def warehouse_ingest(args: argparse.Namespace) -> None:
     target_date = resolved_target_date.date().isoformat()
     result = ingest_latest_reports(
         target_date=target_date,
+        plan_date=args.plan_date,
         reports_dir=Path(args.reports_dir) if args.reports_dir else None,
         warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
         run_id=args.run_id,
@@ -1591,6 +1841,24 @@ def warehouse_status(args: argparse.Namespace) -> None:
         print("研究仓库还没有初始化。")
         return
     print(status.to_string(index=False))
+
+
+def warehouse_query(args: argparse.Namespace) -> None:
+    try:
+        frame = run_warehouse_query(
+            args.table,
+            since=args.since,
+            until=args.until,
+            columns=_parse_columns(args.columns),
+            limit=args.limit,
+            warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if frame.empty:
+        print("没有查询结果。")
+        return
+    print(frame.to_string(index=False))
 
 
 def data_loop_status(args: argparse.Namespace) -> None:
@@ -1862,6 +2130,12 @@ def build_parser() -> argparse.ArgumentParser:
     sync_universe.add_argument("--incremental", action="store_true", help="基于本地缓存增量补数")
     sync_universe.add_argument("--lookback-days", type=int, default=60, help="增量补数时向前回看的自然日")
     sync_universe.add_argument(
+        "--max-consecutive-failures",
+        type=int,
+        default=50,
+        help="连续失败达到该数量时提前停止，0 表示不启用断路保护",
+    )
+    sync_universe.add_argument(
         "--skip-existing",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1989,9 +2263,45 @@ def build_parser() -> argparse.ArgumentParser:
     theme.add_argument("--top", type=int, default=20)
     theme.set_defaults(func=market_theme)
 
+    risk = subparsers.add_parser("risk-events", help="抓取并结构化巨潮公告风险事件")
+    risk.add_argument("--symbols", nargs="+", default=None)
+    risk.add_argument("--watchlist", default=None)
+    risk.add_argument("--latest-scan", action="store_true")
+    risk.add_argument("--target-date", default=None)
+    risk.add_argument("--days", type=int, default=180)
+    risk.add_argument("--top", type=int, default=None)
+    risk.add_argument("--display-top", type=int, default=30)
+    risk.set_defaults(func=risk_events)
+
+    flow = subparsers.add_parser("money-flow", help="抓取东方财富个股资金流确认因子")
+    flow.add_argument("--symbols", nargs="+", default=None)
+    flow.add_argument("--watchlist", default=None)
+    flow.add_argument("--latest-scan", action="store_true")
+    flow.add_argument("--target-date", default=None)
+    flow.add_argument("--lookback-days", type=int, default=10)
+    flow.add_argument("--retries", type=int, default=2)
+    flow.add_argument("--retry-wait", type=float, default=1.5)
+    flow.add_argument("--sleep", type=float, default=0.2)
+    flow.add_argument("--min-success-rate", type=float, default=0.8)
+    flow.add_argument("--allow-partial", action="store_true")
+    flow.add_argument("--soft-fail", action="store_true")
+    flow.add_argument("--top", type=int, default=None)
+    flow.add_argument("--display-top", type=int, default=30)
+    flow.set_defaults(func=money_flow)
+
+    iwencai = subparsers.add_parser("import-iwencai", help="导入问财导出的 CSV，作为外部条件选股验证")
+    iwencai.add_argument("--file", required=True)
+    iwencai.add_argument("--target-date", default=None)
+    iwencai.add_argument("--query", default="")
+    iwencai.add_argument("--display-top", type=int, default=30)
+    iwencai.set_defaults(func=import_iwencai)
+
     research = subparsers.add_parser("research-candidates", help="合成形态、情绪、主线和风险的候选池")
     research.add_argument("--scan-report", default=None)
     research.add_argument("--sentiment-report", default=None)
+    research.add_argument("--risk-events-report", default=None)
+    research.add_argument("--money-flow-report", default=None)
+    research.add_argument("--iwencai-report", default=None)
     research.add_argument("--target-date", default=None)
     research.add_argument("--top", type=int, default=30)
     research.add_argument("--risk-days", type=int, default=180)
@@ -2063,6 +2373,15 @@ def build_parser() -> argparse.ArgumentParser:
     daily_summary.add_argument("--top", type=int, default=30)
     daily_summary.set_defaults(func=daily_research_summary)
 
+    context_pack = subparsers.add_parser("export-context-pack", help="导出给 AI/外部入口读取的结构化研究上下文 JSON")
+    context_pack.add_argument("--target-date", default=None)
+    context_pack.add_argument("--plan-date", default=None)
+    context_pack.add_argument("--top", type=int, default=30)
+    context_pack.add_argument("--snapshot-dir", default=None)
+    context_pack.add_argument("--reports-dir", default=None)
+    context_pack.add_argument("--output-root", default=None)
+    context_pack.set_defaults(func=export_context_pack)
+
     review = subparsers.add_parser("research-review", help="复盘研究候选池的次日表现和错过样本")
     review.add_argument("--since", default=None)
     review.add_argument("--until", default=None)
@@ -2086,6 +2405,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     warehouse_ingest_parser = subparsers.add_parser("warehouse-ingest", help="把最新研究报告写入 DuckDB + Parquet 仓库")
     warehouse_ingest_parser.add_argument("--target-date", default=None)
+    warehouse_ingest_parser.add_argument("--plan-date", default=None)
     warehouse_ingest_parser.add_argument("--reports-dir", default=None)
     warehouse_ingest_parser.add_argument("--warehouse-dir", default=None)
     warehouse_ingest_parser.add_argument("--run-id", default=None)
@@ -2094,6 +2414,15 @@ def build_parser() -> argparse.ArgumentParser:
     warehouse_status_parser = subparsers.add_parser("warehouse-status", help="查看研究仓库表和日期覆盖情况")
     warehouse_status_parser.add_argument("--warehouse-dir", default=None)
     warehouse_status_parser.set_defaults(func=warehouse_status)
+
+    warehouse_query_parser = subparsers.add_parser("warehouse-query", help="查询 DuckDB + Parquet 仓库中的表")
+    warehouse_query_parser.add_argument("--table", required=True)
+    warehouse_query_parser.add_argument("--columns", default=None, help="逗号分隔列名，例如 symbol,name,target_date")
+    warehouse_query_parser.add_argument("--since", default=None)
+    warehouse_query_parser.add_argument("--until", default=None)
+    warehouse_query_parser.add_argument("--limit", type=int, default=50)
+    warehouse_query_parser.add_argument("--warehouse-dir", default=None)
+    warehouse_query_parser.set_defaults(func=warehouse_query)
 
     data_loop_parser = subparsers.add_parser("data-loop-status", help="查看数据闭环分层、仓库覆盖和 Obsidian 同步状态")
     data_loop_parser.add_argument("--target-date", default=None)

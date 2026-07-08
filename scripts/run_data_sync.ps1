@@ -58,8 +58,12 @@ function Get-EffectiveWorkers {
     )
 
     $effective = [Math]::Max(1, $RequestedWorkers)
-    if ($Provider -eq "sina" -and $effective -gt 2) {
-        Write-Step "Sina provider is not stable with high thread counts on this machine; clamp Workers from $effective to 2."
+    if ($Provider -eq "sina" -and $effective -gt 1) {
+        Write-Step "Sina provider is not stable with high thread counts on this machine; clamp Workers from $effective to 1."
+        return 1
+    }
+    if ($Provider -eq "eastmoney" -and $effective -gt 2) {
+        Write-Step "Eastmoney provider is unstable with large full-market bursts; clamp Workers from $effective to 2."
         return 2
     }
     return $effective
@@ -98,7 +102,8 @@ function Invoke-UniverseSync {
     }
 
     $effectiveWorkers = Get-EffectiveWorkers -Provider $Provider -RequestedWorkers $RequestedWorkers
-    Write-Step "$Name. Provider: $Provider, Workers: $effectiveWorkers, SleepSeconds: $SleepSeconds, LookbackDays: $LookbackDays"
+    $effectiveSleep = [Math]::Max($SleepSeconds, 0.2)
+    Write-Step "$Name. Provider: $Provider, Workers: $effectiveWorkers, SleepSeconds: $effectiveSleep, LookbackDays: $LookbackDays"
     Invoke-Quant @(
         "sync-stock-universe",
         "--universe-file", "data/universe/stale.csv",
@@ -108,7 +113,10 @@ function Invoke-UniverseSync {
         "--incremental",
         "--lookback-days", $LookbackDays.ToString([Globalization.CultureInfo]::InvariantCulture),
         "--workers", $effectiveWorkers.ToString([Globalization.CultureInfo]::InvariantCulture),
-        "--sleep", $SleepSeconds.ToString([Globalization.CultureInfo]::InvariantCulture),
+        "--sleep", $effectiveSleep.ToString([Globalization.CultureInfo]::InvariantCulture),
+        "--retries", "3",
+        "--retry-wait", "2",
+        "--max-consecutive-failures", "40",
         "--no-skip-existing"
     ) -AllowFailure:$AllowFailure
     $script:LastSyncSucceeded = $script:LastQuantSucceeded

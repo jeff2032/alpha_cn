@@ -1,12 +1,13 @@
 # 数据闭环与保留策略
 
-这个项目的数据分成三层：用户结论层、中间复盘层、原始数据层。原则是：**用户看 Obsidian 的短结论，我们看 DuckDB + Parquet 的结构化中间层，原始行情/公告/主题只作为可追溯底座。**
+这个项目的数据分成四层：用户结论层、机器上下文层、中间复盘层、原始数据层。原则是：**用户看 Obsidian 的短结论，AI/外部入口读 Context Pack，我们看 DuckDB + Parquet 的结构化中间层，原始行情/公告/主题只作为可追溯底座。**
 
 ## 数据分层
 
 | 层 | 路径 | 定位 | 保留策略 |
 | --- | --- | --- | --- |
 | 用户结论层 | `G:\Program Files (x86)\Obsidian_base\中国A股荐股\` | 给持仓人/使用者看的短结论：开盘决策、持仓观察、复盘摘要 | 人工保留，不自动清理 |
+| 机器上下文层 | `data/context/research/` | 给 AI 解读、Web 壳或其他项目读取的结构化 JSON：市场、主线、候选、复盘、生命周期、持仓匹配 | 可由快照重复生成 |
 | 中间复盘层 | `data/warehouse/parquet/` + `data/warehouse/alpha_cn.duckdb` | 给我们复盘、聚合、反推和因子挖掘用，稳定保存候选、生命周期、miss、因子诊断和策略复盘事实表 | 长期保留；DuckDB 可重建，Parquet 是主存储 |
 | 原始数据层 | `data/cache/`、`data/snapshots/research/`、`reports/`、`logs/` | 行情、行业、公告、主题、候选快照、运行报告和日志；用于排障、回填和可追溯 | 行情缓存暂不清理；快照、reports 和 logs 按保留策略清理 |
 
@@ -22,7 +23,8 @@
 6. `warehouse-backfill-snapshots` 已把研究快照写入仓库，并派生 `research_candidate_daily`、`stock_market_attitude_daily`。
 7. `track-candidates` 已把 A1/A2/A3/B2 候选生命周期写入仓库。
 8. `warehouse-ingest` 已索引最新报告和研究结果，并派生 miss、因子诊断、策略复盘中间层。
-9. Obsidian 中有 `复盘摘要/数据截至日.md`、`开盘决策/计划日期.md` 和 `持仓观察/计划日期.md`。
+9. `export-context-pack` 已生成 `data/context/research/数据截至日/plan_计划日期.json`。
+10. Obsidian 中有 `复盘摘要/数据截至日.md`、`开盘决策/计划日期.md` 和 `持仓观察/计划日期.md`。
 
 ## 日常检查
 
@@ -60,14 +62,28 @@
 
 | 表 | 粒度 | 用途 |
 | --- | --- | --- |
+| `run_manifest` | 每次入仓运行一行 | 保存 run_id、target_date、plan_date、仓库版本、质量状态、缺失源和警告源 |
+| `data_quality_daily` | 每个报告源每天一行 | 保存候选、情绪、主线、资金、风险、问财、复盘等数据源是否就绪 |
 | `research_candidate_daily` | 每天每只最终候选一行 | 保存分层、分组、分数、主题、风险、预期观察周期、原因标签和市场态度摘要 |
 | `stock_market_attitude_daily` | 每天每只候选一行 | 保存热度、资金承接、主题共振、盘面态度、事件、风险和拥挤度，输出强确认/温和确认/冷启动/虚热/过热分歧/风险压制 |
 | `candidate_lifecycle_daily` | 每个生命周期每天一行 | 观察新入池、继续、升级、降级、消失、命中、失败、移出 |
 | `missed_opportunity_daily` | 每个明显错过样本一行 | 记录当天大涨但没进入候选的票，以及 miss 原因、风险和是否可学习 |
 | `factor_diagnostics_daily` | 每个复盘聚合项一行 | 保存分层、动作桶、模型桶、阶段、亏损归因、miss 可学习性的统计结果 |
 | `strategy_review_daily` | 每个策略片段一行 | 把复盘统计粗标为有效、中性、拖后腿或样本不足，供后续策略反思使用 |
+| `risk_event_daily` | 每天每只风险事件一行 | 保存巨潮公告结构化风险事件：事件类型、严重度、标题和来源 |
+| `money_flow_daily` | 每天每只资金流一行 | 保存东财个股资金流确认因子：主力净流入、3/5 日净流入和资金分 |
+| `external_screen_daily` | 每天每只外部筛选命中一行 | 保存问财 CSV 导入结果：查询条件、排名、外部评分、标签和命中原因 |
 
-这些表由 `warehouse-backfill-snapshots` 和 `warehouse-ingest` 自动派生，不需要新增日常命令。
+这些表由 `warehouse-backfill-snapshots` 和 `warehouse-ingest` 自动派生。风险事件、资金流和问财导入需要先由 `risk-events`、`money-flow`、`import-iwencai` 生成同日 CSV，入仓时会自动识别。
+
+`run_manifest` 和 `data_quality_daily` 是早上判断“今天能不能用”的第一入口。结构化 CSV 是数据质量判断主依据；Markdown 和 Obsidian 属于用户展示层，不决定研究数据是否可用。
+
+候选表会写入：
+
+- `candidate_model_version`：候选分层/动作桶规则版本。
+- `factor_schema_version`：资金流、风险事件、问财导入等因子字段版本。
+
+后续复盘某个时期的表现时，要同时看日期和版本，避免把旧规则样本和新规则样本混在一起解释。
 
 ## 复盘样本标签
 

@@ -26,7 +26,7 @@ python -m quant_a_stock.cli sync-stock-universe --universe-file data/universe/st
 扫描全市场突破确认池：
 
 ```powershell
-python -m quant_a_stock.cli scan-pattern --pattern base_breakout_setup --top 120 --min-score 50 --stages watch near_breakout --min-amount-ma20 100000000 --require-positive-trend-slope --max-close-vs-trend 0.25 --filter-max-ret-20 0.25
+python -m quant_a_stock.cli scan-pattern --pattern base_breakout_setup --top 160 --min-score 45 --stages watch near_breakout --min-amount-ma20 100000000 --require-positive-trend-slope --max-close-vs-trend 0.25 --filter-max-ret-20 0.25
 ```
 
 扫描全市场潜伏池：
@@ -45,10 +45,12 @@ python -m quant_a_stock.cli scan-pattern --pattern accumulation_setup --top 120 
 扫描全市场强趋势回踩/再启动池：
 
 ```powershell
-python -m quant_a_stock.cli scan-pattern --pattern trend_pullback_setup --top 120 --min-score 50 --stages trend_pullback trend_resume --min-amount-ma20 100000000 --min-ret-60 0.18 --filter-max-ret-20 0.18 --max-volume-ratio 3.20 --max-close-vs-trend 0.65 --max-drawdown-from-high 0.32
+python -m quant_a_stock.cli scan-pattern --pattern trend_pullback_setup --top 160 --min-score 45 --stages trend_pullback trend_resume --min-amount-ma20 100000000 --min-ret-60 0.18 --filter-max-ret-20 0.18 --max-volume-ratio 3.20 --max-close-vs-trend 0.65 --max-drawdown-from-high 0.32
 ```
 
-趋势回踩池对应日报里的 A3：它用于捕捉已经有 60 日趋势、近 20 日不过热、回撤后重新企稳的候选。
+趋势回踩池对应日报里的 A3：它用于捕捉已经有 60 日趋势、近 20 日不过热、回撤后重新企稳的候选。A3 只有在主线仍强、风险干净、位置不拥挤时才进入主攻，否则只放在高波动观察池。
+
+日常入口会把 base/trend 两类扫描放宽到 45 分，但低分样本只进入 B2s/B2b 等观察池；主攻仍要求 A2 或主线仍强的 A3，并且风险干净、不过热、不拥挤。这样是为了减少低位主线突发样本被入口直接漏掉，同时避免趋势票过多占用主攻位。
 
 给形态候选池做情绪评分：
 
@@ -62,13 +64,32 @@ python -m quant_a_stock.cli sentiment-score --latest-scan --target-date 2026-06-
 python -m quant_a_stock.cli market-theme --target-date 2026-06-12 --top 20
 ```
 
+生成资金流、巨潮风险和问财外部验证：
+
+```powershell
+python -m quant_a_stock.cli money-flow --latest-scan --target-date 2026-06-12 --top 90 --display-top 30 --retries 3 --retry-wait 2 --sleep 0.4 --min-success-rate 0.6
+python -m quant_a_stock.cli risk-events --latest-scan --target-date 2026-06-12 --top 90 --days 180 --display-top 30
+python -m quant_a_stock.cli import-iwencai --file exports/iwencai/2026-06-12.csv --target-date 2026-06-12 --query "低位放量 半导体"
+```
+
+这三类报告会写成 `money_flow_*.csv`、`risk_events_*.csv` 和 `iwencai_import_*.csv`。`research-candidates` 会严格按同一目标日期自动合并它们；如果当天没有对应报告，就跳过，不使用其他日期兜底。
+其中资金流报告有成功率保护：接口失败太多时不写正式报告，夜间慢任务会软失败继续往下跑。
+
 合成最终研究候选池：
 
 ```powershell
 python -m quant_a_stock.cli research-candidates --target-date 2026-06-12 --top 30
 ```
 
-夜间版本会抓公司资料和公告风险，允许慢慢跑。它会先补基础行情；如果补完后过期标的超过阈值，默认 30 只，会在同一个任务里等待并重试，默认最多 6 轮、每轮间隔 30 分钟；仍未达标时才跳过后续慢分析并写运维报告。手动执行完整夜间准备：
+导出给 AI 解读、Web 壳或其他项目读取的结构化上下文：
+
+```powershell
+python -m quant_a_stock.cli export-context-pack --target-date 2026-06-12 --plan-date 2026-06-15 --top 30
+```
+
+Context Pack 写入 `data/context/research/数据截至日/plan_计划日期.json`，内容包括市场口径、主线、候选分层、复盘摘要、生命周期和本地持仓匹配。它是机器可读接口，不替代 Obsidian 的用户决策页；后续 `daily_stock_analysis` 只需要读取这层 JSON 做 AI 解读和交互。
+
+夜间版本会抓公司资料、公告风险、巨潮结构化风险事件和东财资金流，允许慢慢跑。它会先补基础行情；如果补完后过期标的超过阈值，默认 30 只，会在同一个任务里等待并重试，默认最多 6 轮、每轮间隔 30 分钟；仍未达标时才跳过后续慢分析并写运维报告。手动执行完整夜间准备：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_nightly_research_prep.ps1
@@ -92,7 +113,7 @@ python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --to
 python -m quant_a_stock.cli research-review --since 2026-05-29 --until 2026-06-12 --top-movers 20
 ```
 
-这个报告会把历史快照里的候选池和 1/3/5/10/15/20/30 个交易日表现对齐，重点看主攻池、B2a 主线扩散升级观察池、B2s 主线突发待确认池、B2b 观察池各自是否有效，以及全市场次日强票有没有被候选池捕获。A3 主要看 1-10 日趋势是否延续，A2 主要看 3-15 日是否从启动确认转强，A1 主要看 10-30 日是否从低位蓄势进入启动，B2a 看主线扩散后能否升级或兑现，B2s 看 1-5 日是否有持续性，B2b 看是否能升级。
+这个报告会把历史快照里的候选池和 1/3/5/10/15/20/30 个交易日表现对齐，重点看主攻池、B2a 主线扩散升级观察池、B2s 低位主线突发待确认池、B2b 观察池各自是否有效，以及全市场次日强票有没有被候选池捕获。A3 主要看 1-10 日趋势是否延续，A2 主要看 3-15 日是否从启动确认转强，A1 主要看 10-30 日是否从低位蓄势进入启动，B2a 看主线扩散后能否升级或兑现，B2s 看 1-5 日是否有持续性，B2b 看是否能升级。
 
 生成 A1/A2/A3/B2 候选生命周期跟踪：
 
@@ -143,6 +164,15 @@ python -m quant_a_stock.cli warehouse-backfill-snapshots --since 2026-06-12 --un
 python -m quant_a_stock.cli warehouse-status
 ```
 
+查看今天数据是否适合用于决策：
+
+```powershell
+python -m quant_a_stock.cli warehouse-query --table run_manifest --columns run_id,target_date,plan_date,quality_status,missing_required,warning_reports --limit 5
+python -m quant_a_stock.cli warehouse-query --table data_quality_daily --columns target_date,source_group,report_type,quality_level,issue --since 2026-07-01 --limit 80
+```
+
+`quality_status = READY` 说明结构化数据闭环完整；`WARN` 通常是增强源缺失或可展示层缺失；`FAIL` 表示候选、情绪、主线、每日候选或复盘等必需结构化数据缺失，先补数据再做决策。
+
 按日期区间汇总复盘：
 
 ```powershell
@@ -171,6 +201,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_rese
 Obsidian 是用户结论层，只放少量可读结论。完整候选、情绪、滚动复盘、生命周期明细继续保留在项目内部 `reports/` 与 DuckDB/Parquet。
 
 开盘决策按计划交易日命名。推荐、观察和风险条件可以以计划交易日为主语；但市场温度、市场主线、滚动复盘、生命周期状态这类已经发生的事实，要以数据截至日为主语。例如 `2026-07-02` 的开盘决策里，市场主题应写成 `2026-07-01 收盘主线回顾`，市场判断应写成 `2026-07-01 收盘市场口径`，避免把上一交易日事实误读成计划日预测。
+
+日期参数的含义固定为：
+
+- `TargetDate`：数据截至日。
+- `PlanDate`：开盘计划日。
+- `2026-07-07` 开盘计划应基于 `2026-07-06` 收盘后数据，即 `-TargetDate 2026-07-06 -PlanDate 2026-07-07`。
+- 不手工传 `PlanDate` 时，脚本默认生成 `TargetDate` 之后的下一个交易日计划。
 
 持仓观察读取本地 `data/manual/holdings.csv`，字段参考 `config/holdings.example.csv`。真实持仓只存在本机，`data/` 不提交 git。
 
@@ -223,9 +260,9 @@ python -m quant_a_stock.cli research-candidates --target-date 目标日期 --top
 优先人工复盘：
 
 - `action_bucket = 主攻-A2启动确认`：启动确认主攻池，看突破后承接、回踩不破和量能不过热。
-- `action_bucket = 主攻-A3趋势延续`：趋势主攻池，只看分歧低吸或强承接，不追高开加速。
+- `action_bucket = 主攻-A3趋势延续`：趋势主攻池，必须主线仍强、风险干净、不过热，只看分歧低吸或强承接，不追高开加速。
 - `action_bucket = 观察-B2a主线扩散待升级`：主线扩散升级观察池，必须再核验公告风险、盘中承接和次日持续性。
-- `action_bucket = 观察-B2s主线突发待确认`：主线突发待确认池，重点看次日是否持续、盘中是否有承接、公告/情绪是否补足。
+- `action_bucket = 观察-B2s主线突发待确认`：低位主线突发待确认池，重点看次日是否持续、盘中是否有承接、公告/情绪是否补足。
 - `action_bucket = 观察-B2b主题待确认`：有主题线索但确认不足，只观察是否补量、补承接或升级。
 - `research_score` 靠前，且 `risk_level` 为低或中。
 - `matched_theme` 命中当天强主线，或同主题/行业候选数量明显靠前。

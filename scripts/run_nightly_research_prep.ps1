@@ -540,6 +540,27 @@ try {
         "--target-date", $script:ResolvedTargetDate,
         "--top", "20"
     )
+    Invoke-QuantStep -Name "资金流缓存" -Arguments @(
+        "money-flow",
+        "--latest-scan",
+        "--target-date", $script:ResolvedTargetDate,
+        "--top", $SentimentTop.ToString([Globalization.CultureInfo]::InvariantCulture),
+        "--lookback-days", "10",
+        "--display-top", "30",
+        "--retries", "3",
+        "--retry-wait", "2",
+        "--sleep", "0.4",
+        "--min-success-rate", "0.60",
+        "--soft-fail"
+    )
+    Invoke-QuantStep -Name "巨潮风险事件缓存" -Arguments @(
+        "risk-events",
+        "--latest-scan",
+        "--target-date", $script:ResolvedTargetDate,
+        "--top", $SentimentTop.ToString([Globalization.CultureInfo]::InvariantCulture),
+        "--days", $RiskDays.ToString([Globalization.CultureInfo]::InvariantCulture),
+        "--display-top", "30"
+    )
     Invoke-QuantStep -Name "候选池慢增强" -Arguments @(
         "research-candidates",
         "--target-date", $script:ResolvedTargetDate,

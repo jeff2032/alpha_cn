@@ -9,6 +9,7 @@ from quant_a_stock.warehouse import ingest_latest_reports
 from quant_a_stock.warehouse import sync_candidate_lifecycles_to_warehouse
 from quant_a_stock.warehouse import sync_daily_candles_to_warehouse
 from quant_a_stock.warehouse import sync_stock_universe_to_warehouse
+from quant_a_stock.warehouse import warehouse_query
 from quant_a_stock.warehouse import warehouse_review
 from quant_a_stock.warehouse import warehouse_status
 
@@ -44,6 +45,45 @@ def test_ingest_latest_reports_builds_parquet_and_review_views(tmp_path: Path) -
     _write_csv(
         reports_dir / "market_theme_20260618_070000.csv",
         [{"theme": "半导体", "theme_score": 80.0}],
+    )
+    _write_csv(
+        reports_dir / "risk_events_20260618_070000.csv",
+        [
+            {
+                "symbol": "002137",
+                "date": "2026-06-18",
+                "title": "关于收到监管问询函的公告",
+                "event_type": "监管问询",
+                "severity": "中高",
+                "severity_score": 5,
+                "source": "cninfo",
+            }
+        ],
+    )
+    _write_csv(
+        reports_dir / "money_flow_20260618_070000.csv",
+        [
+            {
+                "symbol": "002137",
+                "date": "2026-06-18",
+                "main_net_inflow": 120000000,
+                "main_net_inflow_3d": 200000000,
+                "money_flow_score": 60,
+            }
+        ],
+    )
+    _write_csv(
+        reports_dir / "iwencai_import_20260618_070000.csv",
+        [
+            {
+                "symbol": "002137",
+                "name": "实益达",
+                "date": "2026-06-18",
+                "iwencai_hit": 1,
+                "iwencai_score": 80,
+                "iwencai_query": "低位放量 半导体",
+            }
+        ],
     )
     _write_csv(
         reports_dir / "research_review_details_20260618_070000.csv",
@@ -107,6 +147,11 @@ def test_ingest_latest_reports_builds_parquet_and_review_views(tmp_path: Path) -
     missed_daily_rows = status.loc[status["table"] == "missed_opportunity_daily", "rows"].iloc[0]
     factor_rows = status.loc[status["table"] == "factor_diagnostics_daily", "rows"].iloc[0]
     strategy_rows = status.loc[status["table"] == "strategy_review_daily", "rows"].iloc[0]
+    risk_event_rows = status.loc[status["table"] == "risk_event_daily", "rows"].iloc[0]
+    money_flow_rows = status.loc[status["table"] == "money_flow_daily", "rows"].iloc[0]
+    external_screen_rows = status.loc[status["table"] == "external_screen_daily", "rows"].iloc[0]
+    run_manifest_rows = status.loc[status["table"] == "run_manifest", "rows"].iloc[0]
+    data_quality_rows = status.loc[status["table"] == "data_quality_daily", "rows"].iloc[0]
     assert candidates_rows == 1
     assert missed_rows == 1
     assert candidate_daily_rows == 1
@@ -114,6 +159,23 @@ def test_ingest_latest_reports_builds_parquet_and_review_views(tmp_path: Path) -
     assert missed_daily_rows == 1
     assert factor_rows == 1
     assert strategy_rows == 1
+    assert risk_event_rows == 1
+    assert money_flow_rows == 1
+    assert external_screen_rows == 1
+    assert run_manifest_rows == 1
+    assert data_quality_rows > 0
+
+    manifest = warehouse_query("run_manifest", warehouse_dir=warehouse_dir)
+    assert manifest.loc[0, "run_id"] == "test-run"
+    assert manifest.loc[0, "quality_status"] in {"READY", "WARN"}
+    quality = warehouse_query(
+        "data_quality_daily",
+        columns=["target_date", "report_type", "quality_level"],
+        since="2026-06-18",
+        until="2026-06-18",
+        warehouse_dir=warehouse_dir,
+    )
+    assert "research_candidates" in set(quality["report_type"])
 
     review = warehouse_review(since="2026-06-17", until="2026-06-18", warehouse_dir=warehouse_dir)
     tier = review["tier"]

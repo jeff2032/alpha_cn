@@ -40,16 +40,18 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "G:\OwnProject\alpha_cn\
 10. 扫描强趋势回踩/再启动池。
 11. 生成情绪面缓存，默认扩到前 180 个候选。
 12. 生成市场主线。
-13. 合成最终研究候选池，并抓公司资料、公告风险等慢数据。
-14. 归档到 `data/snapshots/research/YYYY-MM-DD/`。
-15. 生成每日中文复盘报告。
-16. 生成近两周候选池滚动复盘报告。
-17. 生成 A1/A2/A3/B2 候选生命周期跟踪并写入仓库。
-18. 写入股票池维表。
-19. 把本地股票和 ETF/指数日线 CSV 缓存增量同步到 Parquet。
-20. 回填当天研究快照。
-21. 写入最新研究报告和复盘结果。
-22. 输出夜间准备报告。
+13. 生成东财个股资金流缓存。
+14. 生成巨潮结构化公告风险事件缓存。
+15. 合成最终研究候选池，并抓公司资料、公告风险等慢数据；如果同日资金流、巨潮风险和问财导入报告存在，会自动合并。
+16. 归档到 `data/snapshots/research/YYYY-MM-DD/`。
+17. 生成每日中文复盘报告。
+18. 生成近两周候选池滚动复盘报告。
+19. 生成 A1/A2/A3/B2 候选生命周期跟踪并写入仓库。
+20. 写入股票池维表。
+21. 把本地股票和 ETF/指数日线 CSV 缓存增量同步到 Parquet。
+22. 回填当天研究快照。
+23. 写入最新研究报告和复盘结果，同时生成 `run_manifest` 和 `data_quality_daily`。
+24. 输出夜间准备报告。
 
 日志和状态报告：
 
@@ -127,6 +129,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_rese
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_research.ps1 -TargetDate 2026-06-17 -PlanDate 2026-06-18
 ```
+
+日期关系必须保持清楚：
+
+- `TargetDate` 是数据截至日，只能填已经收盘且已准备好的交易日。
+- `PlanDate` 是要看的开盘计划日期，正常应是 `TargetDate` 的下一个交易日。
+- 例如 `2026-07-07` 开盘计划应使用 `-TargetDate 2026-07-06 -PlanDate 2026-07-07`，不能使用 `2026-07-07` 当天数据。
+- 如果不传 `-PlanDate`，脚本会默认取 `TargetDate` 后的下一个交易日；历史补跑时会优先从本地缓存推断真实下一交易日。
 
 如果只想生成项目内报告，不想同步到 Obsidian：
 

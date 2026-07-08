@@ -9,6 +9,7 @@ import duckdb
 import pandas as pd
 
 from quant_a_stock.config import DEFAULT_PATHS
+from quant_a_stock.research.version import WAREHOUSE_SCHEMA_VERSION
 
 
 CSV_REPORT_SPECS = {
@@ -16,6 +17,9 @@ CSV_REPORT_SPECS = {
     "daily_research_candidates": "daily_research_candidates_*.csv",
     "sentiment_scores": "sentiment_watchlist_*.csv",
     "market_themes": "market_theme_*.csv",
+    "risk_events": "risk_events_*.csv",
+    "money_flow": "money_flow_*.csv",
+    "iwencai_import": "iwencai_import_*.csv",
     "research_review_details": "research_review_details_*.csv",
     "research_review_summary": "research_review_summary_*.csv",
     "missed_opportunities": "research_review_missed_*.csv",
@@ -39,11 +43,16 @@ MARKDOWN_REPORT_SPECS = {
 }
 
 MIDDLE_LAYER_TABLES = [
+    "run_manifest",
+    "data_quality_daily",
     "research_candidate_daily",
     "stock_market_attitude_daily",
     "missed_opportunity_daily",
     "factor_diagnostics_daily",
     "strategy_review_daily",
+    "risk_event_daily",
+    "money_flow_daily",
+    "external_screen_daily",
 ]
 
 WAREHOUSE_TABLES = [
@@ -58,6 +67,21 @@ WAREHOUSE_TABLES = [
     "candidate_lifecycles",
     "candidate_lifecycle_daily",
 ]
+
+REQUIRED_QUALITY_REPORTS = {
+    "research_candidates",
+    "daily_research_candidates",
+    "sentiment_scores",
+    "market_themes",
+    "research_review_details",
+    "research_review_summary",
+}
+
+ENHANCEMENT_QUALITY_REPORTS = {
+    "risk_events",
+    "money_flow",
+    "iwencai_import",
+}
 
 
 @dataclass(frozen=True)
@@ -85,6 +109,7 @@ def parquet_root(path: Path | None = None) -> Path:
 def ingest_latest_reports(
     *,
     target_date: str,
+    plan_date: str | None = None,
     reports_dir: Path | None = None,
     warehouse_dir: Path | None = None,
     run_id: str | None = None,
@@ -141,7 +166,43 @@ def ingest_latest_reports(
             status = "missing_for_date" if path else "missing"
         report_rows.append(_report_row(resolved_run_id, target_date, report_type, path, 0, status, ingested_at))
 
-    report_index = pd.DataFrame(report_rows)
+    base_report_index = pd.DataFrame(report_rows)
+    system_rows: list[dict] = []
+    system_rows.append(
+        _write_middle_frame(
+            _build_data_quality_daily(
+                base_report_index,
+                target_date=target_date,
+                plan_date=plan_date,
+                run_id=resolved_run_id,
+                ingested_at=ingested_at,
+            ),
+            "data_quality_daily",
+            target_date=target_date,
+            run_id=resolved_run_id,
+            source_path="derived:report_index",
+            ingested_at=ingested_at,
+            warehouse_dir=warehouse_dir,
+        )
+    )
+    system_rows.append(
+        _write_middle_frame(
+            _build_run_manifest(
+                base_report_index,
+                target_date=target_date,
+                plan_date=plan_date,
+                run_id=resolved_run_id,
+                ingested_at=ingested_at,
+            ),
+            "run_manifest",
+            target_date=target_date,
+            run_id=resolved_run_id,
+            source_path="derived:report_index",
+            ingested_at=ingested_at,
+            warehouse_dir=warehouse_dir,
+        )
+    )
+    report_index = pd.concat([base_report_index, pd.DataFrame([row for row in system_rows if row])], ignore_index=True)
     _write_parquet(
         report_index,
         "report_index",
@@ -481,6 +542,147 @@ def sync_candidate_lifecycles_to_warehouse(
     )
 
 
+def _build_data_quality_daily(
+    report_index: pd.DataFrame,
+    *,
+    target_date: str,
+    plan_date: str | None,
+    run_id: str,
+    ingested_at: str,
+) -> pd.DataFrame:
+    if report_index.empty:
+        return pd.DataFrame(
+            [
+                {
+                    "target_date": target_date,
+                    "plan_date": plan_date or "",
+                    "run_id": run_id,
+                    "source_group": "warehouse",
+                    "report_type": "report_index",
+                    "required": True,
+                    "status": "missing",
+                    "row_count": 0,
+                    "source_path": "",
+                    "is_ready": False,
+                    "quality_level": "FAIL",
+                    "issue": "没有入仓报告索引。",
+                    "checked_at": ingested_at,
+                }
+            ]
+        )
+
+    rows: list[dict] = []
+    for _, item in report_index.iterrows():
+        report_type = str(item.get("report_type", "") or "")
+        status = str(item.get("status", "") or "")
+        row_count = int(pd.to_numeric(pd.Series([item.get("row_count", 0)]), errors="coerce").fillna(0).iloc[0])
+        required = report_type in REQUIRED_QUALITY_REPORTS
+        enhancement = report_type in ENHANCEMENT_QUALITY_REPORTS
+        ready_statuses = {"ingested", "indexed", "derived"}
+        ready = status in ready_statuses
+        if required and not ready:
+            level = "FAIL"
+            issue = f"必需数据未就绪: {status}"
+        elif required and status == "ingested" and row_count == 0:
+            level = "WARN"
+            issue = "必需 CSV 已生成但为空。"
+        elif enhancement and not ready:
+            level = "WARN"
+            issue = f"增强数据未就绪: {status}"
+        elif status == "empty":
+            level = "WARN"
+            issue = "数据为空。"
+        else:
+            level = "OK"
+            issue = ""
+        rows.append(
+            {
+                "target_date": target_date,
+                "plan_date": plan_date or "",
+                "run_id": run_id,
+                "source_group": _quality_source_group(report_type),
+                "report_type": report_type,
+                "required": required,
+                "status": status,
+                "row_count": row_count,
+                "source_path": str(item.get("source_path", "") or ""),
+                "is_ready": ready,
+                "quality_level": level,
+                "issue": issue,
+                "checked_at": ingested_at,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _build_run_manifest(
+    report_index: pd.DataFrame,
+    *,
+    target_date: str,
+    plan_date: str | None,
+    run_id: str,
+    ingested_at: str,
+) -> pd.DataFrame:
+    quality = _build_data_quality_daily(
+        report_index,
+        target_date=target_date,
+        plan_date=plan_date,
+        run_id=run_id,
+        ingested_at=ingested_at,
+    )
+    required = quality[quality["required"] == True]  # noqa: E712
+    failed_required = required[required["quality_level"] == "FAIL"]
+    warnings = quality[quality["quality_level"] == "WARN"]
+    if not failed_required.empty:
+        quality_status = "FAIL"
+    elif not warnings.empty:
+        quality_status = "WARN"
+    else:
+        quality_status = "READY"
+    total_rows = int(pd.to_numeric(report_index.get("row_count", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+    return pd.DataFrame(
+        [
+            {
+                "run_id": run_id,
+                "target_date": target_date,
+                "plan_date": plan_date or "",
+                "pipeline": "warehouse_ingest",
+                "warehouse_schema_version": WAREHOUSE_SCHEMA_VERSION,
+                "started_at": ingested_at,
+                "finished_at": ingested_at,
+                "quality_status": quality_status,
+                "required_sources": int(len(required)),
+                "required_ready": int((required["quality_level"] != "FAIL").sum()),
+                "warning_sources": int(len(warnings)),
+                "failed_required_sources": int(len(failed_required)),
+                "total_report_rows": total_rows,
+                "missing_required": "；".join(failed_required["report_type"].astype(str).tolist()),
+                "warning_reports": "；".join(warnings["report_type"].astype(str).tolist()),
+            }
+        ]
+    )
+
+
+def _quality_source_group(report_type: str) -> str:
+    if report_type in {"research_candidates", "daily_research_candidates", "research_candidates_markdown"}:
+        return "candidate"
+    if report_type in {"sentiment_scores", "sentiment_watchlist_markdown"}:
+        return "sentiment"
+    if report_type in {"market_themes", "market_theme_markdown"}:
+        return "theme"
+    if report_type in {"risk_events"}:
+        return "risk"
+    if report_type in {"money_flow"}:
+        return "money_flow"
+    if report_type in {"iwencai_import"}:
+        return "external_screen"
+    if report_type.startswith("research_review") or report_type == "missed_opportunities":
+        return "review"
+    if report_type.endswith("_markdown") or report_type == "daily_research_summary":
+        return "markdown"
+    return "warehouse"
+
+
 def _write_middle_layer_from_reports(
     frames: dict[str, pd.DataFrame],
     *,
@@ -510,6 +712,48 @@ def _write_middle_layer_from_reports(
                 target_date=target_date,
                 run_id=run_id,
                 source_path="derived:research_candidates",
+                ingested_at=ingested_at,
+                warehouse_dir=warehouse_dir,
+            )
+        )
+
+    risk_events = frames.get("risk_events")
+    if risk_events is not None and not risk_events.empty:
+        rows.append(
+            _write_middle_frame(
+                _build_risk_event_daily(risk_events, target_date=target_date),
+                "risk_event_daily",
+                target_date=target_date,
+                run_id=run_id,
+                source_path="derived:risk_events",
+                ingested_at=ingested_at,
+                warehouse_dir=warehouse_dir,
+            )
+        )
+
+    money_flow = frames.get("money_flow")
+    if money_flow is not None and not money_flow.empty:
+        rows.append(
+            _write_middle_frame(
+                _build_money_flow_daily(money_flow, target_date=target_date),
+                "money_flow_daily",
+                target_date=target_date,
+                run_id=run_id,
+                source_path="derived:money_flow",
+                ingested_at=ingested_at,
+                warehouse_dir=warehouse_dir,
+            )
+        )
+
+    iwencai = frames.get("iwencai_import")
+    if iwencai is not None and not iwencai.empty:
+        rows.append(
+            _write_middle_frame(
+                _build_external_screen_daily(iwencai, target_date=target_date),
+                "external_screen_daily",
+                target_date=target_date,
+                run_id=run_id,
+                source_path="derived:iwencai_import",
                 ingested_at=ingested_at,
                 warehouse_dir=warehouse_dir,
             )
@@ -658,6 +902,43 @@ def warehouse_status(*, warehouse_dir: Path | None = None) -> pd.DataFrame:
                 continue
             rows.append(_table_status(conn, table_name))
     return pd.DataFrame(rows)
+
+
+def warehouse_query(
+    table: str,
+    *,
+    since: str | None = None,
+    until: str | None = None,
+    columns: list[str] | None = None,
+    limit: int = 50,
+    warehouse_dir: Path | None = None,
+) -> pd.DataFrame:
+    db_path = warehouse_db_path(warehouse_dir)
+    if not db_path.exists():
+        raise ValueError("研究仓库还没有初始化。")
+    table_name = _safe_identifier(table)
+    with duckdb.connect(str(db_path), read_only=True) as conn:
+        views = _warehouse_views(conn)
+        if table_name not in views:
+            raise ValueError(f"仓库中不存在表或视图: {table_name}")
+        available_columns = _view_columns(conn, table_name)
+        selected = _query_columns(columns, available_columns)
+        date_column = _best_query_date_column(available_columns)
+        where_sql = ""
+        params: list[object] = []
+        if date_column and (since or until):
+            clauses = []
+            if since:
+                clauses.append(f"{date_column} >= ?")
+                params.append(since)
+            if until:
+                clauses.append(f"{date_column} <= ?")
+                params.append(until)
+            where_sql = "WHERE " + " AND ".join(clauses)
+        order_sql = f"ORDER BY {date_column} DESC" if date_column else ""
+        safe_limit = max(1, min(int(limit or 50), 5000))
+        sql = f"SELECT {selected} FROM {table_name} {where_sql} {order_sql} LIMIT {safe_limit}"
+        return conn.execute(sql, params).fetchdf()
 
 
 def warehouse_review(
@@ -809,14 +1090,24 @@ def _build_research_candidate_daily(frame: pd.DataFrame, *, target_date: str) ->
     output["model_bucket"] = output.apply(lambda row: _candidate_model_bucket(row["tier"], row["action_bucket"]), axis=1)
     output["expected_horizon"] = output.apply(lambda row: _expected_horizon(row["tier"], row["action_bucket"]), axis=1)
     output["research_score"] = _numeric_column(frame, "research_score")
+    output["candidate_model_version"] = _column(frame, "candidate_model_version", default="")
+    output["factor_schema_version"] = _column(frame, "factor_schema_version", default="")
     output["shape_score"] = _numeric_column(frame, "score")
     output["sentiment_score"] = _numeric_column(frame, "sentiment_score")
+    output["money_flow_score"] = _numeric_column(frame, "money_flow_score")
+    output["money_flow_bonus"] = _numeric_column(frame, "money_flow_bonus")
+    output["main_net_inflow_3d"] = _numeric_column(frame, "main_net_inflow_3d")
+    output["external_screen_hit"] = _numeric_column(frame, "iwencai_hit")
+    output["external_screen_bonus"] = _numeric_column(frame, "external_screen_bonus")
+    output["risk_event_score"] = _numeric_column(frame, "risk_event_score")
+    output["high_risk_event_count"] = _numeric_column(frame, "high_risk_event_count")
     output["stage"] = _column(frame, "stage", default="")
     output["matched_theme"] = _column(frame, "matched_theme", default="")
     output["theme_rank"] = _numeric_column(frame, "theme_rank")
     output["co_rise_count"] = _numeric_column(frame, "co_rise_count")
     output["risk_level"] = _column(frame, "risk_level", default="")
     output["risk_tags"] = _column(frame, "risk_tags", default="")
+    output["risk_event_types"] = _column(frame, "risk_event_types", default="")
     output["reason_tags"] = frame.apply(_candidate_reason_tags, axis=1)
     output["latest_core_news"] = _column(frame, "latest_core_news", default="")
     output["upgrade_hint"] = _column(frame, "upgrade_hint", default="")
@@ -841,10 +1132,58 @@ def _build_stock_market_attitude_daily(frame: pd.DataFrame, *, target_date: str)
     output["event_score"] = attitude["event_score"]
     output["risk_attitude_score"] = attitude["risk_attitude_score"]
     output["crowding_risk_score"] = attitude["crowding_risk_score"]
+    output["money_flow_score"] = _numeric_column(frame, "money_flow_score")
+    output["risk_event_score"] = _numeric_column(frame, "risk_event_score")
+    output["external_screen_hit"] = _numeric_column(frame, "iwencai_hit")
     output["attitude_label"] = attitude["label"]
     output["attitude_reasons"] = attitude["reasons"]
     output["attitude_risks"] = attitude["risks"]
-    output["data_sources"] = "candidate, sentiment, theme, price_volume, risk_notice"
+    output["data_sources"] = "candidate, sentiment, theme, price_volume, risk_notice, money_flow, external_screen"
+    return output
+
+
+def _build_risk_event_daily(frame: pd.DataFrame, *, target_date: str) -> pd.DataFrame:
+    output = pd.DataFrame()
+    output["target_date"] = _constant_series(frame, target_date)
+    output["symbol"] = _column(frame, "symbol", default="").astype(str).str.zfill(6)
+    output["event_date"] = _column(frame, "date", default=target_date)
+    output["event_type"] = _column(frame, "event_type", default="")
+    output["severity"] = _column(frame, "severity", default="")
+    output["severity_score"] = _numeric_column(frame, "severity_score")
+    output["title"] = _column(frame, "title", default="")
+    output["source"] = _column(frame, "source", default="cninfo")
+    output["url"] = _column(frame, "url", default="")
+    return output
+
+
+def _build_money_flow_daily(frame: pd.DataFrame, *, target_date: str) -> pd.DataFrame:
+    output = pd.DataFrame()
+    output["target_date"] = _constant_series(frame, target_date)
+    output["symbol"] = _column(frame, "symbol", default="").astype(str).str.zfill(6)
+    output["flow_date"] = _column(frame, "date", default=target_date)
+    output["main_net_inflow"] = _numeric_column(frame, "main_net_inflow")
+    output["main_net_inflow_pct"] = _numeric_column(frame, "main_net_inflow_pct")
+    output["main_net_inflow_3d"] = _numeric_column(frame, "main_net_inflow_3d")
+    output["main_net_inflow_5d"] = _numeric_column(frame, "main_net_inflow_5d")
+    output["positive_flow_days_5"] = _numeric_column(frame, "positive_flow_days_5")
+    output["money_flow_score"] = _numeric_column(frame, "money_flow_score")
+    output["source"] = _column(frame, "source", default="eastmoney")
+    output["error"] = _column(frame, "error", default="")
+    return output
+
+
+def _build_external_screen_daily(frame: pd.DataFrame, *, target_date: str) -> pd.DataFrame:
+    output = pd.DataFrame()
+    output["target_date"] = _constant_series(frame, target_date)
+    output["symbol"] = _column(frame, "symbol", default="").astype(str).str.zfill(6)
+    output["name"] = _column(frame, "name", "名称", default="")
+    output["screen_date"] = _column(frame, "date", default=target_date)
+    output["screen_source"] = _column(frame, "source", default="iwencai_csv")
+    output["screen_query"] = _column(frame, "iwencai_query", default="")
+    output["screen_rank"] = _numeric_column(frame, "iwencai_rank")
+    output["screen_score"] = _numeric_column(frame, "iwencai_score")
+    output["screen_tags"] = _column(frame, "iwencai_tags", default="")
+    output["screen_reason"] = _column(frame, "iwencai_reason", default="")
     return output
 
 
@@ -965,6 +1304,10 @@ def _candidate_reason_tags(row: pd.Series) -> str:
         tags.append("同主题共振")
     if _safe_float(row.get("core_news_count")) > 0:
         tags.append("核心新闻")
+    if _safe_float(row.get("money_flow_score")) >= 50:
+        tags.append("资金流确认")
+    if _safe_float(row.get("iwencai_hit")) > 0:
+        tags.append("问财外部命中")
     sentiment = _safe_float(row.get("sentiment_score"))
     if sentiment >= 70:
         tags.append("情绪强")
@@ -1028,7 +1371,10 @@ def _money_confirmation_score(row: pd.Series) -> float:
     volume_score = min(45.0, max(0.0, volume_ratio - 0.7) * 35.0) if volume_ratio > 0 else 0.0
     pool_score = 20.0 if bool(row.get("in_limit_pool", False)) else (12.0 if bool(row.get("in_strong_pool", False)) else 0.0)
     stage_score = 10.0 if str(row.get("stage", "")) in {"near_breakout", "breakout", "trend_resume"} else 0.0
-    return _clip(amount_score + volume_score + pool_score + stage_score)
+    flow_score = min(25.0, _safe_float(row.get("money_flow_score")) * 0.25)
+    if _safe_float(row.get("main_net_inflow_3d")) < -200_000_000:
+        flow_score -= 15.0
+    return _clip(amount_score + volume_score + pool_score + stage_score + flow_score)
 
 
 def _theme_confirmation_score(row: pd.Series) -> float:
@@ -1072,8 +1418,9 @@ def _risk_attitude_score(row: pd.Series) -> float:
     risk_level = str(row.get("risk_level", "") or "")
     level_score = {"低": 0.0, "中": 25.0, "中高": 55.0, "高": 85.0}.get(risk_level, 10.0)
     notice_score = min(50.0, _safe_float(row.get("risk_notice_count")) * 25.0)
+    event_score = min(80.0, _safe_float(row.get("risk_event_score")) * 4.0)
     penalty_score = min(60.0, _safe_float(row.get("total_penalty")) * 2.5)
-    return _clip(max(level_score, notice_score, penalty_score))
+    return _clip(max(level_score, notice_score, event_score, penalty_score))
 
 
 def _crowding_risk_score(row: pd.Series) -> float:
@@ -1136,6 +1483,10 @@ def _attitude_reasons(
         reasons.append("资金承接较强")
     elif money >= 50:
         reasons.append("资金温和确认")
+    if _safe_float(row.get("money_flow_score")) >= 50:
+        reasons.append("主力资金流入确认")
+    if _safe_float(row.get("iwencai_hit")) > 0:
+        reasons.append("问财外部条件命中")
     if theme >= 55:
         theme_name = str(row.get("matched_theme", "") or "")
         reasons.append(f"主题共振{':' + theme_name if theme_name else ''}")
@@ -1152,6 +1503,9 @@ def _attitude_risks(row: pd.Series, risk: float, crowding: float) -> list[str]:
     risks: list[str] = []
     if risk >= 55:
         risks.append(str(row.get("risk_tags", "") or "风险项偏多"))
+    if _safe_float(row.get("risk_event_score")) > 0:
+        risk_types = str(row.get("risk_event_types", "") or "巨潮风险事件")
+        risks.append(risk_types)
     if crowding >= 55:
         risks.append("拥挤度偏高")
     if _safe_float(row.get("ret_20_pct")) > 0.18:
@@ -1331,6 +1685,40 @@ def _warehouse_views(conn: duckdb.DuckDBPyConnection) -> set[str]:
         """
     ).fetchall()
     return {str(row[0]) for row in rows}
+
+
+def _safe_identifier(value: str) -> str:
+    text = str(value or "").strip()
+    if not text or not all(part.isidentifier() for part in text.split(".")):
+        raise ValueError(f"非法表名或列名: {value}")
+    return text
+
+
+def _query_columns(columns: list[str] | None, available_columns: set[str]) -> str:
+    if not columns:
+        return "*"
+    selected = []
+    for column in columns:
+        name = _safe_identifier(column)
+        if name not in available_columns:
+            raise ValueError(f"表中不存在列: {name}")
+        selected.append(name)
+    return ", ".join(selected)
+
+
+def _best_query_date_column(columns: set[str]) -> str:
+    for column in (
+        "target_date",
+        "warehouse_target_date",
+        "signal_date",
+        "date",
+        "flow_date",
+        "event_date",
+        "screen_date",
+    ):
+        if column in columns:
+            return column
+    return ""
 
 
 def _view_columns(conn: duckdb.DuckDBPyConnection, table_name: str) -> set[str]:

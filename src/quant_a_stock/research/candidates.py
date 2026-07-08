@@ -7,6 +7,8 @@ import pandas as pd
 
 from quant_a_stock.data.cache import daily_cache_path
 from quant_a_stock.data.universe import normalize_symbol
+from quant_a_stock.research.version import CANDIDATE_MODEL_VERSION
+from quant_a_stock.research.version import FACTOR_SCHEMA_VERSION
 
 
 RISK_NOTICE_KEYWORDS = [
@@ -175,6 +177,8 @@ def build_research_candidates(
     profiles: pd.DataFrame | None = None,
     cache_info: pd.DataFrame | None = None,
     risk_notices: pd.DataFrame | None = None,
+    money_flow: pd.DataFrame | None = None,
+    external_screen: pd.DataFrame | None = None,
     target_date: str | None = None,
     config: ResearchCandidateConfig = ResearchCandidateConfig(),
 ) -> pd.DataFrame:
@@ -199,7 +203,7 @@ def build_research_candidates(
         output["name"] = output.get("name_sentiment", "")
     output["name"] = output["name"].fillna(output.get("name_sentiment", "")).fillna("")
 
-    for frame in (profiles, cache_info, risk_notices):
+    for frame in (profiles, cache_info, risk_notices, money_flow, external_screen):
         if frame is not None and not frame.empty:
             output = output.merge(normalize_symbol_column(frame), on="symbol", how="left")
 
@@ -235,6 +239,17 @@ def build_research_candidates(
             "pullback_depth_pct",
             "range_position_60_pct",
             "risk_notice_count",
+            "risk_event_score",
+            "high_risk_event_count",
+            "money_flow_score",
+            "main_net_inflow",
+            "main_net_inflow_pct",
+            "main_net_inflow_3d",
+            "main_net_inflow_5d",
+            "positive_flow_days_5",
+            "iwencai_hit",
+            "iwencai_rank",
+            "iwencai_score",
             "cache_age_days",
         ],
     )
@@ -243,6 +258,10 @@ def build_research_candidates(
         "cache_first_date",
         "industry",
         "risk_notice_titles",
+        "risk_event_types",
+        "iwencai_query",
+        "iwencai_tags",
+        "iwencai_reason",
         "stage",
         "setup_phase",
         "scan_source",
@@ -307,6 +326,9 @@ def build_research_candidates(
     output["risk_notice_penalty"] = output["risk_notice_count"].map(
         lambda count: min(config.risk_notice_penalty_max, count * config.risk_notice_penalty_per_hit)
     )
+    output["risk_event_penalty"] = output["risk_event_score"].map(lambda score: min(15.0, score))
+    output["money_flow_bonus"] = output["money_flow_score"].map(lambda score: min(6.0, max(0.0, score) * 0.08))
+    output["external_screen_bonus"] = output.apply(_external_screen_bonus, axis=1)
     output["total_penalty"] = (
         output["volume_overheat_penalty"]
         + output["ret20_overheat_penalty"]
@@ -314,6 +336,7 @@ def build_research_candidates(
         + output["position_overhead_penalty"]
         + output["new_stock_penalty"]
         + output["risk_notice_penalty"]
+        + output["risk_event_penalty"]
     )
     output["research_score"] = (
         output["score"] * config.shape_weight
@@ -321,10 +344,14 @@ def build_research_candidates(
         + output["stage_bonus"]
         + output["theme_bonus"]
         + output["co_rise_bonus"]
+        + output["money_flow_bonus"]
+        + output["external_screen_bonus"]
         - output["total_penalty"]
     ).clip(lower=0, upper=100).round(2)
     output["research_tier"] = output.apply(_tier, axis=1)
     output["research_tier_rank"] = output["research_tier"].map(_tier_rank)
+    output["candidate_model_version"] = CANDIDATE_MODEL_VERSION
+    output["factor_schema_version"] = FACTOR_SCHEMA_VERSION
     output["risk_tags"] = output.apply(lambda row: "；".join(_risk_tags(row, config)), axis=1)
     output["risk_level"] = output.apply(lambda row: _risk_level(row, config), axis=1)
     output["is_risk_clean"] = output["risk_level"].isin(["低", "中"]) & (output["total_penalty"] <= 10)
@@ -478,6 +505,20 @@ def _position_overhead_penalty(row: pd.Series, config: ResearchCandidateConfig) 
     return round(penalty, 2)
 
 
+def _external_screen_bonus(row: pd.Series) -> float:
+    if _safe_number(row.get("iwencai_hit", 0.0)) <= 0:
+        return 0.0
+    score = _safe_number(row.get("iwencai_score", 0.0))
+    rank = _safe_number(row.get("iwencai_rank", 999.0), 999.0)
+    if score > 0:
+        return round(min(4.0, score / 10.0), 2)
+    if rank <= 20:
+        return 3.0
+    if rank <= 50:
+        return 2.0
+    return 1.0
+
+
 def _has_mainline_confirmation(row: pd.Series) -> bool:
     return bool(str(row.get("matched_theme", "") or "").strip()) or int(
         _safe_number(row.get("co_rise_count", 0))
@@ -485,7 +526,11 @@ def _has_mainline_confirmation(row: pd.Series) -> bool:
 
 
 def _has_any_confirmation(row: pd.Series) -> bool:
-    return _has_mainline_confirmation(row) or int(_safe_number(row.get("core_news_count", 0))) > 0
+    return (
+        _has_mainline_confirmation(row)
+        or int(_safe_number(row.get("core_news_count", 0))) > 0
+        or _safe_number(row.get("iwencai_hit", 0.0)) > 0
+    )
 
 
 def _is_early_accumulation(row: pd.Series) -> bool:
@@ -566,6 +611,8 @@ def _tier_rank(tier: str) -> int:
 def _risk_tags(row: pd.Series, config: ResearchCandidateConfig) -> list[str]:
     tags: list[str] = []
     risk_count = _safe_number(row.get("risk_notice_count", 0.0))
+    risk_event_score = _safe_number(row.get("risk_event_score", 0.0))
+    high_risk_event_count = _safe_number(row.get("high_risk_event_count", 0.0))
     total_penalty = _safe_number(row.get("total_penalty", 0.0))
     ret20 = _safe_number(row.get("ret_20_pct", 0.0))
     ret60 = _safe_number(row.get("ret_60_pct", 0.0))
@@ -579,6 +626,10 @@ def _risk_tags(row: pd.Series, config: ResearchCandidateConfig) -> list[str]:
         tags.append("公告风险多项命中")
     elif risk_count >= 1:
         tags.append("公告风险命中")
+    if high_risk_event_count >= 1:
+        tags.append("巨潮高风险事件")
+    elif risk_event_score >= 6:
+        tags.append("巨潮风险事件")
     if total_penalty >= 15:
         tags.append("总扣分偏高")
     if ret20 >= config.ret20_extreme_threshold:
@@ -603,6 +654,8 @@ def _risk_tags(row: pd.Series, config: ResearchCandidateConfig) -> list[str]:
         tags.append("趋势高位拥挤")
     if _is_volume_drawdown(row):
         tags.append("放量回撤")
+    if _safe_number(row.get("main_net_inflow_3d", 0.0)) < -200_000_000:
+        tags.append("主力资金连续流出")
     if listing_days and listing_days < config.new_stock_days:
         tags.append("次新样本不足")
     if amount_ma20 and amount_ma20 < 100_000_000:
@@ -613,11 +666,11 @@ def _risk_tags(row: pd.Series, config: ResearchCandidateConfig) -> list[str]:
 def _risk_level(row: pd.Series, config: ResearchCandidateConfig) -> str:
     tags = _risk_tags(row, config)
     joined = "；".join(tags)
-    if any(key in joined for key in ("公告风险多项命中", "次新样本不足", "成交额偏低")):
+    if any(key in joined for key in ("巨潮高风险事件", "公告风险多项命中", "次新样本不足", "成交额偏低")):
         return "高"
-    if any(key in joined for key in ("公告风险命中", "总扣分偏高", "20日涨幅过热", "60日涨幅过热", "量能极端放大")):
+    if any(key in joined for key in ("巨潮风险事件", "公告风险命中", "总扣分偏高", "20日涨幅过热", "60日涨幅过热", "量能极端放大")):
         return "中高"
-    if any(key in joined for key in ("偏热", "位置偏高", "量价共振过热", "趋势高位拥挤", "放量回撤")):
+    if any(key in joined for key in ("偏热", "位置偏高", "量价共振过热", "趋势高位拥挤", "放量回撤", "主力资金连续流出")):
         return "中"
     return "低"
 
@@ -638,8 +691,9 @@ def _is_a3_actionable(row: pd.Series) -> bool:
     return (
         risk_level == "低"
         and total_penalty <= 6
-        and ret20 <= 0.15
-        and ret60 <= 0.55
+        and _has_active_mainline(row)
+        and ret20 <= 0.12
+        and ret60 <= 0.50
         and volume_ratio <= 2.2
         and drawdown >= -0.25
         and not _is_a3_crowded(row)
@@ -678,6 +732,27 @@ def _is_strong_theme_candidate(row: pd.Series) -> bool:
     return matched_theme or co_rise_count >= 20 or core_news_count > 0 or research_report_count >= 2 or sentiment_score >= 70
 
 
+def _has_active_mainline(row: pd.Series) -> bool:
+    matched_theme = bool(str(row.get("matched_theme", "") or "").strip())
+    theme_rank = _safe_number(row.get("theme_rank", 99.0), 99.0)
+    co_rise_count = _safe_number(row.get("co_rise_count", 0.0))
+    core_news_count = _safe_number(row.get("core_news_count", 0.0))
+    research_report_count = _safe_number(row.get("research_report_count", 0.0))
+    sentiment_score = _safe_number(row.get("sentiment_score", 0.0))
+    in_strong_pool = bool(row.get("in_strong_pool", False))
+    in_limit_pool = bool(row.get("in_limit_pool", False))
+
+    if 0 < theme_rank <= 5 or co_rise_count >= 8:
+        return True
+    return matched_theme and (
+        sentiment_score >= 62
+        or core_news_count > 0
+        or research_report_count > 0
+        or in_strong_pool
+        or in_limit_pool
+    )
+
+
 def _is_b2_upgrade_watch(row: pd.Series) -> bool:
     tier = str(row.get("research_tier", ""))
     if tier not in {"B1", "B2"}:
@@ -701,6 +776,8 @@ def _b2_subtype(row: pd.Series) -> str:
     tier = str(row.get("research_tier", ""))
     if tier not in {"B1", "B2"} or not _is_risk_clean(row):
         return ""
+    if _is_mainline_low_position_alert(row):
+        return "B2s"
     if _is_b2a_theme_spread(row):
         return "B2a"
     if _is_mainline_surge_replenish(row):
@@ -763,14 +840,70 @@ def _is_mainline_surge_replenish(row: pd.Series) -> bool:
         or in_strong_pool
         or in_limit_pool
     )
-    return (
+    shaped_surge = (
         stage in {"near_breakout", "breakout", "trend_pullback", "trend_resume", "pre_breakout"}
         and has_theme
         and has_attitude
         and 1.15 <= volume_ratio <= 3.0
-        and ret20 <= 0.25
-        and price_position <= 0.88
+        and ret20 <= 0.18
+        and price_position <= 0.72
         and (amount_ma20 == 0 or amount_ma20 >= 150_000_000)
+    )
+    low_position_alert = _is_mainline_low_position_alert(
+        row,
+        has_theme=has_theme,
+        has_attitude=has_attitude,
+    )
+    return shaped_surge or low_position_alert
+
+
+def _is_mainline_low_position_alert(
+    row: pd.Series,
+    *,
+    has_theme: bool | None = None,
+    has_attitude: bool | None = None,
+) -> bool:
+    stage = str(row.get("stage", "") or "")
+    ret20 = _safe_number(row.get("ret_20_pct", 0.0))
+    ret60 = _safe_number(row.get("ret_60_pct", 0.0))
+    volume_ratio = _safe_number(row.get("volume_ratio", 0.0))
+    amount_ma20 = _safe_number(row.get("amount_ma20", 0.0))
+    price_position_raw = pd.to_numeric(pd.Series([row.get("price_position_pct")]), errors="coerce").iloc[0]
+    if pd.isna(price_position_raw):
+        return False
+    price_position = float(price_position_raw)
+    monthly_position = _safe_number(row.get("monthly_position_pct", 0.0))
+    theme_rank = _safe_number(row.get("theme_rank", 99.0), 99.0)
+    co_rise_count = _safe_number(row.get("co_rise_count", 0.0))
+    core_news_count = _safe_number(row.get("core_news_count", 0.0))
+    research_report_count = _safe_number(row.get("research_report_count", 0.0))
+    sentiment_score = _safe_number(row.get("sentiment_score", 0.0))
+    in_strong_pool = bool(row.get("in_strong_pool", False))
+    in_limit_pool = bool(row.get("in_limit_pool", False))
+
+    if has_theme is None:
+        has_theme = bool(str(row.get("matched_theme", "") or "").strip()) or co_rise_count >= 8 or 0 < theme_rank <= 5
+    if has_attitude is None:
+        has_attitude = (
+            sentiment_score >= 55
+            or core_news_count > 0
+            or research_report_count > 0
+            or in_strong_pool
+            or in_limit_pool
+        )
+
+    strongest_theme = 0 < theme_rank <= 3 or co_rise_count >= 12
+    return (
+        stage in {"watch", "pre_breakout", "near_breakout"}
+        and has_theme
+        and strongest_theme
+        and has_attitude
+        and ret20 <= 0.18
+        and ret60 <= 0.45
+        and 0.30 <= volume_ratio <= 2.2
+        and 0.0 <= price_position <= 0.72
+        and monthly_position <= 0.70
+        and (amount_ma20 == 0 or amount_ma20 >= 60_000_000)
     )
 
 

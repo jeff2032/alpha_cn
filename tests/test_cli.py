@@ -201,6 +201,8 @@ def test_sync_stock_universe_command_parses_incremental_arguments() -> None:
             "--incremental",
             "--lookback-days",
             "30",
+            "--max-consecutive-failures",
+            "10",
             "--no-skip-existing",
         ]
     )
@@ -208,6 +210,7 @@ def test_sync_stock_universe_command_parses_incremental_arguments() -> None:
     assert args.command == "sync-stock-universe"
     assert args.incremental is True
     assert args.lookback_days == 30
+    assert args.max_consecutive_failures == 10
     assert args.skip_existing is False
     assert args.workers == 1
 
@@ -254,6 +257,81 @@ def test_sync_daily_command_parses_incremental_arguments() -> None:
     assert args.command == "sync-daily"
     assert args.incremental is True
     assert args.lookback_days == 90
+
+
+def test_external_data_commands_parse_arguments() -> None:
+    parser = build_parser()
+
+    risk = parser.parse_args(
+        [
+            "risk-events",
+            "--latest-scan",
+            "--target-date",
+            "2026-07-08",
+            "--days",
+            "120",
+            "--top",
+            "80",
+        ]
+    )
+    flow = parser.parse_args(
+        [
+            "money-flow",
+            "--symbols",
+            "002137",
+            "600999",
+            "--target-date",
+            "2026-07-08",
+            "--lookback-days",
+            "15",
+            "--retries",
+            "3",
+            "--retry-wait",
+            "2",
+            "--sleep",
+            "0.5",
+            "--min-success-rate",
+            "0.6",
+            "--soft-fail",
+        ]
+    )
+    iwencai = parser.parse_args(
+        [
+            "import-iwencai",
+            "--file",
+            "exports/iwencai.csv",
+            "--target-date",
+            "2026-07-08",
+            "--query",
+            "低位放量 半导体",
+        ]
+    )
+    research = parser.parse_args(
+        [
+            "research-candidates",
+            "--risk-events-report",
+            "reports/risk_events.csv",
+            "--money-flow-report",
+            "reports/money_flow.csv",
+            "--iwencai-report",
+            "reports/iwencai.csv",
+        ]
+    )
+
+    assert risk.command == "risk-events"
+    assert risk.days == 120
+    assert flow.command == "money-flow"
+    assert flow.lookback_days == 15
+    assert flow.retries == 3
+    assert flow.retry_wait == 2
+    assert flow.sleep == 0.5
+    assert flow.min_success_rate == 0.6
+    assert flow.soft_fail is True
+    assert iwencai.command == "import-iwencai"
+    assert iwencai.query == "低位放量 半导体"
+    assert research.risk_events_report == "reports/risk_events.csv"
+    assert research.money_flow_report == "reports/money_flow.csv"
+    assert research.iwencai_report == "reports/iwencai.csv"
 
 
 def test_incremental_start_from_last_respects_lookback_and_since() -> None:
@@ -514,6 +592,30 @@ def test_daily_research_summary_command_parses_arguments() -> None:
     assert args.top == 20
 
 
+def test_export_context_pack_command_parses_arguments() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "export-context-pack",
+            "--target-date",
+            "2026-07-08",
+            "--plan-date",
+            "2026-07-09",
+            "--top",
+            "25",
+            "--output-root",
+            "data/context/research",
+        ]
+    )
+
+    assert args.command == "export-context-pack"
+    assert args.target_date == "2026-07-08"
+    assert args.plan_date == "2026-07-09"
+    assert args.top == 25
+    assert args.output_root == "data/context/research"
+
+
 def test_research_review_command_parses_arguments() -> None:
     parser = build_parser()
 
@@ -581,6 +683,8 @@ def test_warehouse_ingest_command_parses_arguments() -> None:
             "warehouse-ingest",
             "--target-date",
             "2026-06-18",
+            "--plan-date",
+            "2026-06-19",
             "--reports-dir",
             "reports",
             "--warehouse-dir",
@@ -592,6 +696,7 @@ def test_warehouse_ingest_command_parses_arguments() -> None:
 
     assert args.command == "warehouse-ingest"
     assert args.target_date == "2026-06-18"
+    assert args.plan_date == "2026-06-19"
     assert args.reports_dir == "reports"
     assert args.warehouse_dir == "data/warehouse"
     assert args.run_id == "test-run"
@@ -603,6 +708,34 @@ def test_warehouse_status_command_parses_arguments() -> None:
     args = parser.parse_args(["warehouse-status", "--warehouse-dir", "data/warehouse"])
 
     assert args.command == "warehouse-status"
+    assert args.warehouse_dir == "data/warehouse"
+
+
+def test_warehouse_query_command_parses_arguments() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "warehouse-query",
+            "--table",
+            "research_candidate_daily",
+            "--columns",
+            "target_date,symbol,name",
+            "--since",
+            "2026-06-12",
+            "--until",
+            "2026-06-18",
+            "--limit",
+            "20",
+            "--warehouse-dir",
+            "data/warehouse",
+        ]
+    )
+
+    assert args.command == "warehouse-query"
+    assert args.table == "research_candidate_daily"
+    assert args.columns == "target_date,symbol,name"
+    assert args.limit == 20
     assert args.warehouse_dir == "data/warehouse"
 
 

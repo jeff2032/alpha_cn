@@ -44,6 +44,14 @@ python -m quant_a_stock.cli cache-status --universe-file data/universe/a_stock.c
 python -m quant_a_stock.cli sync-stock-universe --universe-file data/universe/a_stock.csv --since 2020-01-01 --stock-provider sina --adjust qfq --workers 2 --sleep 0.05 --skip-existing
 ```
 
+如果出现大量 `RemoteDisconnected('Remote end closed connection without response')`，通常不是个股问题，而是数据源被全市场高频请求打断或临时限流。处理方式：
+
+```powershell
+python -m quant_a_stock.cli sync-stock-universe --universe-file data/universe/stale.csv --since 2020-01-01 --stock-provider eastmoney --adjust qfq --incremental --lookback-days 60 --workers 1 --sleep 0.3 --retries 3 --retry-wait 2 --max-consecutive-failures 40 --no-skip-existing
+```
+
+日常脚本已经内置保护：Sina 自动降到 1 线程，Eastmoney 自动降到 2 线程，最小请求间隔 0.2 秒，并在连续失败过多时提前停止，避免刷出几千条失败日志。
+
 ## 检查数据日期覆盖
 
 检查哪些标的没有更新到最近交易日：
@@ -172,7 +180,7 @@ python -m quant_a_stock.cli scan-pattern --pattern base_breakout_setup --top 50 
 只扫描更接近“突破确认”的候选：
 
 ```powershell
-python -m quant_a_stock.cli scan-pattern --pattern base_breakout_setup --top 50 --min-score 50 --stages watch near_breakout --min-amount-ma20 100000000 --require-positive-trend-slope --max-close-vs-trend 0.25 --filter-max-ret-20 0.25
+python -m quant_a_stock.cli scan-pattern --pattern base_breakout_setup --top 160 --min-score 45 --stages watch near_breakout --min-amount-ma20 100000000 --require-positive-trend-slope --max-close-vs-trend 0.25 --filter-max-ret-20 0.25
 ```
 
 扫描更接近“低位潜伏”的候选：
@@ -191,7 +199,7 @@ python -m quant_a_stock.cli scan-pattern --pattern accumulation_setup --top 120 
 扫描“强趋势回踩/再启动”的补充候选：
 
 ```powershell
-python -m quant_a_stock.cli scan-pattern --pattern trend_pullback_setup --top 120 --min-score 50 --stages trend_pullback trend_resume --min-amount-ma20 100000000 --min-ret-60 0.18 --filter-max-ret-20 0.18 --max-volume-ratio 3.20 --max-close-vs-trend 0.65 --max-drawdown-from-high 0.32
+python -m quant_a_stock.cli scan-pattern --pattern trend_pullback_setup --top 160 --min-score 45 --stages trend_pullback trend_resume --min-amount-ma20 100000000 --min-ret-60 0.18 --filter-max-ret-20 0.18 --max-volume-ratio 3.20 --max-close-vs-trend 0.65 --max-drawdown-from-high 0.32
 ```
 
 趋势回踩池会输出：
@@ -225,6 +233,28 @@ python -m quant_a_stock.cli sentiment-score --symbols 600160 601137 300568 --tar
 ```powershell
 python -m quant_a_stock.cli market-theme --target-date 2026-06-12 --top 20
 ```
+
+生成东财资金流确认因子：
+
+```powershell
+python -m quant_a_stock.cli money-flow --latest-scan --target-date 2026-06-12 --top 90 --lookback-days 10 --display-top 30 --retries 3 --retry-wait 2 --sleep 0.4 --min-success-rate 0.6
+```
+
+资金流是增强确认源，东财接口偶尔会断连。默认成功率低于阈值时不会写正式 `money_flow_*.csv`，避免把大量失败行并入候选池；夜间任务使用 `--soft-fail`，低成功率只记录警告，不阻塞后续候选池、快照和复盘。
+
+生成巨潮结构化公告风险事件：
+
+```powershell
+python -m quant_a_stock.cli risk-events --latest-scan --target-date 2026-06-12 --top 90 --days 180 --display-top 30
+```
+
+导入问财人工条件选股结果：
+
+```powershell
+python -m quant_a_stock.cli import-iwencai --file exports/iwencai/2026-06-12.csv --target-date 2026-06-12 --query "低位放量 半导体"
+```
+
+这些增强报告只按同一 `target-date` 自动合并，不会用其他日期兜底。资金流只做确认加分；问财只做外部条件验证；巨潮风险事件会进入风险扣分和 `risk_tags`，优先级高于资金和情绪。
 
 合成最终研究候选池：
 
@@ -280,7 +310,10 @@ python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --to
 - 主线命中：热门关键词或行业命中当日强主线时加分。
 - 行业同涨：同一行业或同一主线里多只票同时进入形态池时加分。
 - 风险公告：公告标题命中问询、处罚、立案、诉讼、减持、质押、担保逾期等关键词时扣分。
-- 动作分组：`action_bucket` 会把候选拆成主攻、升级观察和风险回避。当前主攻只保留 A2 启动确认和风险干净、不拥挤的 A3 趋势延续；A1 先观察；B2 拆成 `观察-B2a主线扩散待升级`、`观察-B2s主线突发待确认` 和 `观察-B2b主题待确认`，不直接当买点。
+- 巨潮风险事件：结构化识别退市/ST、立案处罚、监管问询、财务审计风险、业绩风险、减持解禁、质押冻结、诉讼仲裁等事件，高风险事件会直接压制候选。
+- 资金流确认：东财个股资金流转成 `money_flow_score`，只做小幅确认加分；连续主力流出会进入风险标签。
+- 问财外部验证：人工导出的问财条件选股结果转成 `iwencai_hit/iwencai_score`，只做外部验证，不替代模型主信号。
+- 动作分组：`action_bucket` 会把候选拆成主攻、升级观察和风险回避。当前主攻只保留 A2 启动确认和主线仍强、风险干净、不拥挤的 A3 趋势延续；A1 先观察；B2 拆成 `观察-B2a主线扩散待升级`、`观察-B2s主线突发待确认` 和 `观察-B2b主题待确认`，不直接当买点。
 - 风险标签：`risk_level` 和 `risk_tags` 要优先看，公告风险、次新样本不足、成交额偏低、涨幅/量能过热会明显降权。
 
 使用方式建议：
@@ -290,7 +323,8 @@ python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --to
 - 再用 `scan-pattern --pattern trend_pullback_setup` 补充“强趋势回踩/再启动”的 A3 池。
 - 再用 `sentiment-score` 看候选股有没有热度、新闻和概念承接。
 - 最后用 `market-theme` 看候选是否落在当日强主线里。
-- 用 `research-candidates` 汇总成最终观察池，优先复盘 `action_bucket` 里的主攻池、B2a 主线扩散升级观察池、B2s 主线突发待确认池和 B2b 主题待确认池。
+- 夜间慢准备里用 `money-flow`、`risk-events` 和 `import-iwencai` 增强资金确认、公告风险和外部条件验证。
+- 用 `research-candidates` 汇总成最终观察池，优先复盘 `action_bucket` 里的主攻池、B2a 主线扩散升级观察池、B2s 低位主线突发待确认池和 B2b 主题待确认池。
 - 用 `daily-research-summary` 看当天主报告，它会合并市场温度、主题簇、候选持续性和风险提醒。
 - 如果形态很好但情绪极弱，先放观察池；如果情绪很热但形态已经大幅加速，避免追高。
 
@@ -306,10 +340,23 @@ python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --to
 每日报告生成后，把最新结果写入 DuckDB + Parquet：
 
 ```powershell
-python -m quant_a_stock.cli warehouse-ingest --target-date 2026-06-18
+python -m quant_a_stock.cli warehouse-ingest --target-date 2026-06-18 --plan-date 2026-06-19
 ```
 
-这一步会同时派生中间层事实表：`missed_opportunity_daily`、`factor_diagnostics_daily`、`strategy_review_daily`；候选和市场态度中间层也会随最新候选报告刷新。
+这一步会同时派生中间层事实表：`run_manifest`、`data_quality_daily`、`research_candidate_daily`、`stock_market_attitude_daily`、`risk_event_daily`、`money_flow_daily`、`external_screen_daily`、`missed_opportunity_daily`、`factor_diagnostics_daily`、`strategy_review_daily`。同一天重复跑会覆盖同日分区，不会把行数翻倍。
+
+早上先看运行清单和数据质量：
+
+```powershell
+python -m quant_a_stock.cli warehouse-query --table run_manifest --columns run_id,target_date,plan_date,quality_status,missing_required,warning_reports --limit 5
+python -m quant_a_stock.cli warehouse-query --table data_quality_daily --columns target_date,source_group,report_type,quality_level,issue --since 2026-06-18 --until 2026-06-18 --limit 50
+```
+
+查询候选池中间层：
+
+```powershell
+python -m quant_a_stock.cli warehouse-query --table research_candidate_daily --columns target_date,symbol,name,tier,action_bucket,research_score,candidate_model_version --since 2026-06-18 --limit 30
+```
 
 把股票池写入维表：
 

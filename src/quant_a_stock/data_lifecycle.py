@@ -18,9 +18,14 @@ CORE_WAREHOUSE_TABLES = [
     "daily_research_candidates",
     "sentiment_scores",
     "market_themes",
+    "risk_events",
+    "money_flow",
+    "iwencai_import",
     "research_review_details",
     "research_review_summary",
     "missed_opportunities",
+    "run_manifest",
+    "data_quality_daily",
     "report_index",
 ]
 

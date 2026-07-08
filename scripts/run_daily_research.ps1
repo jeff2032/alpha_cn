@@ -97,6 +97,16 @@ function Get-PreviousWeekday {
     return $day
 }
 
+function Get-NextWeekday {
+    param([datetime]$Date)
+
+    $day = $Date.Date
+    while ($day.DayOfWeek -eq "Saturday" -or $day.DayOfWeek -eq "Sunday") {
+        $day = $day.AddDays(1)
+    }
+    return $day
+}
+
 function Get-CacheDateCoverage {
     param(
         [string]$CacheDir,
@@ -166,6 +176,46 @@ function Resolve-CachedTradingDate {
     return (Get-PreviousWeekday -Date $Date).ToString("yyyy-MM-dd")
 }
 
+function Resolve-NextPlanDate {
+    param([string]$DataDate)
+
+    $dataDay = ([datetime]$DataDate).Date
+    $cacheDir = Join-Path $ProjectRoot "data/cache/akshare/daily"
+
+    if (Test-Path $cacheDir) {
+        $counts = @{}
+        Get-ChildItem -LiteralPath $cacheDir -Filter "*.csv" | ForEach-Object {
+            try {
+                $lastLine = Get-Content -LiteralPath $_.FullName -Tail 1
+                if ($lastLine) {
+                    $dateText = ($lastLine -split ",")[0]
+                    $date = ([datetime]$dateText).ToString("yyyy-MM-dd")
+                    if (-not $counts.ContainsKey($date)) {
+                        $counts[$date] = 0
+                    }
+                    $counts[$date] += 1
+                }
+            } catch {
+            }
+        }
+
+        $next = $null
+        foreach ($key in $counts.Keys) {
+            $candidate = [datetime]$key
+            if ($counts[$key] -ge 100 -and $candidate -gt $dataDay) {
+                if ($null -eq $next -or $candidate -lt $next) {
+                    $next = $candidate
+                }
+            }
+        }
+        if ($null -ne $next) {
+            return $next.ToString("yyyy-MM-dd")
+        }
+    }
+
+    return (Get-NextWeekday -Date $dataDay.AddDays(1)).ToString("yyyy-MM-dd")
+}
+
 function Get-DefaultTargetDate {
     param([string]$CutoffTime)
 
@@ -195,12 +245,7 @@ function Get-DefaultPlanDate {
         [string]$CutoffTime
     )
 
-    $now = Get-Date
-    $cutoff = [TimeSpan]::Parse($CutoffTime)
-    if ($now.TimeOfDay -lt $cutoff) {
-        return (Get-PreviousWeekday -Date $now.Date).ToString("yyyy-MM-dd")
-    }
-    return $DataDate
+    return Resolve-NextPlanDate -DataDate $DataDate
 }
 
 function Normalize-DateString {
@@ -485,13 +530,21 @@ function New-PreMarketPlanReport {
         $mainAttack = @($candidates | Where-Object { $_.research_tier -in @("A2", "A3") } | Select-Object -First 5)
     }
 
+    $surgeWatchBuckets = @(
+        "观察-B2s主线突发待确认",
+        "补票-主线突发"
+    )
+    $surgeWatch = @(
+        $candidates |
+            Where-Object { $_.action_bucket -in $surgeWatchBuckets -and $_.risk_level -ne "高" } |
+            Select-Object -First 8
+    )
+
     $upgradeBuckets = @(
         "观察-A1低位潜伏",
         "观察-A3高波动",
         "观察-B2a主线扩散待升级",
-        "观察-B2s主线突发待确认",
         "补票-B2a主线扩散",
-        "补票-主线突发",
         "补票-B2强主题",
         "观察-B2b主题待确认"
     )
@@ -575,7 +628,7 @@ $(Format-ThemeTable -Rows $themes)
 
 ## $ReportDate 今日主攻
 
-只放 A2 启动确认和风险干净的 A3 趋势延续。数量故意压缩，开盘后先看承接，不高开硬追。
+只放 A2 启动确认和主线仍强、风险干净的 A3 趋势延续。数量故意压缩，开盘后先看承接，不高开硬追。
 
 $(Format-CandidateDecisionCards -Rows $mainAttack -Mode "main")
 
@@ -587,7 +640,15 @@ $(Format-LifecycleDecisionCards -Rows $holdTracking)
 
 ## $ReportDate 短线机会和升级观察（基于 $DataDate 候选池）
 
-B2a/B2s/B2b 和 A1 都是观察升级池，不直接当买点；只看次日持续性、盘中承接和风险核验。
+B2s 单独承接低位主线突发观察；B2a/B2b 和 A1 是主题扩散或潜伏升级池，都不直接当买点。
+
+### $ReportDate 主线突发观察
+
+这里承接近期容易 miss 的低位主线突发样本。它们不是直接买点，必须等开盘承接、持续性和公告/情绪核验。
+
+$(Format-CandidateDecisionCards -Rows $surgeWatch -Mode "upgrade")
+
+### $ReportDate 主题扩散和潜伏观察
 
 $(Format-CandidateDecisionCards -Rows $upgradeWatch -Mode "upgrade")
 
@@ -607,7 +668,7 @@ $(Format-LifecycleEventTable -Rows $changes)
 
 - 高开过多、放量滞涨、冲高回落的票先观察，不追。
 - 有公告风险、减持、问询、低流动性或疑似复权/特殊事件的样本，只做复盘，不纳入常规决策。
-- 主攻 A3 必须低风险、低扣分、不过热、不拥挤；观察-A3高波动只看分歧承接，不追高。
+- 主攻 A3 必须主线仍强、低风险、低扣分、不过热、不拥挤；观察-A3高波动只看分歧承接，不追高。
 - A2 看 3-15 日，A1 看 10-30 日；B2 只做升级观察，不能因为在观察池就直接当买点。
 
 这份文档只做研究辅助，不构成买卖建议。
@@ -878,9 +939,18 @@ try {
     }
     Write-Step "Data target date: $targetDate"
     Write-Step "Plan/output date: $planDate"
+    if (([datetime]$planDate) -le ([datetime]$targetDate)) {
+        Write-Step "WARNING: Plan/output date $planDate is not after data target date $targetDate. For a real pre-open plan, use -TargetDate as the previous trading day and -PlanDate as the next trading day."
+    }
 
     if ($ExportOnly) {
         Write-Step "ExportOnly enabled; skip data sync and research generation."
+        Invoke-Quant @(
+            "export-context-pack",
+            "--target-date", $targetDate,
+            "--plan-date", $planDate,
+            "--top", "30"
+        )
         Export-DailyReportsToObsidian -ReportDate $planDate -DataDate $targetDate
         Write-Step "ExportOnly completed. Log: $logPath"
         return
@@ -971,8 +1041,8 @@ try {
         "scan-pattern",
         "--pattern", "base_breakout_setup",
         "--target-date", $targetDate,
-        "--top", "120",
-        "--min-score", "50",
+        "--top", "160",
+        "--min-score", "45",
         "--stages", "watch", "near_breakout",
         "--min-amount-ma20", "100000000",
         "--require-positive-trend-slope",
@@ -1002,8 +1072,8 @@ try {
         "scan-pattern",
         "--pattern", "trend_pullback_setup",
         "--target-date", $targetDate,
-        "--top", "120",
-        "--min-score", "50",
+        "--top", "160",
+        "--min-score", "45",
         "--stages", "trend_pullback", "trend_resume",
         "--min-amount-ma20", "100000000",
         "--min-ret-60", "0.18",
@@ -1040,6 +1110,12 @@ try {
     Invoke-Quant @(
         "daily-research-summary",
         "--target-date", $targetDate,
+        "--top", "30"
+    )
+    Invoke-Quant @(
+        "export-context-pack",
+        "--target-date", $targetDate,
+        "--plan-date", $planDate,
         "--top", "30"
     )
     $trackingSince = ([datetime]::Parse($targetDate)).AddDays(-45).ToString("yyyy-MM-dd")
