@@ -81,13 +81,37 @@ python -m quant_a_stock.cli import-iwencai --file exports/iwencai/2026-06-12.csv
 python -m quant_a_stock.cli research-candidates --target-date 2026-06-12 --top 30
 ```
 
+从候选池派生结构化决策信号：
+
+```powershell
+python -m quant_a_stock.cli decision-signals --target-date 2026-06-12 --plan-date 2026-06-15 --top 80
+```
+
+`decision_signals_*.csv` 是机器事实层，不是新的推荐模型。它把候选拆成 `buy_watch`、`upgrade_watch`、`hold_watch`、`watch`、`avoid`，并写入置信度、观察周期、观察条件和失效条件，供持仓辅助、Context Pack 和后续复盘使用。
+
+导出给 `ai-berkshire` 做基本面深研的小观察清单：
+
+```powershell
+python -m quant_a_stock.cli fundamental-watchlist --target-date 2026-06-12 --plan-date 2026-06-15 --top 20
+```
+
+`fundamental_watchlist_*.csv` 不是新的选股模型，也不是用户直接看的荐股页。它从 `decision_signals` 中挑少量更值得验证基本面的标的，写入优先级、建议使用的 `ai-berkshire` 研究技能、交接原因和需要回答的问题。对应 JSON 会写到 `data/context/fundamental/数据截至日/ai_berkshire_plan_计划日期.json`。
+
+收口阶段也可以用统一研究流水线一次完成：
+
+```powershell
+python -m quant_a_stock.cli research-pipeline --target-date 2026-06-12 --plan-date 2026-06-15 --top 30 --signal-top 80 --fundamental-top 20 --no-write-warehouse
+```
+
+这条命令只做 `alpha_cn` 的研究内核收口：归档快照、生成每日复盘、派生决策信号、导出基本面深研交接清单、导出 Context Pack，可选入仓。它不做 AI 解读、不做 Web/Bot/桌面交互，避免和 `daily_stock_analysis` 重叠。
+
 导出给 AI 解读、Web 壳或其他项目读取的结构化上下文：
 
 ```powershell
 python -m quant_a_stock.cli export-context-pack --target-date 2026-06-12 --plan-date 2026-06-15 --top 30
 ```
 
-Context Pack 写入 `data/context/research/数据截至日/plan_计划日期.json`，内容包括市场口径、主线、候选分层、复盘摘要、生命周期和本地持仓匹配。它是机器可读接口，不替代 Obsidian 的用户决策页；后续 `daily_stock_analysis` 只需要读取这层 JSON 做 AI 解读和交互。
+Context Pack 写入 `data/context/research/数据截至日/plan_计划日期.json`，内容包括市场口径、主线、候选分层、决策信号、基本面深研交接清单、复盘摘要、生命周期和本地持仓匹配。它是机器可读接口，不替代 Obsidian 的用户决策页；后续 `daily_stock_analysis` 只需要读取这层 JSON 做 AI 解读和交互，`ai-berkshire` 只读取小清单做深研。
 
 夜间版本会抓公司资料、公告风险、巨潮结构化风险事件和东财资金流，允许慢慢跑。它会先补基础行情；如果补完后过期标的超过阈值，默认 30 只，会在同一个任务里等待并重试，默认最多 6 轮、每轮间隔 30 分钟；仍未达标时才跳过后续慢分析并写运维报告。手动执行完整夜间准备：
 
@@ -136,7 +160,7 @@ python -m quant_a_stock.cli track-candidates --since 2026-05-29 --until 2026-06-
 python -m quant_a_stock.cli warehouse-ingest --target-date 2026-06-12
 ```
 
-仓库采用 DuckDB + Parquet，落在 `data/warehouse/`，这个目录不提交 git。当前分三层使用：Obsidian 只放用户能看懂的结论；DuckDB/Parquet 保存 `research_candidate_daily`、`stock_market_attitude_daily`、`candidate_lifecycle_daily`、`missed_opportunity_daily`、`factor_diagnostics_daily`、`strategy_review_daily` 等中间层事实表；行情、主题、公告和快照保留为原始底座。
+仓库采用 DuckDB + Parquet，落在 `data/warehouse/`，这个目录不提交 git。当前分三层使用：Obsidian 只放用户能看懂的结论；DuckDB/Parquet 保存 `research_candidate_daily`、`decision_signal_daily`、`fundamental_watchlist_daily`、`stock_market_attitude_daily`、`candidate_lifecycle_daily`、`missed_opportunity_daily`、`factor_diagnostics_daily`、`strategy_review_daily` 等中间层事实表；行情、主题、公告和快照保留为原始底座。
 
 把股票池写入维表：
 
@@ -231,6 +255,7 @@ python -m quant_a_stock.cli research-candidates --target-date 目标日期 --top
 
 - `daily_research_summary_*.md`：每日主报告，综合市场温度、主线、候选分层、持续性和风险提醒。
 - `research_candidates_*.md`：最终候选池，优先看 `action_bucket`，再看 A1/A2/A3/B2 分层。
+- `fundamental_watchlist_*.csv`：给 `ai-berkshire` 的基本面深研交接小名单，主要看优先级、研究技能和问题清单。
 - `research_review_*.md`：滚动策略复盘，重点看主攻池、升级观察池、观察池近期命中、错过和亏损样本。
 - `candidate_lifecycle_tracking_*.md`：A1/A2/A3/B2 候选生命周期，重点看入池后是否升级、兑现、失败或退出；这是内部复盘材料，不再作为 Obsidian 日常入口展示。
 - `market_theme_*.md`：当天市场主线。
@@ -313,6 +338,7 @@ python -m quant_a_stock.cli research-candidates --target-date 目标日期 --top
 - 最新一组 `sentiment_watchlist_*.md/.csv`
 - 最新一组 `market_theme_*.md/.csv`
 - 最新一组 `research_candidates_*.md/.csv`
+- 最新一组 `fundamental_watchlist_*.csv`
 - 最新一组 `daily_research_summary_*.md`
 - 最新一组 `daily_research_candidates_*.csv`
 - 最新一组 `research_review_*.md/.csv`

@@ -74,4 +74,9 @@ def test_save_research_context_pack_exports_structured_json(tmp_path: Path, monk
     assert result.pack["metadata"]["plan_date"] == "2026-07-09"
     assert result.pack["candidate_context"]["total"] == 2
     assert result.pack["candidate_context"]["core_candidates"][0]["symbol"] == "002137"
+    assert result.pack["decision_signal_context"]["signals"][0]["signal_type"] == "buy_watch"
+    assert result.pack["fundamental_watchlist_context"]["watchlist"][0]["symbol"] == "002137"
+    assert result.pack["fundamental_watchlist_context"]["watchlist"][0]["suggested_ai_berkshire_skill"] == (
+        "investment-checklist"
+    )
     assert result.pack["review_context"]["summary"][0]["tier"] == "A2"

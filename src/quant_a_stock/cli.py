@@ -34,6 +34,8 @@ from quant_a_stock.research.candidates import fetch_risk_notices
 from quant_a_stock.research.candidates import load_cache_listing_info
 from quant_a_stock.research.candidates import load_report
 from quant_a_stock.research.context_pack import save_research_context_pack
+from quant_a_stock.research.decision_signal import build_decision_signals
+from quant_a_stock.research.decision_signal import load_candidates_for_decision_signals
 from quant_a_stock.research.external_data import IWENCAI_COLUMNS
 from quant_a_stock.research.external_data import MONEY_FLOW_COLUMNS
 from quant_a_stock.research.external_data import RISK_EVENT_COLUMNS
@@ -43,8 +45,13 @@ from quant_a_stock.research.external_data import money_flow_success_rate
 from quant_a_stock.research.external_data import normalize_iwencai_export
 from quant_a_stock.research.external_data import read_csv_flexible
 from quant_a_stock.research.external_data import summarize_risk_events
+from quant_a_stock.research.fundamental_watchlist import build_fundamental_watchlist
+from quant_a_stock.research.fundamental_watchlist import load_holdings_file
+from quant_a_stock.research.fundamental_watchlist import save_fundamental_watchlist_context
 from quant_a_stock.research.lifecycle import build_candidate_lifecycle_tracking
 from quant_a_stock.research.lifecycle import save_candidate_lifecycle_reports
+from quant_a_stock.research.pipeline import ResearchPipelineConfig
+from quant_a_stock.research.pipeline import run_research_pipeline
 from quant_a_stock.research.report import save_research_candidates_markdown
 from quant_a_stock.research.review import build_research_review
 from quant_a_stock.research.review import save_research_review_reports
@@ -184,6 +191,14 @@ def _read_optional_report(path: Path | None) -> pd.DataFrame:
         return pd.read_csv(path, dtype={"symbol": str, "代码": str})
     except pd.errors.EmptyDataError:
         return pd.DataFrame()
+
+
+def _first_nonempty(frame: pd.DataFrame, column: str) -> str:
+    if frame.empty or column not in frame.columns:
+        return ""
+    values = frame[column].dropna().astype(str).str.strip()
+    values = values[values.ne("")]
+    return values.iloc[0] if not values.empty else ""
 
 
 def _combine_risk_notice_summaries(base: pd.DataFrame, structured: pd.DataFrame) -> pd.DataFrame:
@@ -1675,6 +1690,124 @@ def daily_research_summary(args: argparse.Namespace) -> None:
     print(f"中文复盘报告: {md_path}")
 
 
+def decision_signals(args: argparse.Namespace) -> None:
+    resolved_target = _resolve_trading_date(args.target_date)
+    _announce_trading_date_resolution(args.target_date, resolved_target)
+    target_date = resolved_target.date().isoformat()
+    candidates = load_candidates_for_decision_signals(
+        target_date=target_date,
+        research_report=Path(args.research_report) if args.research_report else None,
+        snapshot_dir=Path(args.snapshot_dir) if args.snapshot_dir else None,
+    )
+    signals = build_decision_signals(
+        candidates,
+        target_date=target_date,
+        plan_date=args.plan_date,
+        top=args.top,
+    )
+    csv_path = save_report(signals.to_dict("records"), report_type="decision_signals", date_prefix=target_date)
+    if signals.empty:
+        print("没有可展示的决策信号。")
+    else:
+        display = signals.head(args.display_top).rename(
+            columns={
+                "symbol": "代码",
+                "name": "名称",
+                "signal_type": "信号",
+                "decision_bucket": "决策组",
+                "confidence": "置信度",
+                "expected_horizon": "周期",
+                "research_score": "研究分",
+                "risk_level": "风险",
+                "position_hint": "处理口径",
+            }
+        )
+        columns = ["代码", "名称", "信号", "决策组", "置信度", "周期", "研究分", "风险", "处理口径"]
+        print(display[[column for column in columns if column in display.columns]].to_string(index=False))
+    print(f"决策信号 CSV: {csv_path}")
+
+
+def fundamental_watchlist(args: argparse.Namespace) -> None:
+    resolved_target = _resolve_trading_date(args.target_date)
+    _announce_trading_date_resolution(args.target_date, resolved_target)
+    target_date = resolved_target.date().isoformat()
+
+    if args.decision_signal_report:
+        signals = pd.read_csv(Path(args.decision_signal_report), dtype={"symbol": str})
+    else:
+        candidates = load_candidates_for_decision_signals(
+            target_date=target_date,
+            research_report=Path(args.research_report) if args.research_report else None,
+            snapshot_dir=Path(args.snapshot_dir) if args.snapshot_dir else None,
+        )
+        signals = build_decision_signals(
+            candidates,
+            target_date=target_date,
+            plan_date=args.plan_date,
+            top=args.signal_top,
+        )
+
+    plan_date = args.plan_date or _first_nonempty(signals, "plan_date") or target_date
+    holdings = load_holdings_file(Path(args.holdings_file)) if args.holdings_file else load_holdings_file()
+    watchlist = build_fundamental_watchlist(
+        signals,
+        target_date=target_date,
+        plan_date=plan_date,
+        top=args.top,
+        holdings=holdings,
+    )
+    csv_path = save_report(watchlist.to_dict("records"), report_type="fundamental_watchlist", date_prefix=target_date)
+    context = save_fundamental_watchlist_context(
+        watchlist,
+        target_date=target_date,
+        plan_date=plan_date,
+        output_root=Path(args.output_root) if args.output_root else None,
+    )
+    if watchlist.empty:
+        print("没有需要交给基本面深研的观察清单。")
+    else:
+        display = watchlist.head(args.display_top).rename(
+            columns={
+                "symbol": "代码",
+                "name": "名称",
+                "research_priority": "优先级",
+                "suggested_ai_berkshire_skill": "深研技能",
+                "source_signal_type": "信号",
+                "confidence": "置信度",
+                "research_score": "研究分",
+                "risk_level": "风险",
+                "handoff_reason": "交接原因",
+            }
+        )
+        columns = ["代码", "名称", "优先级", "深研技能", "信号", "置信度", "研究分", "风险", "交接原因"]
+        print(display[[column for column in columns if column in display.columns]].to_string(index=False))
+    print(f"基本面深研清单 CSV: {csv_path}")
+    print(f"ai-berkshire 交接 JSON: {context.path}")
+
+
+def research_pipeline(args: argparse.Namespace) -> None:
+    resolved_target = _resolve_trading_date(args.target_date)
+    _announce_trading_date_resolution(args.target_date, resolved_target)
+    target_date = resolved_target.date().isoformat()
+    result = run_research_pipeline(
+        ResearchPipelineConfig(
+            target_date=target_date,
+            plan_date=args.plan_date,
+            top=args.top,
+            signal_top=args.signal_top,
+            fundamental_top=args.fundamental_top,
+            reports_dir=Path(args.reports_dir) if args.reports_dir else None,
+            write_warehouse=args.write_warehouse,
+        )
+    )
+    print(f"研究流水线版本: {result.version}")
+    print(f"数据截至: {result.target_date}，计划日期: {result.plan_date}")
+    for step in result.steps:
+        print(f"{step.name}: {step.status} - {step.detail}")
+    for name, path in result.artifacts.items():
+        print(f"{name}: {path}")
+
+
 def export_context_pack(args: argparse.Namespace) -> None:
     resolved_target = _resolve_trading_date(args.target_date)
     _announce_trading_date_resolution(args.target_date, resolved_target)
@@ -2372,6 +2505,38 @@ def build_parser() -> argparse.ArgumentParser:
     daily_summary.add_argument("--snapshot-dir", default=None)
     daily_summary.add_argument("--top", type=int, default=30)
     daily_summary.set_defaults(func=daily_research_summary)
+
+    signals = subparsers.add_parser("decision-signals", help="从研究候选池派生结构化决策信号")
+    signals.add_argument("--target-date", default=None)
+    signals.add_argument("--plan-date", default=None)
+    signals.add_argument("--research-report", default=None)
+    signals.add_argument("--snapshot-dir", default=None)
+    signals.add_argument("--top", type=int, default=80)
+    signals.add_argument("--display-top", type=int, default=30)
+    signals.set_defaults(func=decision_signals)
+
+    fundamental = subparsers.add_parser("fundamental-watchlist", help="导出给 ai-berkshire 深研的少量观察清单")
+    fundamental.add_argument("--target-date", default=None)
+    fundamental.add_argument("--plan-date", default=None)
+    fundamental.add_argument("--decision-signal-report", default=None)
+    fundamental.add_argument("--research-report", default=None)
+    fundamental.add_argument("--snapshot-dir", default=None)
+    fundamental.add_argument("--holdings-file", default=None)
+    fundamental.add_argument("--signal-top", type=int, default=80)
+    fundamental.add_argument("--top", type=int, default=20)
+    fundamental.add_argument("--display-top", type=int, default=20)
+    fundamental.add_argument("--output-root", default=None)
+    fundamental.set_defaults(func=fundamental_watchlist)
+
+    pipeline = subparsers.add_parser("research-pipeline", help="运行研究内核收口流水线：快照、日报、决策信号、Context Pack、可选入仓")
+    pipeline.add_argument("--target-date", default=None)
+    pipeline.add_argument("--plan-date", default=None)
+    pipeline.add_argument("--top", type=int, default=30)
+    pipeline.add_argument("--signal-top", type=int, default=80)
+    pipeline.add_argument("--fundamental-top", type=int, default=20)
+    pipeline.add_argument("--reports-dir", default=None)
+    pipeline.add_argument("--write-warehouse", action=argparse.BooleanOptionalAction, default=False)
+    pipeline.set_defaults(func=research_pipeline)
 
     context_pack = subparsers.add_parser("export-context-pack", help="导出给 AI/外部入口读取的结构化研究上下文 JSON")
     context_pack.add_argument("--target-date", default=None)

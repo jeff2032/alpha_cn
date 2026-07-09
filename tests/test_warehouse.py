@@ -39,6 +39,52 @@ def test_ingest_latest_reports_builds_parquet_and_review_views(tmp_path: Path) -
         [{"symbol": "600999", "name": "招商证券", "research_tier": "A3"}],
     )
     _write_csv(
+        reports_dir / "decision_signals_20260618_070000.csv",
+        [
+            {
+                "target_date": "2026-06-18",
+                "plan_date": "2026-06-19",
+                "symbol": "002137",
+                "name": "实益达",
+                "signal_type": "buy_watch",
+                "decision_bucket": "主攻",
+                "action_bucket": "主攻-A2启动确认",
+                "research_tier": "A2",
+                "confidence": "high",
+                "expected_horizon": "3-15d",
+                "research_score": 72.5,
+                "risk_level": "低",
+                "invalid_condition": "跌回突破区间且放量转弱",
+                "decision_signal_version": "decision_signal_v2026_07_09_candidate_actions",
+            }
+        ],
+    )
+    _write_csv(
+        reports_dir / "fundamental_watchlist_20260618_070000.csv",
+        [
+            {
+                "target_date": "2026-06-18",
+                "plan_date": "2026-06-19",
+                "symbol": "002137",
+                "name": "实益达",
+                "research_priority": "high",
+                "suggested_ai_berkshire_skill": "investment-checklist",
+                "handoff_reason": "优先级:high",
+                "ai_berkshire_questions": "是否具备基本面支撑",
+                "alpha_cn_summary": "候选主攻，只等确认",
+                "source_signal_type": "buy_watch",
+                "decision_bucket": "主攻",
+                "action_bucket": "主攻-A2启动确认",
+                "confidence": "high",
+                "expected_horizon": "3-15d",
+                "research_score": 72.5,
+                "risk_level": "低",
+                "is_holding": False,
+                "fundamental_watchlist_version": "fundamental_watchlist_v2026_07_09_ai_berkshire",
+            }
+        ],
+    )
+    _write_csv(
         reports_dir / "sentiment_watchlist_20260618_070000.csv",
         [{"symbol": "002137", "sentiment_score": 66.0}],
     )
@@ -143,6 +189,8 @@ def test_ingest_latest_reports_builds_parquet_and_review_views(tmp_path: Path) -
     candidates_rows = status.loc[status["table"] == "research_candidates", "rows"].iloc[0]
     missed_rows = status.loc[status["table"] == "missed_opportunities", "rows"].iloc[0]
     candidate_daily_rows = status.loc[status["table"] == "research_candidate_daily", "rows"].iloc[0]
+    decision_signal_rows = status.loc[status["table"] == "decision_signal_daily", "rows"].iloc[0]
+    fundamental_watchlist_rows = status.loc[status["table"] == "fundamental_watchlist_daily", "rows"].iloc[0]
     attitude_rows = status.loc[status["table"] == "stock_market_attitude_daily", "rows"].iloc[0]
     missed_daily_rows = status.loc[status["table"] == "missed_opportunity_daily", "rows"].iloc[0]
     factor_rows = status.loc[status["table"] == "factor_diagnostics_daily", "rows"].iloc[0]
@@ -155,6 +203,8 @@ def test_ingest_latest_reports_builds_parquet_and_review_views(tmp_path: Path) -
     assert candidates_rows == 1
     assert missed_rows == 1
     assert candidate_daily_rows == 1
+    assert decision_signal_rows == 1
+    assert fundamental_watchlist_rows == 1
     assert attitude_rows == 1
     assert missed_daily_rows == 1
     assert factor_rows == 1
@@ -176,6 +226,8 @@ def test_ingest_latest_reports_builds_parquet_and_review_views(tmp_path: Path) -
         warehouse_dir=warehouse_dir,
     )
     assert "research_candidates" in set(quality["report_type"])
+    assert "decision_signals" in set(quality["report_type"])
+    assert "fundamental_watchlist" in set(quality["report_type"])
 
     review = warehouse_review(since="2026-06-17", until="2026-06-18", warehouse_dir=warehouse_dir)
     tier = review["tier"]

@@ -14,6 +14,8 @@ from quant_a_stock.research.version import WAREHOUSE_SCHEMA_VERSION
 
 CSV_REPORT_SPECS = {
     "research_candidates": "research_candidates_*.csv",
+    "decision_signals": "decision_signals_*.csv",
+    "fundamental_watchlist": "fundamental_watchlist_*.csv",
     "daily_research_candidates": "daily_research_candidates_*.csv",
     "sentiment_scores": "sentiment_watchlist_*.csv",
     "market_themes": "market_theme_*.csv",
@@ -46,6 +48,8 @@ MIDDLE_LAYER_TABLES = [
     "run_manifest",
     "data_quality_daily",
     "research_candidate_daily",
+    "decision_signal_daily",
+    "fundamental_watchlist_daily",
     "stock_market_attitude_daily",
     "missed_opportunity_daily",
     "factor_diagnostics_daily",
@@ -70,6 +74,7 @@ WAREHOUSE_TABLES = [
 
 REQUIRED_QUALITY_REPORTS = {
     "research_candidates",
+    "decision_signals",
     "daily_research_candidates",
     "sentiment_scores",
     "market_themes",
@@ -78,6 +83,7 @@ REQUIRED_QUALITY_REPORTS = {
 }
 
 ENHANCEMENT_QUALITY_REPORTS = {
+    "fundamental_watchlist",
     "risk_events",
     "money_flow",
     "iwencai_import",
@@ -717,6 +723,34 @@ def _write_middle_layer_from_reports(
             )
         )
 
+    decision_signals = frames.get("decision_signals")
+    if decision_signals is not None and not decision_signals.empty:
+        rows.append(
+            _write_middle_frame(
+                _build_decision_signal_daily(decision_signals, target_date=target_date),
+                "decision_signal_daily",
+                target_date=target_date,
+                run_id=run_id,
+                source_path="derived:decision_signals",
+                ingested_at=ingested_at,
+                warehouse_dir=warehouse_dir,
+            )
+        )
+
+    fundamental_watchlist = frames.get("fundamental_watchlist")
+    if fundamental_watchlist is not None and not fundamental_watchlist.empty:
+        rows.append(
+            _write_middle_frame(
+                _build_fundamental_watchlist_daily(fundamental_watchlist, target_date=target_date),
+                "fundamental_watchlist_daily",
+                target_date=target_date,
+                run_id=run_id,
+                source_path="derived:fundamental_watchlist",
+                ingested_at=ingested_at,
+                warehouse_dir=warehouse_dir,
+            )
+        )
+
     risk_events = frames.get("risk_events")
     if risk_events is not None and not risk_events.empty:
         rows.append(
@@ -1116,6 +1150,69 @@ def _build_research_candidate_daily(frame: pd.DataFrame, *, target_date: str) ->
     output["market_attitude_reasons"] = attitude["reasons"]
     output["market_attitude_risks"] = attitude["risks"]
     output["next_status"] = ""
+    return output
+
+
+def _build_decision_signal_daily(frame: pd.DataFrame, *, target_date: str) -> pd.DataFrame:
+    output = pd.DataFrame()
+    output["target_date"] = _constant_series(frame, target_date)
+    output["plan_date"] = _column(frame, "plan_date", default="")
+    output["symbol"] = _column(frame, "symbol", default="").astype(str).str.zfill(6)
+    output["name"] = _column(frame, "name", "名称", default="")
+    output["signal_type"] = _column(frame, "signal_type", default="")
+    output["decision_bucket"] = _column(frame, "decision_bucket", default="")
+    output["action_bucket"] = _column(frame, "action_bucket", default="")
+    output["tier"] = _column(frame, "research_tier", "tier", default="")
+    output["confidence"] = _column(frame, "confidence", default="")
+    output["expected_horizon"] = _column(frame, "expected_horizon", default="")
+    output["research_score"] = _numeric_column(frame, "research_score")
+    output["risk_level"] = _column(frame, "risk_level", default="")
+    output["reason_tags"] = _column(frame, "reason_tags", default="")
+    output["risk_tags"] = _column(frame, "risk_tags", default="")
+    output["observe_condition"] = _column(frame, "observe_condition", default="")
+    output["invalid_condition"] = _column(frame, "invalid_condition", default="")
+    output["position_hint"] = _column(frame, "position_hint", default="")
+    output["matched_theme"] = _column(frame, "matched_theme", default="")
+    output["theme_cluster"] = _column(frame, "theme_cluster", default="")
+    output["stage"] = _column(frame, "stage", default="")
+    output["setup_phase"] = _column(frame, "setup_phase", default="")
+    output["candidate_model_version"] = _column(frame, "candidate_model_version", default="")
+    output["decision_signal_version"] = _column(frame, "decision_signal_version", default="")
+    return output
+
+
+def _build_fundamental_watchlist_daily(frame: pd.DataFrame, *, target_date: str) -> pd.DataFrame:
+    output = pd.DataFrame()
+    output["target_date"] = _constant_series(frame, target_date)
+    output["plan_date"] = _column(frame, "plan_date", default="")
+    output["symbol"] = _column(frame, "symbol", default="").astype(str).str.zfill(6)
+    output["name"] = _column(frame, "name", "名称", default="")
+    output["research_priority"] = _column(frame, "research_priority", default="")
+    output["suggested_ai_berkshire_skill"] = _column(frame, "suggested_ai_berkshire_skill", default="")
+    output["handoff_reason"] = _column(frame, "handoff_reason", default="")
+    output["ai_berkshire_questions"] = _column(frame, "ai_berkshire_questions", default="")
+    output["alpha_cn_summary"] = _column(frame, "alpha_cn_summary", default="")
+    output["source_signal_type"] = _column(frame, "source_signal_type", default="")
+    output["decision_bucket"] = _column(frame, "decision_bucket", default="")
+    output["action_bucket"] = _column(frame, "action_bucket", default="")
+    output["confidence"] = _column(frame, "confidence", default="")
+    output["expected_horizon"] = _column(frame, "expected_horizon", default="")
+    output["research_score"] = _numeric_column(frame, "research_score")
+    output["risk_level"] = _column(frame, "risk_level", default="")
+    output["reason_tags"] = _column(frame, "reason_tags", default="")
+    output["risk_tags"] = _column(frame, "risk_tags", default="")
+    output["matched_theme"] = _column(frame, "matched_theme", default="")
+    output["theme_cluster"] = _column(frame, "theme_cluster", default="")
+    output["stage"] = _column(frame, "stage", default="")
+    output["setup_phase"] = _column(frame, "setup_phase", default="")
+    output["observe_condition"] = _column(frame, "observe_condition", default="")
+    output["invalid_condition"] = _column(frame, "invalid_condition", default="")
+    output["position_hint"] = _column(frame, "position_hint", default="")
+    output["is_holding"] = _column(frame, "is_holding", default=False).astype(str).str.lower().isin(
+        ["true", "1", "yes", "y", "是"]
+    )
+    output["source"] = _column(frame, "source", default="")
+    output["fundamental_watchlist_version"] = _column(frame, "fundamental_watchlist_version", default="")
     return output
 
 

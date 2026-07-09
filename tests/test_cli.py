@@ -592,6 +592,89 @@ def test_daily_research_summary_command_parses_arguments() -> None:
     assert args.top == 20
 
 
+def test_decision_signals_command_parses_arguments() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "decision-signals",
+            "--target-date",
+            "2026-07-08",
+            "--plan-date",
+            "2026-07-09",
+            "--top",
+            "60",
+            "--display-top",
+            "15",
+        ]
+    )
+
+    assert args.command == "decision-signals"
+    assert args.target_date == "2026-07-08"
+    assert args.plan_date == "2026-07-09"
+    assert args.top == 60
+    assert args.display_top == 15
+
+
+def test_fundamental_watchlist_command_parses_arguments() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "fundamental-watchlist",
+            "--target-date",
+            "2026-07-08",
+            "--plan-date",
+            "2026-07-09",
+            "--decision-signal-report",
+            "reports/decision_signals.csv",
+            "--signal-top",
+            "60",
+            "--top",
+            "12",
+            "--display-top",
+            "8",
+        ]
+    )
+
+    assert args.command == "fundamental-watchlist"
+    assert args.target_date == "2026-07-08"
+    assert args.plan_date == "2026-07-09"
+    assert args.decision_signal_report == "reports/decision_signals.csv"
+    assert args.signal_top == 60
+    assert args.top == 12
+    assert args.display_top == 8
+
+
+def test_research_pipeline_command_parses_arguments() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "research-pipeline",
+            "--target-date",
+            "2026-07-08",
+            "--plan-date",
+            "2026-07-09",
+            "--top",
+            "20",
+            "--signal-top",
+            "50",
+            "--fundamental-top",
+            "12",
+            "--write-warehouse",
+        ]
+    )
+
+    assert args.command == "research-pipeline"
+    assert args.target_date == "2026-07-08"
+    assert args.plan_date == "2026-07-09"
+    assert args.top == 20
+    assert args.signal_top == 50
+    assert args.fundamental_top == 12
+    assert args.write_warehouse is True
+
+
 def test_export_context_pack_command_parses_arguments() -> None:
     parser = build_parser()
 

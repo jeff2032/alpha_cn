@@ -7,7 +7,7 @@
 | 层 | 路径 | 定位 | 保留策略 |
 | --- | --- | --- | --- |
 | 用户结论层 | `G:\Program Files (x86)\Obsidian_base\中国A股荐股\` | 给持仓人/使用者看的短结论：开盘决策、持仓观察、复盘摘要 | 人工保留，不自动清理 |
-| 机器上下文层 | `data/context/research/` | 给 AI 解读、Web 壳或其他项目读取的结构化 JSON：市场、主线、候选、复盘、生命周期、持仓匹配 | 可由快照重复生成 |
+| 机器上下文层 | `data/context/research/`、`data/context/fundamental/` | 给 AI 解读、Web 壳或其他项目读取的结构化 JSON：市场、主线、候选、决策信号、基本面深研交接清单、复盘、生命周期、持仓匹配 | 可由快照重复生成 |
 | 中间复盘层 | `data/warehouse/parquet/` + `data/warehouse/alpha_cn.duckdb` | 给我们复盘、聚合、反推和因子挖掘用，稳定保存候选、生命周期、miss、因子诊断和策略复盘事实表 | 长期保留；DuckDB 可重建，Parquet 是主存储 |
 | 原始数据层 | `data/cache/`、`data/snapshots/research/`、`reports/`、`logs/` | 行情、行业、公告、主题、候选快照、运行报告和日志；用于排障、回填和可追溯 | 行情缓存暂不清理；快照、reports 和 logs 按保留策略清理 |
 
@@ -22,9 +22,11 @@
 5. `warehouse-sync-candles` 已同步日线 Parquet。
 6. `warehouse-backfill-snapshots` 已把研究快照写入仓库，并派生 `research_candidate_daily`、`stock_market_attitude_daily`。
 7. `track-candidates` 已把 A1/A2/A3/B2 候选生命周期写入仓库。
-8. `warehouse-ingest` 已索引最新报告和研究结果，并派生 miss、因子诊断、策略复盘中间层。
-9. `export-context-pack` 已生成 `data/context/research/数据截至日/plan_计划日期.json`。
-10. Obsidian 中有 `复盘摘要/数据截至日.md`、`开盘决策/计划日期.md` 和 `持仓观察/计划日期.md`。
+8. `decision-signals` 已把候选池派生成结构化处理口径。
+9. `fundamental-watchlist` 已导出给 `ai-berkshire` 的基本面深研交接清单。
+10. `warehouse-ingest` 已索引最新报告和研究结果，并派生决策信号、基本面交接、miss、因子诊断、策略复盘中间层。
+11. `export-context-pack` 已生成 `data/context/research/数据截至日/plan_计划日期.json`。
+12. Obsidian 中有 `复盘摘要/数据截至日.md`、`开盘决策/计划日期.md` 和 `持仓观察/计划日期.md`。
 
 ## 日常检查
 
@@ -65,6 +67,8 @@
 | `run_manifest` | 每次入仓运行一行 | 保存 run_id、target_date、plan_date、仓库版本、质量状态、缺失源和警告源 |
 | `data_quality_daily` | 每个报告源每天一行 | 保存候选、情绪、主线、资金、风险、问财、复盘等数据源是否就绪 |
 | `research_candidate_daily` | 每天每只最终候选一行 | 保存分层、分组、分数、主题、风险、预期观察周期、原因标签和市场态度摘要 |
+| `decision_signal_daily` | 每天每只决策信号一行 | 保存 `buy_watch/upgrade_watch/hold_watch/watch/avoid` 等处理口径、置信度、观察周期、观察条件和失效条件 |
+| `fundamental_watchlist_daily` | 每天每只基本面深研交接标的一行 | 保存交给 `ai-berkshire` 的优先级、建议研究技能、交接原因、核心问题、来源信号和风险标签 |
 | `stock_market_attitude_daily` | 每天每只候选一行 | 保存热度、资金承接、主题共振、盘面态度、事件、风险和拥挤度，输出强确认/温和确认/冷启动/虚热/过热分歧/风险压制 |
 | `candidate_lifecycle_daily` | 每个生命周期每天一行 | 观察新入池、继续、升级、降级、消失、命中、失败、移出 |
 | `missed_opportunity_daily` | 每个明显错过样本一行 | 记录当天大涨但没进入候选的票，以及 miss 原因、风险和是否可学习 |
@@ -74,7 +78,13 @@
 | `money_flow_daily` | 每天每只资金流一行 | 保存东财个股资金流确认因子：主力净流入、3/5 日净流入和资金分 |
 | `external_screen_daily` | 每天每只外部筛选命中一行 | 保存问财 CSV 导入结果：查询条件、排名、外部评分、标签和命中原因 |
 
-这些表由 `warehouse-backfill-snapshots` 和 `warehouse-ingest` 自动派生。风险事件、资金流和问财导入需要先由 `risk-events`、`money-flow`、`import-iwencai` 生成同日 CSV，入仓时会自动识别。
+这些表由 `warehouse-backfill-snapshots` 和 `warehouse-ingest` 自动派生。风险事件、资金流、问财导入和基本面深研交接清单需要先生成同日 CSV，入仓时会自动识别。
+
+## 三项目协作边界
+
+- `alpha_cn`：负责全市场数据准备、形态/情绪/主线/风险筛选、候选生命周期、复盘和结构化信号输出。
+- `ai-berkshire`：只消费 `fundamental_watchlist` 这类小清单，做商业质量、景气周期、估值、财报和 thesis 漂移验证，不做全市场扫盘。
+- `daily_stock_analysis`：只消费 `Context Pack` 或数仓视图，负责 AI 解读、交互入口、Web/API/通知，不重复实现候选筛选逻辑。
 
 `run_manifest` 和 `data_quality_daily` 是早上判断“今天能不能用”的第一入口。结构化 CSV 是数据质量判断主依据；Markdown 和 Obsidian 属于用户展示层，不决定研究数据是否可用。
 

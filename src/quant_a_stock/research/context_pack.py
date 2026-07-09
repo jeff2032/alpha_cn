@@ -9,6 +9,8 @@ from typing import Any
 import pandas as pd
 
 from quant_a_stock.config import DEFAULT_PATHS
+from quant_a_stock.research.decision_signal import build_decision_signals
+from quant_a_stock.research.fundamental_watchlist import build_fundamental_watchlist
 from quant_a_stock.research.snapshot import SNAPSHOT_ROOT
 from quant_a_stock.research.summary import build_daily_research_summary
 from quant_a_stock.research.version import CANDIDATE_MODEL_VERSION
@@ -63,6 +65,18 @@ def build_research_context_pack(
     snapshot = snapshot_dir or SNAPSHOT_ROOT / target_date
     summary = build_daily_research_summary(target_date=target_date, snapshot_dir=snapshot)
     candidates = summary.candidates.copy()
+    decision_signals = build_decision_signals(
+        candidates,
+        target_date=target_date,
+        plan_date=plan_date,
+        top=top,
+    )
+    fundamental_watchlist = build_fundamental_watchlist(
+        decision_signals,
+        target_date=target_date,
+        plan_date=plan_date,
+        top=min(top, 20),
+    )
 
     pack = {
         "metadata": {
@@ -88,6 +102,18 @@ def build_research_context_pack(
             "core_candidates": _records(_core_candidates(candidates), limit=top),
             "watch_candidates": _records(_watch_candidates(candidates), limit=top),
             "risk_candidates": _records(_risk_candidates(candidates), limit=top),
+        },
+        "decision_signal_context": {
+            "total": int(len(decision_signals)),
+            "signal_type_counts": _value_counts(decision_signals, "signal_type"),
+            "decision_bucket_counts": _value_counts(decision_signals, "decision_bucket"),
+            "signals": _records(decision_signals, limit=top),
+        },
+        "fundamental_watchlist_context": {
+            "total": int(len(fundamental_watchlist)),
+            "priority_counts": _value_counts(fundamental_watchlist, "research_priority"),
+            "skill_counts": _value_counts(fundamental_watchlist, "suggested_ai_berkshire_skill"),
+            "watchlist": _records(fundamental_watchlist, limit=min(top, 20)),
         },
         "review_context": _review_context(target_date=target_date, reports_dir=reports_root, top=top),
         "lifecycle_context": _lifecycle_context(target_date=target_date, reports_dir=reports_root, top=top),
@@ -203,6 +229,7 @@ def _source_files(*, target_date: str, snapshot_dir: Path, reports_dir: Path) ->
         "research_review_summary": "research_review_summary_*.csv",
         "research_review_missed": "research_review_missed_*.csv",
         "candidate_lifecycle_daily": "candidate_lifecycle_daily_*.csv",
+        "fundamental_watchlist": "fundamental_watchlist_*.csv",
     }.items():
         path = _latest_file_for_date(reports_dir, pattern, target_date)
         if path is not None:

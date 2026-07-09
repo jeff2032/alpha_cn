@@ -946,10 +946,13 @@ try {
     if ($ExportOnly) {
         Write-Step "ExportOnly enabled; skip data sync and research generation."
         Invoke-Quant @(
-            "export-context-pack",
+            "research-pipeline",
             "--target-date", $targetDate,
             "--plan-date", $planDate,
-            "--top", "30"
+            "--top", "30",
+            "--signal-top", "80",
+            "--fundamental-top", "20",
+            "--no-write-warehouse"
         )
         Export-DailyReportsToObsidian -ReportDate $planDate -DataDate $targetDate
         Write-Step "ExportOnly completed. Log: $logPath"
@@ -1104,19 +1107,13 @@ try {
         "--no-fetch-notices"
     )
     Invoke-Quant @(
-        "snapshot-research",
-        "--target-date", $targetDate
-    )
-    Invoke-Quant @(
-        "daily-research-summary",
-        "--target-date", $targetDate,
-        "--top", "30"
-    )
-    Invoke-Quant @(
-        "export-context-pack",
+        "research-pipeline",
         "--target-date", $targetDate,
         "--plan-date", $planDate,
-        "--top", "30"
+        "--top", "30",
+        "--signal-top", "80",
+        "--fundamental-top", "20",
+        "--no-write-warehouse"
     )
     $trackingSince = ([datetime]::Parse($targetDate)).AddDays(-45).ToString("yyyy-MM-dd")
     Invoke-Quant @(
