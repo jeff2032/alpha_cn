@@ -9,6 +9,10 @@ import duckdb
 import pandas as pd
 
 from quant_a_stock.config import DEFAULT_PATHS
+from quant_a_stock.data.calendar import cached_trading_dates
+from quant_a_stock.research.decision_signal import build_decision_signals
+from quant_a_stock.research.lifecycle import build_candidate_lifecycle_tracking
+from quant_a_stock.research.provenance import build_run_provenance
 from quant_a_stock.research.version import WAREHOUSE_SCHEMA_VERSION
 
 
@@ -51,12 +55,14 @@ MIDDLE_LAYER_TABLES = [
     "decision_signal_daily",
     "fundamental_watchlist_daily",
     "stock_market_attitude_daily",
+    "research_outcome_daily",
     "missed_opportunity_daily",
     "factor_diagnostics_daily",
     "strategy_review_daily",
     "risk_event_daily",
     "money_flow_daily",
     "external_screen_daily",
+    "security_master_daily",
 ]
 
 WAREHOUSE_TABLES = [
@@ -74,7 +80,6 @@ WAREHOUSE_TABLES = [
 
 REQUIRED_QUALITY_REPORTS = {
     "research_candidates",
-    "decision_signals",
     "daily_research_candidates",
     "sentiment_scores",
     "market_themes",
@@ -83,6 +88,7 @@ REQUIRED_QUALITY_REPORTS = {
 }
 
 ENHANCEMENT_QUALITY_REPORTS = {
+    "decision_signals",
     "fundamental_watchlist",
     "risk_events",
     "money_flow",
@@ -119,6 +125,7 @@ def ingest_latest_reports(
     reports_dir: Path | None = None,
     warehouse_dir: Path | None = None,
     run_id: str | None = None,
+    run_parameters: dict | None = None,
 ) -> WarehouseIngestResult:
     reports_root = reports_dir or DEFAULT_PATHS.reports
     root = warehouse_root(warehouse_dir)
@@ -140,7 +147,14 @@ def ingest_latest_reports(
             _clear_target_partition(table_name, target_date=target_date, warehouse_dir=warehouse_dir)
             report_rows.append(_report_row(resolved_run_id, target_date, table_name, latest_path, 0, status, ingested_at))
             continue
-        frame = pd.read_csv(path, dtype={"symbol": str})
+        try:
+            frame = pd.read_csv(path, dtype={"symbol": str})
+        except pd.errors.EmptyDataError:
+            _clear_target_partition(table_name, target_date=target_date, warehouse_dir=warehouse_dir)
+            report_rows.append(
+                _report_row(resolved_run_id, target_date, table_name, path, 0, "empty", ingested_at)
+            )
+            continue
         output = _with_metadata(
             frame,
             run_id=resolved_run_id,
@@ -199,6 +213,7 @@ def ingest_latest_reports(
                 plan_date=plan_date,
                 run_id=resolved_run_id,
                 ingested_at=ingested_at,
+                run_parameters=run_parameters,
             ),
             "run_manifest",
             target_date=target_date,
@@ -313,6 +328,164 @@ def backfill_research_snapshots(
     )
 
 
+def backfill_research_foundation(
+    *,
+    snapshot_root: Path | None = None,
+    cache_dir: Path | None = None,
+    universe_file: Path | None = None,
+    warehouse_dir: Path | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    signal_top: int = 80,
+    strategy_version: str = "research_candidates_v1",
+    run_id: str | None = None,
+) -> WarehouseIngestResult:
+    snapshots_root = snapshot_root or DEFAULT_PATHS.root / "data" / "snapshots" / "research"
+    resolved_cache = cache_dir or DEFAULT_PATHS.data_cache
+    resolved_universe = universe_file or DEFAULT_PATHS.root / "data" / "universe" / "a_stock.csv"
+    snapshot_dirs = _snapshot_dirs(snapshots_root, since=since, until=until)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    resolved_run_id = run_id or f"research_foundation_{stamp}"
+    ingested_at = datetime.now().isoformat(timespec="seconds")
+    rows: list[dict] = []
+
+    trade_dates = [item.date().isoformat() for item in cached_trading_dates(cache_dir=resolved_cache)]
+    snapshot_dates = [path.name for path in snapshot_dirs]
+    plan_dates = sorted(set(trade_dates) | set(snapshot_dates))
+    for snapshot_dir in snapshot_dirs:
+        target_date = snapshot_dir.name
+        path = snapshot_dir / "research_candidates.csv"
+        if not path.exists():
+            rows.append(_report_row(resolved_run_id, target_date, "decision_signals", None, 0, "missing", ingested_at))
+            continue
+        try:
+            candidates = pd.read_csv(path, dtype={"symbol": str})
+        except pd.errors.EmptyDataError:
+            candidates = pd.DataFrame()
+        plan_date = next((date for date in plan_dates if date > target_date), "")
+        signals = build_decision_signals(
+            candidates,
+            target_date=target_date,
+            plan_date=plan_date,
+            top=signal_top,
+        )
+        if signals.empty:
+            _clear_target_partition("decision_signals", target_date=target_date, warehouse_dir=warehouse_dir)
+            _clear_target_partition("decision_signal_daily", target_date=target_date, warehouse_dir=warehouse_dir)
+            rows.append(_report_row(resolved_run_id, target_date, "decision_signals", path, 0, "empty", ingested_at))
+            continue
+        output = _with_metadata(
+            signals,
+            run_id=resolved_run_id,
+            target_date=target_date,
+            source_path=path,
+            ingested_at=ingested_at,
+        )
+        _write_parquet(
+            output,
+            "decision_signals",
+            target_date=target_date,
+            run_id=resolved_run_id,
+            warehouse_dir=warehouse_dir,
+        )
+        rows.append(
+            _report_row(resolved_run_id, target_date, "decision_signals", path, len(output), "backfilled", ingested_at)
+        )
+        rows.append(
+            _write_middle_frame(
+                _build_decision_signal_daily(output, target_date=target_date),
+                "decision_signal_daily",
+                target_date=target_date,
+                run_id=resolved_run_id,
+                source_path="derived:snapshot_research_candidates",
+                ingested_at=ingested_at,
+                warehouse_dir=warehouse_dir,
+            )
+        )
+
+    refresh_warehouse_views(warehouse_dir=warehouse_dir)
+    master_rows = _backfill_security_master_from_universe(
+        since=since,
+        until=until,
+        run_id=resolved_run_id,
+        ingested_at=ingested_at,
+        warehouse_dir=warehouse_dir,
+    )
+    rows.extend(master_rows)
+
+    tracking = build_candidate_lifecycle_tracking(
+        since=since,
+        until=until,
+        snapshot_root=snapshots_root,
+        cache_dir=resolved_cache,
+        universe_file=resolved_universe,
+        strategy_version=strategy_version,
+    )
+    if tracking.target_date:
+        lifecycle_result = sync_candidate_lifecycles_to_warehouse(
+            lifecycles=tracking.lifecycles,
+            daily=tracking.daily,
+            target_date=tracking.target_date,
+            warehouse_dir=warehouse_dir,
+            run_id=resolved_run_id,
+        )
+        rows.extend(lifecycle_result.ingested.to_dict("records"))
+
+    refresh_warehouse_views(warehouse_dir=warehouse_dir)
+    status = warehouse_status(warehouse_dir=warehouse_dir)
+    return WarehouseIngestResult(
+        run_id=resolved_run_id,
+        target_date=_range_label(since, until),
+        db_path=warehouse_db_path(warehouse_dir),
+        parquet_root=parquet_root(warehouse_dir),
+        ingested=pd.DataFrame(rows),
+        status=status,
+    )
+
+
+def _backfill_security_master_from_universe(
+    *,
+    since: str | None,
+    until: str | None,
+    run_id: str,
+    ingested_at: str,
+    warehouse_dir: Path | None,
+) -> list[dict]:
+    db_path = warehouse_db_path(warehouse_dir)
+    if not db_path.exists():
+        return []
+    with duckdb.connect(str(db_path), read_only=True) as conn:
+        if "stock_universe" not in _warehouse_views(conn):
+            return []
+        frame = conn.execute("SELECT * FROM stock_universe").fetchdf()
+    if frame.empty or "warehouse_target_date" not in frame.columns:
+        return []
+    frame["warehouse_target_date"] = frame["warehouse_target_date"].astype(str)
+    if since:
+        frame = frame[frame["warehouse_target_date"] >= since]
+    if until:
+        frame = frame[frame["warehouse_target_date"] <= until]
+    if "warehouse_ingested_at" in frame.columns:
+        frame = frame.sort_values("warehouse_ingested_at")
+    frame = frame.drop_duplicates(["warehouse_target_date", "symbol"], keep="last")
+    rows = []
+    for target_date, daily in frame.groupby("warehouse_target_date", sort=True):
+        output = _build_security_master_daily(daily, target_date=target_date)
+        output["warehouse_run_id"] = run_id
+        output["warehouse_target_date"] = target_date
+        output["warehouse_source_path"] = "derived:stock_universe"
+        output["warehouse_ingested_at"] = ingested_at
+        _write_parquet(
+            output,
+            "security_master_daily",
+            target_date=target_date,
+            run_id=run_id,
+            warehouse_dir=warehouse_dir,
+        )
+        rows.append(_report_row(run_id, target_date, "security_master_daily", None, len(output), "backfilled", ingested_at))
+    return rows
+
+
 def sync_stock_universe_to_warehouse(
     *,
     universe_file: Path,
@@ -343,8 +516,34 @@ def sync_stock_universe_to_warehouse(
         run_id=resolved_run_id,
         warehouse_dir=warehouse_dir,
     )
+    security_master = _build_security_master_daily(frame, target_date=target_date)
+    security_output = _with_metadata(
+        security_master,
+        run_id=resolved_run_id,
+        target_date=target_date,
+        source_path=universe_file,
+        ingested_at=ingested_at,
+    )
+    _write_parquet(
+        security_output,
+        "security_master_daily",
+        target_date=target_date,
+        run_id=resolved_run_id,
+        warehouse_dir=warehouse_dir,
+    )
     ingested = pd.DataFrame(
-        [_report_row(resolved_run_id, target_date, "stock_universe", universe_file, len(output), "ingested", ingested_at)]
+        [
+            _report_row(resolved_run_id, target_date, "stock_universe", universe_file, len(output), "ingested", ingested_at),
+            _report_row(
+                resolved_run_id,
+                target_date,
+                "security_master_daily",
+                universe_file,
+                len(security_output),
+                "derived",
+                ingested_at,
+            ),
+        ]
     )
     refresh_warehouse_views(warehouse_dir=warehouse_dir)
     status = warehouse_status(warehouse_dir=warehouse_dir)
@@ -517,10 +716,7 @@ def sync_candidate_lifecycles_to_warehouse(
     ingested_at = datetime.now().isoformat(timespec="seconds")
     rows = []
 
-    for table_name, frame in (
-        ("candidate_lifecycles", lifecycles),
-        ("candidate_lifecycle_daily", daily),
-    ):
+    for table_name, frame in (("candidate_lifecycles", lifecycles),):
         output = frame.copy()
         output["warehouse_run_id"] = resolved_run_id
         output["warehouse_target_date"] = target_date
@@ -535,6 +731,36 @@ def sync_candidate_lifecycles_to_warehouse(
         )
         rows.append(_report_row(resolved_run_id, target_date, table_name, None, len(output), "ingested", ingested_at))
 
+    if daily.empty:
+        rows.append(_report_row(resolved_run_id, target_date, "candidate_lifecycle_daily", None, 0, "empty", ingested_at))
+    else:
+        daily_output = daily.copy()
+        daily_output["target_date"] = daily_output["target_date"].astype(str)
+        for daily_date, frame in daily_output.groupby("target_date", sort=True):
+            output = frame.copy()
+            output["warehouse_run_id"] = resolved_run_id
+            output["warehouse_target_date"] = daily_date
+            output["warehouse_source_path"] = "generated:candidate_lifecycle"
+            output["warehouse_ingested_at"] = ingested_at
+            _write_parquet(
+                output,
+                "candidate_lifecycle_daily",
+                target_date=daily_date,
+                run_id=resolved_run_id,
+                warehouse_dir=warehouse_dir,
+            )
+        rows.append(
+            _report_row(
+                resolved_run_id,
+                target_date,
+                "candidate_lifecycle_daily",
+                None,
+                len(daily_output),
+                "ingested",
+                ingested_at,
+            )
+        )
+
     ingested = pd.DataFrame(rows)
     refresh_warehouse_views(warehouse_dir=warehouse_dir)
     status = warehouse_status(warehouse_dir=warehouse_dir)
@@ -546,6 +772,54 @@ def sync_candidate_lifecycles_to_warehouse(
         ingested=ingested,
         status=status,
     )
+
+
+def _build_security_master_daily(frame: pd.DataFrame, *, target_date: str) -> pd.DataFrame:
+    output = pd.DataFrame(index=frame.index)
+    output["as_of_date"] = target_date
+    output["symbol"] = _column(frame, "symbol", default="").astype(str).str.zfill(6)
+    output["name"] = _column(frame, "name", "名称", default="")
+    output["market"] = _column(frame, "market", default="")
+    output["board"] = output["symbol"].map(_security_board)
+    output["is_active"] = True
+    output["is_st"] = output["name"].astype(str).str.upper().str.contains(r"(?:^|\*)ST", regex=True)
+    output["is_delisting_name"] = output["name"].astype(str).str.contains("退", regex=False)
+    output["price_limit_pct"] = output.apply(
+        lambda row: _historical_price_limit_pct(
+            str(row["symbol"]),
+            target_date=target_date,
+            is_st=bool(row["is_st"]),
+        ),
+        axis=1,
+    )
+    output["membership_source"] = "daily_universe_snapshot"
+    return output
+
+
+def _security_board(symbol: str) -> str:
+    if symbol.startswith(("688", "689")):
+        return "科创板"
+    if symbol.startswith(("300", "301")):
+        return "创业板"
+    if symbol.startswith(("4", "8")):
+        return "北交所"
+    if symbol.startswith(("600", "601", "603", "605")):
+        return "沪市主板"
+    if symbol.startswith(("000", "001", "002", "003")):
+        return "深市主板"
+    return "其他"
+
+
+def _historical_price_limit_pct(symbol: str, *, target_date: str, is_st: bool) -> float:
+    if is_st:
+        return 0.05
+    if symbol.startswith(("4", "8")):
+        return 0.30
+    if symbol.startswith(("688", "689")):
+        return 0.20
+    if symbol.startswith(("300", "301")):
+        return 0.20 if target_date >= "2020-08-24" else 0.10
+    return 0.10
 
 
 def _build_data_quality_daily(
@@ -592,6 +866,9 @@ def _build_data_quality_daily(
         elif required and status == "ingested" and row_count == 0:
             level = "WARN"
             issue = "必需 CSV 已生成但为空。"
+        elif enhancement and status == "ingested" and row_count == 0:
+            level = "WARN"
+            issue = "增强 CSV 已生成但为空。"
         elif enhancement and not ready:
             level = "WARN"
             issue = f"增强数据未就绪: {status}"
@@ -628,6 +905,7 @@ def _build_run_manifest(
     plan_date: str | None,
     run_id: str,
     ingested_at: str,
+    run_parameters: dict | None = None,
 ) -> pd.DataFrame:
     quality = _build_data_quality_daily(
         report_index,
@@ -646,6 +924,7 @@ def _build_run_manifest(
     else:
         quality_status = "READY"
     total_rows = int(pd.to_numeric(report_index.get("row_count", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+    provenance = build_run_provenance(report_index, run_parameters=run_parameters)
     return pd.DataFrame(
         [
             {
@@ -654,6 +933,15 @@ def _build_run_manifest(
                 "plan_date": plan_date or "",
                 "pipeline": "warehouse_ingest",
                 "warehouse_schema_version": WAREHOUSE_SCHEMA_VERSION,
+                "data_cutoff_date": target_date,
+                "code_commit": provenance["code_commit"],
+                "code_dirty": provenance["code_dirty"],
+                "parameter_hash": provenance["parameter_hash"],
+                "parameters_json": provenance["parameters_json"],
+                "source_fingerprint": provenance["source_fingerprint"],
+                "source_coverage_json": provenance["source_coverage_json"],
+                "source_ready": provenance["source_ready"],
+                "source_total": provenance["source_total"],
                 "started_at": ingested_at,
                 "finished_at": ingested_at,
                 "quality_status": quality_status,
@@ -793,13 +1081,31 @@ def _write_middle_layer_from_reports(
             )
         )
 
+    details = frames.get("research_review_details")
+    if details is not None and not details.empty:
+        _clear_target_partition("research_outcome_daily", target_date=target_date, warehouse_dir=warehouse_dir)
+        rows.extend(
+            _write_date_partitioned_middle_frame(
+                _build_research_outcome_daily(details, target_date=target_date),
+                "research_outcome_daily",
+                date_column="signal_date",
+                report_target_date=target_date,
+                run_id=run_id,
+                source_path="derived:research_review_details",
+                ingested_at=ingested_at,
+                warehouse_dir=warehouse_dir,
+            )
+        )
+
     missed = frames.get("missed_opportunities")
     if missed is not None and not missed.empty:
-        rows.append(
-            _write_middle_frame(
+        _clear_target_partition("missed_opportunity_daily", target_date=target_date, warehouse_dir=warehouse_dir)
+        rows.extend(
+            _write_date_partitioned_middle_frame(
                 _build_missed_opportunity_daily(missed, target_date=target_date),
                 "missed_opportunity_daily",
-                target_date=target_date,
+                date_column="signal_date",
+                report_target_date=target_date,
                 run_id=run_id,
                 source_path="derived:research_review_missed",
                 ingested_at=ingested_at,
@@ -888,6 +1194,37 @@ def _write_middle_frame(
     output["warehouse_ingested_at"] = ingested_at
     _write_parquet(output, table_name, target_date=target_date, run_id=run_id, warehouse_dir=warehouse_dir)
     return _report_row(run_id, target_date, table_name, None, len(output), "derived", ingested_at)
+
+
+def _write_date_partitioned_middle_frame(
+    frame: pd.DataFrame,
+    table_name: str,
+    *,
+    date_column: str,
+    report_target_date: str,
+    run_id: str,
+    source_path: str,
+    ingested_at: str,
+    warehouse_dir: Path | None,
+) -> list[dict]:
+    if frame.empty or date_column not in frame.columns:
+        return [_report_row(run_id, report_target_date, table_name, None, 0, "empty", ingested_at)]
+    output = frame.copy()
+    output[date_column] = output[date_column].astype(str)
+    rows = []
+    for partition_date, daily in output.groupby(date_column, sort=True):
+        row = _write_middle_frame(
+            daily,
+            table_name,
+            target_date=partition_date,
+            run_id=run_id,
+            source_path=source_path,
+            ingested_at=ingested_at,
+            warehouse_dir=warehouse_dir,
+        )
+        row["warehouse_target_date"] = report_target_date
+        rows.append(row)
+    return rows
 
 
 def refresh_warehouse_views(*, warehouse_dir: Path | None = None) -> None:
@@ -996,8 +1333,9 @@ def warehouse_review(
         bucket = pd.DataFrame()
         miss_risk = pd.DataFrame()
         reports = pd.DataFrame()
-        if "research_review_details" in views:
-            columns = _view_columns(conn, "research_review_details")
+        review_table = "research_outcome_daily" if "research_outcome_daily" in views else "research_review_details"
+        if review_table in views:
+            columns = _view_columns(conn, review_table)
             count_3d_expr = "COUNT(ret_3d)" if "ret_3d" in columns else "0"
             win_rate_3d_expr = (
                 "AVG(CASE WHEN ret_3d IS NULL THEN NULL WHEN ret_3d > 0 THEN 1 ELSE 0 END)"
@@ -1005,6 +1343,11 @@ def warehouse_review(
                 else "NULL"
             )
             avg_ret_3d_expr = "AVG(ret_3d)" if "ret_3d" in columns else "NULL"
+            avg_excess_1d_expr = "AVG(excess_next_ret)" if "excess_next_ret" in columns else "NULL"
+            avg_industry_excess_1d_expr = (
+                "AVG(industry_excess_next_ret)" if "industry_excess_next_ret" in columns else "NULL"
+            )
+            avg_excess_3d_expr = "AVG(excess_ret_3d)" if "excess_ret_3d" in columns else "NULL"
             tier = conn.execute(
                 f"""
                 SELECT
@@ -1016,8 +1359,11 @@ def warehouse_review(
                     MEDIAN(next_ret) AS median_ret_1d,
                     AVG(CASE WHEN next_ret IS NULL THEN NULL WHEN next_ret > 0 THEN 1 ELSE 0 END) AS win_rate_1d,
                     {win_rate_3d_expr} AS win_rate_3d,
-                    {avg_ret_3d_expr} AS avg_ret_3d
-                FROM research_review_details
+                    {avg_ret_3d_expr} AS avg_ret_3d,
+                    {avg_excess_1d_expr} AS avg_excess_ret_1d,
+                    {avg_industry_excess_1d_expr} AS avg_industry_excess_ret_1d,
+                    {avg_excess_3d_expr} AS avg_excess_ret_3d
+                FROM {review_table}
                 {where}
                 GROUP BY tier
                 ORDER BY
@@ -1060,8 +1406,11 @@ def warehouse_review(
                     SELECT
                         {bucket_expr} AS model_bucket,
                         next_ret,
-                        {"ret_3d" if "ret_3d" in columns else "NULL"} AS ret_3d
-                    FROM research_review_details
+                        {"ret_3d" if "ret_3d" in columns else "NULL"} AS ret_3d,
+                        {"excess_next_ret" if "excess_next_ret" in columns else "NULL"} AS excess_next_ret,
+                        {"industry_excess_next_ret" if "industry_excess_next_ret" in columns else "NULL"} AS industry_excess_next_ret,
+                        {"excess_ret_3d" if "excess_ret_3d" in columns else "NULL"} AS excess_ret_3d
+                    FROM {review_table}
                     {where}
                 )
                 SELECT
@@ -1071,7 +1420,10 @@ def warehouse_review(
                     MEDIAN(next_ret) AS median_ret_1d,
                     AVG(CASE WHEN next_ret IS NULL THEN NULL WHEN next_ret > 0 THEN 1 ELSE 0 END) AS win_rate_1d,
                     {win_rate_3d_expr} AS win_rate_3d,
-                    {avg_ret_3d_expr} AS avg_ret_3d
+                    {avg_ret_3d_expr} AS avg_ret_3d,
+                    AVG(excess_next_ret) AS avg_excess_ret_1d,
+                    AVG(industry_excess_next_ret) AS avg_industry_excess_ret_1d,
+                    AVG(excess_ret_3d) AS avg_excess_ret_3d
                 FROM normalized
                 GROUP BY model_bucket
                 ORDER BY
@@ -1084,7 +1436,8 @@ def warehouse_review(
                 """,
                 params,
             ).df()
-        if "missed_opportunities" in views:
+        miss_table = "missed_opportunity_daily" if "missed_opportunity_daily" in views else "missed_opportunities"
+        if miss_table in views:
             miss_where, miss_params = _date_filter("signal_date", since=since, until=until)
             miss_risk = conn.execute(
                 f"""
@@ -1093,7 +1446,7 @@ def warehouse_review(
                     miss_reason,
                     COUNT(*) AS count,
                     AVG(next_ret) AS avg_next_ret
-                FROM missed_opportunities
+                FROM {miss_table}
                 {miss_where}
                 GROUP BY risk_level, miss_reason
                 ORDER BY count DESC
@@ -1281,6 +1634,17 @@ def _build_external_screen_daily(frame: pd.DataFrame, *, target_date: str) -> pd
     output["screen_score"] = _numeric_column(frame, "iwencai_score")
     output["screen_tags"] = _column(frame, "iwencai_tags", default="")
     output["screen_reason"] = _column(frame, "iwencai_reason", default="")
+    return output
+
+
+def _build_research_outcome_daily(frame: pd.DataFrame, *, target_date: str) -> pd.DataFrame:
+    output = frame[[column for column in frame.columns if not column.startswith("warehouse_")]].copy()
+    if "signal_date" not in output.columns:
+        output["signal_date"] = target_date
+    output["signal_date"] = output["signal_date"].fillna(target_date).astype(str)
+    if "symbol" in output.columns:
+        output["symbol"] = output["symbol"].astype(str).str.zfill(6)
+    output["outcome_source"] = "rolling_research_review_latest"
     return output
 
 

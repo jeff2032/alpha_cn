@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from quant_a_stock.backtest.report import save_report
@@ -17,7 +17,7 @@ from quant_a_stock.research.summary import save_daily_research_summary_markdown
 from quant_a_stock.warehouse import ingest_latest_reports
 
 
-PIPELINE_VERSION = "research_pipeline_v2026_07_09_finalize"
+PIPELINE_VERSION = "research_pipeline_v2026_07_10_foundation"
 
 
 @dataclass(frozen=True)
@@ -136,6 +136,7 @@ def run_research_pipeline(config: ResearchPipelineConfig) -> ResearchPipelineRes
             target_date=config.target_date,
             plan_date=plan_date,
             reports_dir=reports_dir,
+            run_parameters={"pipeline_version": PIPELINE_VERSION, **asdict(config)},
         )
         artifacts["warehouse"] = ingest.db_path
         steps.append(ResearchPipelineStep("warehouse_ingest", "ok", ingest.run_id))

@@ -896,6 +896,45 @@ function Export-DailyReportsToObsidian {
     }
 }
 
+function Assert-ObsidianDailyOutputs {
+    param(
+        [string]$ReportDate,
+        [string]$DataDate
+    )
+
+    if ($NoObsidianExport) { return }
+    $exportRoot = Join-Path $ObsidianVaultPath $ObsidianExportDir
+    $expected = @(
+        (Join-Path $exportRoot "复盘摘要/$DataDate.md")
+    )
+    if ($ReportDate -ne $DataDate) {
+        $expected += Join-Path $exportRoot "开盘决策/$ReportDate.md"
+        $expected += Join-Path $exportRoot "持仓观察/$ReportDate.md"
+    }
+    $missing = @($expected | Where-Object { -not (Test-Path -LiteralPath $_) })
+    if ($missing.Count -eq 0) {
+        Write-Step "Obsidian output verification passed."
+        return
+    }
+
+    $opsDir = Join-Path $ProjectRoot "reports/ops"
+    New-Item -ItemType Directory -Force -Path $opsDir | Out-Null
+    $alertPath = Join-Path $opsDir ("obsidian_missing_{0}.md" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+    $missingLines = $missing | ForEach-Object { "- $_" }
+    @"
+# Obsidian 输出缺失告警
+
+- 数据日期：$DataDate
+- 计划日期：$ReportDate
+- 检查时间：$(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+
+## 缺失文件
+
+$($missingLines -join "`r`n")
+"@ | Set-Content -LiteralPath $alertPath -Encoding UTF8
+    throw "Obsidian output incomplete. Alert: $alertPath"
+}
+
 Set-Location $ProjectRoot
 
 $logDir = Join-Path $ProjectRoot "logs/daily_research"
@@ -955,6 +994,7 @@ try {
             "--no-write-warehouse"
         )
         Export-DailyReportsToObsidian -ReportDate $planDate -DataDate $targetDate
+        Assert-ObsidianDailyOutputs -ReportDate $planDate -DataDate $targetDate
         Write-Step "ExportOnly completed. Log: $logPath"
         return
     }
@@ -1129,8 +1169,26 @@ try {
         "--universe-file", $UniverseFile,
         "--top", "80"
     )
+    $manifestParameters = [ordered]@{
+        workflow = "daily_decision"
+        target_date = $targetDate
+        plan_date = $planDate
+        base_scan = "top=160,min_score=45,max_close_vs_trend=0.25,max_ret20=0.25"
+        accumulation_scan = "top=120,min_score=50,base_window=250,max_ret20=0.15,max_ret60=0.30,max_position=0.82"
+        trend_scan = "top=160,min_score=45,min_ret60=0.18,max_ret20=0.18,max_drawdown=0.32"
+        signal_top = 80
+        fundamental_top = 20
+        review_days = 45
+    } | ConvertTo-Json -Compress
+    Invoke-Quant @(
+        "warehouse-ingest",
+        "--target-date", $targetDate,
+        "--plan-date", $planDate,
+        "--parameters-json", $manifestParameters
+    )
 
     Export-DailyReportsToObsidian -ReportDate $planDate -DataDate $targetDate
+    Assert-ObsidianDailyOutputs -ReportDate $planDate -DataDate $targetDate
 
     Write-Step "Daily research task completed. Log: $logPath"
 } catch {

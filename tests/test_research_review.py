@@ -45,6 +45,7 @@ def test_build_research_review_summarizes_candidates_and_missed_movers(tmp_path,
                 "setup_phase": "日线触发观察",
                 "stage": "accumulation",
                 "theme_cluster": "半导体链",
+                "industry": "电子",
             },
             {
                 "symbol": "000002",
@@ -57,6 +58,7 @@ def test_build_research_review_summarizes_candidates_and_missed_movers(tmp_path,
                 "setup_phase": "观察补票",
                 "stage": "trend_pullback",
                 "theme_cluster": "金融",
+                "industry": "电子",
             },
         ]
     ).to_csv(snapshot_day / "research_candidates.csv", index=False)
@@ -68,6 +70,7 @@ def test_build_research_review_summarizes_candidates_and_missed_movers(tmp_path,
         top_movers=1,
         universe_file=universe_path,
         min_market_count=1,
+        benchmark_symbol="000003",
     )
 
     assert review.closed_signal_dates == ["2026-06-12"]
@@ -83,6 +86,10 @@ def test_build_research_review_summarizes_candidates_and_missed_movers(tmp_path,
     assert preferred["evaluation_horizon"] == "3d_5d_10d_15d"
     assert preferred["preferred_horizon"] == "5d"
     assert preferred["outcome_label"] == "hit"
+    assert preferred["benchmark_ret_1d"] == pytest.approx(0.2)
+    assert preferred["excess_ret_1d"] == pytest.approx(-0.1)
+    assert preferred["industry_ret_5d"] == pytest.approx(-0.25)
+    assert preferred["industry_excess_ret_5d"] == pytest.approx(0.75)
     a2 = review.by_tier[review.by_tier["tier"] == "A2"].iloc[0]
     assert a2["count"] == 1
     assert a2["avg_ret"] == pytest.approx(0.1)
@@ -93,6 +100,7 @@ def test_build_research_review_summarizes_candidates_and_missed_movers(tmp_path,
     a2_horizon = review.by_tier_horizon[review.by_tier_horizon["tier"] == "A2"]
     assert set(a2_horizon["horizon"]) == {"1d", "3d", "5d"}
     assert a2_horizon[a2_horizon["horizon"] == "5d"]["avg_ret"].iloc[0] == pytest.approx(0.5)
+    assert a2_horizon[a2_horizon["horizon"] == "5d"]["avg_excess_ret"].iloc[0] == pytest.approx(1 / 6)
     model_horizon = review.by_model_bucket_horizon[
         review.by_model_bucket_horizon["model_bucket"] == "A1/A2_early_setup"
     ]

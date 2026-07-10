@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from quant_a_stock.warehouse import backfill_research_foundation
 from quant_a_stock.warehouse import backfill_research_snapshots
 from quant_a_stock.warehouse import ingest_latest_reports
 from quant_a_stock.warehouse import sync_candidate_lifecycles_to_warehouse
@@ -192,6 +193,7 @@ def test_ingest_latest_reports_builds_parquet_and_review_views(tmp_path: Path) -
     decision_signal_rows = status.loc[status["table"] == "decision_signal_daily", "rows"].iloc[0]
     fundamental_watchlist_rows = status.loc[status["table"] == "fundamental_watchlist_daily", "rows"].iloc[0]
     attitude_rows = status.loc[status["table"] == "stock_market_attitude_daily", "rows"].iloc[0]
+    outcome_rows = status.loc[status["table"] == "research_outcome_daily", "rows"].iloc[0]
     missed_daily_rows = status.loc[status["table"] == "missed_opportunity_daily", "rows"].iloc[0]
     factor_rows = status.loc[status["table"] == "factor_diagnostics_daily", "rows"].iloc[0]
     strategy_rows = status.loc[status["table"] == "strategy_review_daily", "rows"].iloc[0]
@@ -206,6 +208,7 @@ def test_ingest_latest_reports_builds_parquet_and_review_views(tmp_path: Path) -
     assert decision_signal_rows == 1
     assert fundamental_watchlist_rows == 1
     assert attitude_rows == 1
+    assert outcome_rows == 2
     assert missed_daily_rows == 1
     assert factor_rows == 1
     assert strategy_rows == 1
@@ -218,6 +221,10 @@ def test_ingest_latest_reports_builds_parquet_and_review_views(tmp_path: Path) -
     manifest = warehouse_query("run_manifest", warehouse_dir=warehouse_dir)
     assert manifest.loc[0, "run_id"] == "test-run"
     assert manifest.loc[0, "quality_status"] in {"READY", "WARN"}
+    assert len(manifest.loc[0, "code_commit"]) > 0
+    assert len(manifest.loc[0, "parameter_hash"]) == 64
+    assert manifest.loc[0, "data_cutoff_date"] == "2026-06-18"
+    assert manifest.loc[0, "source_total"] > 0
     quality = warehouse_query(
         "data_quality_daily",
         columns=["target_date", "report_type", "quality_level"],
@@ -298,6 +305,36 @@ def test_ingest_latest_reports_requires_matching_target_date(tmp_path: Path) -> 
     status = warehouse_status(warehouse_dir=warehouse_dir)
     sentiment_rows = status.loc[status["table"] == "sentiment_scores", "rows"].iloc[0]
     assert sentiment_rows == 0
+
+
+def test_ingest_latest_reports_treats_zero_byte_csv_as_empty(tmp_path: Path) -> None:
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    warehouse_dir = tmp_path / "warehouse"
+    _write_csv(
+        reports_dir / "research_candidates_20260618_070000.csv",
+        [{"symbol": "002137", "research_tier": "A2", "research_score": 70}],
+    )
+    (reports_dir / "money_flow_20260618_070000.csv").write_text("", encoding="utf-8")
+    pd.DataFrame(columns=["symbol", "research_priority"]).to_csv(
+        reports_dir / "fundamental_watchlist_20260618_070000.csv",
+        index=False,
+    )
+
+    result = ingest_latest_reports(
+        target_date="2026-06-18",
+        reports_dir=reports_dir,
+        warehouse_dir=warehouse_dir,
+        run_id="empty-csv-test",
+    )
+
+    money_flow = result.ingested[result.ingested["report_type"] == "money_flow"].iloc[0]
+    assert money_flow["status"] == "empty"
+    quality = warehouse_query("data_quality_daily", warehouse_dir=warehouse_dir)
+    flow_quality = quality[quality["report_type"] == "money_flow"].iloc[0]
+    assert flow_quality["quality_level"] == "WARN"
+    fundamental_quality = quality[quality["report_type"] == "fundamental_watchlist"].iloc[0]
+    assert fundamental_quality["quality_level"] == "WARN"
 
 
 def test_backfill_snapshots_syncs_research_snapshot_tables(tmp_path: Path) -> None:
@@ -396,11 +433,82 @@ def test_sync_universe_and_daily_candles_to_warehouse(tmp_path: Path) -> None:
 
     status = warehouse_status(warehouse_dir=warehouse_dir)
     universe_rows = status.loc[status["table"] == "stock_universe", "rows"].iloc[0]
+    security_rows = status.loc[status["table"] == "security_master_daily", "rows"].iloc[0]
     candle_rows = status.loc[status["table"] == "daily_candles", "rows"].iloc[0]
     candle_symbols = status.loc[status["table"] == "daily_candles", "symbols"].iloc[0]
     assert universe_rows == 1
+    assert security_rows == 1
     assert candle_rows == 2
     assert candle_symbols == 1
+
+    security = warehouse_query("security_master_daily", warehouse_dir=warehouse_dir)
+    assert security.loc[0, "as_of_date"] == "2026-06-18"
+    assert security.loc[0, "board"] == "深市主板"
+    assert security.loc[0, "price_limit_pct"] == 0.10
+
+
+def test_backfill_research_foundation_builds_signals_master_and_lifecycle_fields(tmp_path: Path) -> None:
+    snapshot_root = tmp_path / "snapshots"
+    cache_root = tmp_path / "cache"
+    daily_root = cache_root / "akshare" / "daily"
+    daily_root.mkdir(parents=True)
+    warehouse_dir = tmp_path / "warehouse"
+    universe_file = tmp_path / "a_stock.csv"
+    _write_csv(universe_file, [{"symbol": "002137", "name": "实益达", "market": "sz"}])
+    _write_csv(
+        daily_root / "002137.csv",
+        [
+            {"timestamp": "2026-07-08", "open": 10, "high": 10.5, "low": 9.8, "close": 10, "volume": 100, "amount": 1000, "symbol": "002137"},
+            {"timestamp": "2026-07-09", "open": 10, "high": 11, "low": 10, "close": 10.8, "volume": 120, "amount": 1200, "symbol": "002137"},
+        ],
+    )
+    for date, tier, bucket in (
+        ("2026-07-08", "B2", "观察-B2s主线突发待确认"),
+        ("2026-07-09", "A2", "主攻-A2启动确认"),
+    ):
+        day = snapshot_root / date
+        day.mkdir(parents=True)
+        _write_csv(
+            day / "research_candidates.csv",
+            [
+                {
+                    "symbol": "002137",
+                    "name": "实益达",
+                    "research_tier": tier,
+                    "action_bucket": bucket,
+                    "research_score": 72,
+                    "risk_level": "低",
+                    "stage": "near_breakout",
+                    "candidate_model_version": "candidate-test-v2",
+                    "factor_schema_version": "factor-test-v2",
+                    "reason_tags": "低位放量",
+                }
+            ],
+        )
+
+    sync_stock_universe_to_warehouse(
+        universe_file=universe_file,
+        target_date="2026-07-09",
+        warehouse_dir=warehouse_dir,
+        run_id="universe-foundation",
+    )
+    result = backfill_research_foundation(
+        snapshot_root=snapshot_root,
+        cache_dir=cache_root,
+        universe_file=universe_file,
+        warehouse_dir=warehouse_dir,
+        since="2026-07-08",
+        until="2026-07-09",
+        run_id="foundation-test",
+    )
+
+    assert not result.ingested.empty
+    signals = warehouse_query("decision_signal_daily", limit=20, warehouse_dir=warehouse_dir)
+    assert set(pd.to_datetime(signals["target_date"]).dt.date.astype(str)) == {"2026-07-08", "2026-07-09"}
+    lifecycle_daily = warehouse_query("candidate_lifecycle_daily", limit=20, warehouse_dir=warehouse_dir)
+    assert len(lifecycle_daily) == 2
+    assert set(lifecycle_daily["candidate_model_version"]) == {"candidate-test-v2"}
+    assert set(lifecycle_daily["expected_horizon"]) == {"1-5d", "3-15d"}
 
 
 def test_sync_candidate_lifecycles_to_warehouse(tmp_path: Path) -> None:

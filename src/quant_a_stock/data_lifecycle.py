@@ -23,11 +23,32 @@ CORE_WAREHOUSE_TABLES = [
     "iwencai_import",
     "research_review_details",
     "research_review_summary",
+    "research_outcome_daily",
     "missed_opportunities",
     "run_manifest",
     "data_quality_daily",
     "report_index",
+    "security_master_daily",
 ]
+
+REQUIRED_NONEMPTY_TABLES = {
+    "stock_universe",
+    "daily_candles",
+    "daily_candles_index",
+    "research_candidates",
+    "daily_research_candidates",
+    "sentiment_scores",
+    "market_themes",
+    "research_review_details",
+    "research_review_summary",
+    "research_outcome_daily",
+    "run_manifest",
+    "data_quality_daily",
+    "report_index",
+    "security_master_daily",
+}
+
+ENHANCEMENT_TABLES = {"risk_events", "money_flow", "iwencai_import"}
 
 
 @dataclass(frozen=True)
@@ -206,7 +227,17 @@ def _build_checks(
         if table_status.empty:
             rows.append(_check_row(f"warehouse_table:{table}", "FAIL", "缺少核心表。", target_date))
             continue
+        row_count = int(table_status.iloc[0].get("rows", 0) or 0)
         last_date = str(table_status.iloc[0].get("last_target_date", "") or "")
+        if row_count <= 0:
+            level = "FAIL" if table in REQUIRED_NONEMPTY_TABLES else "WARN"
+            role = "核心" if table in REQUIRED_NONEMPTY_TABLES else "增强"
+            rows.append(_check_row(f"warehouse_table:{table}", level, f"{role}表存在但没有数据。", target_date))
+            continue
+        if not last_date:
+            level = "WARN" if table in ENHANCEMENT_TABLES else "FAIL"
+            rows.append(_check_row(f"warehouse_table:{table}", level, f"表有 {row_count} 行，但缺少可核验日期。", target_date))
+            continue
         if target_date and last_date and last_date < target_date:
             rows.append(
                 _check_row(
@@ -225,7 +256,7 @@ def _build_checks(
             _check_row(
                 "obsidian_review_digest",
                 "OK" if digest_path.exists() else "WARN",
-                str(digest_path),
+                f"{'已生成' if digest_path.exists() else '缺失'}: {digest_path}",
                 target_date,
             )
         )
@@ -236,7 +267,7 @@ def _build_checks(
             _check_row(
                 "obsidian_open_decision",
                 "OK" if plan_path.exists() else "WARN",
-                str(plan_path),
+                f"{'已生成' if plan_path.exists() else '缺失'}: {plan_path}",
                 target_date,
             )
         )
@@ -245,7 +276,7 @@ def _build_checks(
             _check_row(
                 "obsidian_holding_observation",
                 "OK" if holding_path.exists() else "WARN",
-                str(holding_path),
+                f"{'已生成' if holding_path.exists() else '缺失'}: {holding_path}",
                 target_date,
             )
         )

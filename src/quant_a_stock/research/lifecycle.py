@@ -314,6 +314,10 @@ def _build_lifecycle_daily_rows(
                     "day_status": day_status,
                     "action_bucket": event.get("action_bucket", "") if event else "",
                     "research_tier": event.get("research_tier", "") if event else "",
+                    "expected_horizon": event.get("expected_horizon", "") if event else "",
+                    "candidate_model_version": event.get("candidate_model_version", "") if event else "",
+                    "factor_schema_version": event.get("factor_schema_version", "") if event else "",
+                    "reason_tags": event.get("reason_tags", "") if event else "",
                     "research_score": _number(event.get("research_score", 0.0)) if event else math.nan,
                     "risk_level": event.get("risk_level", "") if event else "",
                     "risk_tags": event.get("risk_tags", "") if event else "",
@@ -405,6 +409,11 @@ def _lifecycle_row(
         "gap_trade_days": last_gap,
         "tracking_window_days": max_window,
         "primary_horizon_days": primary_horizon,
+        "expected_horizon": first.get("expected_horizon", "") or _expected_horizon(first_bucket, first["research_tier"]),
+        "first_candidate_model_version": first.get("candidate_model_version", ""),
+        "current_candidate_model_version": last.get("candidate_model_version", ""),
+        "first_factor_schema_version": first.get("factor_schema_version", ""),
+        "current_factor_schema_version": last.get("factor_schema_version", ""),
         "status": status,
         "result_label": result_label,
         "has_upgrade": transitions["has_upgrade"],
@@ -415,6 +424,7 @@ def _lifecycle_row(
         "score_delta": round(last["research_score"] - first["research_score"], 4),
         "risk_level": last.get("risk_level", ""),
         "risk_tags": last.get("risk_tags", ""),
+        "reason_tags": last.get("reason_tags", ""),
         "theme": last.get("theme", ""),
         "stage": last.get("stage", ""),
         "setup_phase": last.get("setup_phase", ""),
@@ -442,6 +452,11 @@ def _event_from_row(row: pd.Series, *, target_date: str, name_map: dict[str, str
         "action_bucket": action_bucket,
         "research_tier": tier,
         "research_score": _number(row.get("research_score", row.get("score", 0.0))),
+        "expected_horizon": _clean_text(row.get("expected_horizon", ""))
+        or _expected_horizon(action_bucket, tier),
+        "candidate_model_version": _clean_text(row.get("candidate_model_version", "")),
+        "factor_schema_version": _clean_text(row.get("factor_schema_version", "")),
+        "reason_tags": _clean_text(row.get("reason_tags", "")),
         "risk_level": _clean_text(row.get("risk_level", "")),
         "risk_tags": _clean_text(row.get("risk_tags", "")),
         "theme": _first_text(
@@ -1139,6 +1154,21 @@ def _bucket_code(bucket_or_tier: str, tier: str) -> str:
     return mapping.get(bucket_or_tier, tier or bucket_or_tier or "NA")
 
 
+def _expected_horizon(action_bucket: str, tier: str) -> str:
+    bucket = action_bucket or tier
+    if "A1" in bucket or tier == "A1":
+        return "10-30d"
+    if "A2" in bucket or tier == "A2":
+        return "3-15d"
+    if "A3" in bucket or tier == "A3":
+        return "1-10d"
+    if "B2a" in bucket:
+        return "3-10d"
+    if "B2" in bucket or "主线突发" in bucket or tier.startswith("B"):
+        return "1-5d"
+    return "observe"
+
+
 def _safe_token(value: str) -> str:
     token = re.sub(r"[^A-Za-z0-9_-]+", "_", value)
     return token.strip("_") or "NA"
@@ -1165,6 +1195,11 @@ def _lifecycle_columns() -> list[str]:
         "gap_trade_days",
         "tracking_window_days",
         "primary_horizon_days",
+        "expected_horizon",
+        "first_candidate_model_version",
+        "current_candidate_model_version",
+        "first_factor_schema_version",
+        "current_factor_schema_version",
         "status",
         "result_label",
     ]
@@ -1181,6 +1216,10 @@ def _daily_columns() -> list[str]:
         "day_status",
         "action_bucket",
         "research_tier",
+        "expected_horizon",
+        "candidate_model_version",
+        "factor_schema_version",
+        "reason_tags",
         "research_score",
         "risk_level",
         "risk_tags",

@@ -92,6 +92,7 @@ def build_research_review(
     top_movers: int = 20,
     universe_file: Path | None = None,
     min_market_count: int = 100,
+    benchmark_symbol: str = "510300",
 ) -> ResearchReview:
     snapshot_dates = _snapshot_dates(snapshot_root, since=since, until=until)
     cache_dir = DEFAULT_PATHS.data_cache
@@ -114,17 +115,37 @@ def build_research_review(
             continue
         scan_index = _load_snapshot_scan_index(snapshot_dir)
 
-        selected = candidates[candidates["research_tier"].isin(CORE_TIERS)].copy()
-        for _, row in selected.iterrows():
-            outcome = _forward_outcome(
+        candidate_outcomes = {
+            str(row["symbol"]): _forward_outcome(
                 str(row["symbol"]),
                 signal_date,
                 trade_dates,
                 cache_dir=cache_dir,
                 daily_frames=daily_frames,
             )
+            for _, row in candidates.iterrows()
+        }
+        benchmark_outcome = _forward_outcome(
+            benchmark_symbol,
+            signal_date,
+            trade_dates,
+            cache_dir=cache_dir,
+            daily_frames=daily_frames,
+        )
+        industry_outcomes = _industry_peer_outcomes(candidates, candidate_outcomes)
+
+        selected = candidates[candidates["research_tier"].isin(CORE_TIERS)].copy()
+        for _, row in selected.iterrows():
+            symbol = str(row["symbol"])
+            outcome = candidate_outcomes.get(symbol)
             if not outcome:
                 continue
+            relative = _relative_outcome(
+                outcome,
+                benchmark=benchmark_outcome,
+                industry=industry_outcomes.get(symbol),
+            )
+            outcome = {**outcome, **relative}
             action_bucket = _clean_text(row.get("action_bucket", "")) or _fallback_action_bucket(row["research_tier"])
             model_bucket = _model_bucket(row["research_tier"], action_bucket)
             preferred = _preferred_outcome(row["research_tier"], outcome)
@@ -145,6 +166,19 @@ def build_research_review(
                     "preferred_ret": preferred["ret"],
                     "preferred_high_ret": preferred["high_ret"],
                     "preferred_low_ret": preferred["low_ret"],
+                    "preferred_benchmark_ret": _number(
+                        outcome.get(f"benchmark_ret_{preferred['horizon']}", float("nan")), default=float("nan")
+                    ),
+                    "preferred_excess_ret": _number(
+                        outcome.get(f"excess_ret_{preferred['horizon']}", float("nan")), default=float("nan")
+                    ),
+                    "preferred_industry_ret": _number(
+                        outcome.get(f"industry_ret_{preferred['horizon']}", float("nan")), default=float("nan")
+                    ),
+                    "preferred_industry_excess_ret": _number(
+                        outcome.get(f"industry_excess_ret_{preferred['horizon']}", float("nan")),
+                        default=float("nan"),
+                    ),
                     "outcome_label": _outcome_label(preferred),
                     "is_learnable": True,
                     "risk_level": risk_level,
@@ -153,7 +187,9 @@ def build_research_review(
                     "score": _number(row.get("research_score", row.get("score", 0.0))),
                     "setup_phase": row.get("setup_phase", ""),
                     "stage": row.get("stage", ""),
+                    "industry": row.get("industry", ""),
                     "theme_cluster": row.get("theme_cluster", row.get("matched_theme", "")),
+                    "benchmark_symbol": benchmark_symbol,
                     **outcome,
                 }
             )
@@ -186,6 +222,12 @@ def build_research_review(
                 "market_count": len(market),
                 "market_avg_ret": market["next_ret"].mean(),
                 "market_median_ret": market["next_ret"].median(),
+                "benchmark_symbol": benchmark_symbol,
+                "benchmark_next_ret": _number(
+                    benchmark_outcome.get("next_ret"), default=float("nan")
+                )
+                if benchmark_outcome
+                else float("nan"),
                 "top_movers": len(top),
                 "top_in_candidates": int(top["in_candidates"].sum()),
                 "top_in_core": int(top["in_core"].sum()),
@@ -363,6 +405,36 @@ def _review_markdown(
         "- 如果 A3 和趋势回踩表现靠前，说明当前市场更奖励主线趋势；如果 A2/A1 短期滞后，要继续看 10/15/20/30 日窗口，避免误杀潜伏模型。",
         "- 市场强票捕获数偏低时，说明突发催化和 20cm 弹性没有被形态池提前覆盖，需要补“主线突发观察”，但不直接当买点。",
         "- 这版复盘同时看 1/3/5/10/15/20/30 个交易日：A3 看 1-10 日，A2 看 3-15 日，A1 看 10-30 日，B2a/B2b 重点看是否升级和兑现。",
+        "- 基准超额默认相对 510300；行业超额使用信号日候选池内同一行业的其他标的等权收益，样本数不足时留空，不冒充完整行业指数。",
+        "",
+        "## 分层相对收益",
+        "",
+        _markdown_table(
+            review.by_tier_horizon[
+                _existing(
+                    review.by_tier_horizon,
+                    [
+                        "tier",
+                        "horizon",
+                        "count",
+                        "avg_ret",
+                        "avg_benchmark_ret",
+                        "avg_excess_ret",
+                        "excess_win_rate",
+                        "avg_industry_ret",
+                        "avg_industry_excess_ret",
+                    ],
+                )
+            ],
+            percent_cols=[
+                "avg_ret",
+                "avg_benchmark_ret",
+                "avg_excess_ret",
+                "excess_win_rate",
+                "avg_industry_ret",
+                "avg_industry_excess_ret",
+            ],
+        ),
         "",
         "## 模型桶评价口径",
         "",
@@ -1085,6 +1157,66 @@ def _forward_outcome(
     return outcome
 
 
+def _industry_peer_outcomes(
+    candidates: pd.DataFrame,
+    outcomes: dict[str, dict | None],
+) -> dict[str, dict[str, float | int]]:
+    if "industry" not in candidates.columns:
+        return {}
+    working = candidates[["symbol", "industry"]].copy()
+    working["industry"] = working["industry"].fillna("").astype(str).str.strip()
+    working = working[working["industry"] != ""]
+    result: dict[str, dict[str, float | int]] = {}
+    for _, group in working.groupby("industry"):
+        symbols = group["symbol"].astype(str).tolist()
+        for symbol in symbols:
+            peers = [outcomes.get(peer) for peer in symbols if peer != symbol and outcomes.get(peer)]
+            values: dict[str, float | int] = {}
+            for horizon in FORWARD_HORIZONS:
+                key = f"ret_{horizon}d"
+                returns = [_number(item.get(key), default=float("nan")) for item in peers if item and key in item]
+                returns = [value for value in returns if not pd.isna(value)]
+                if returns:
+                    values[f"industry_ret_{horizon}d"] = float(pd.Series(returns).mean())
+                    values[f"industry_peer_count_{horizon}d"] = len(returns)
+            if values:
+                values["industry_next_ret"] = values.get("industry_ret_1d", float("nan"))
+                values["industry_peer_count"] = values.get("industry_peer_count_1d", 0)
+                result[symbol] = values
+    return result
+
+
+def _relative_outcome(
+    outcome: dict,
+    *,
+    benchmark: dict | None,
+    industry: dict | None,
+) -> dict[str, float | int]:
+    result: dict[str, float | int] = {}
+    for horizon in FORWARD_HORIZONS:
+        suffix = f"{horizon}d"
+        stock_key = f"ret_{suffix}"
+        if stock_key not in outcome:
+            continue
+        stock_ret = _number(outcome.get(stock_key), default=float("nan"))
+        if benchmark and stock_key in benchmark:
+            benchmark_ret = _number(benchmark.get(stock_key), default=float("nan"))
+            result[f"benchmark_ret_{suffix}"] = benchmark_ret
+            result[f"excess_ret_{suffix}"] = stock_ret - benchmark_ret
+        industry_key = f"industry_ret_{suffix}"
+        if industry and industry_key in industry:
+            industry_ret = _number(industry.get(industry_key), default=float("nan"))
+            result[industry_key] = industry_ret
+            result[f"industry_excess_ret_{suffix}"] = stock_ret - industry_ret
+            result[f"industry_peer_count_{suffix}"] = int(industry.get(f"industry_peer_count_{suffix}", 0))
+    result["benchmark_next_ret"] = result.get("benchmark_ret_1d", float("nan"))
+    result["excess_next_ret"] = result.get("excess_ret_1d", float("nan"))
+    result["industry_next_ret"] = result.get("industry_ret_1d", float("nan"))
+    result["industry_excess_next_ret"] = result.get("industry_excess_ret_1d", float("nan"))
+    result["industry_peer_count"] = result.get("industry_peer_count_1d", 0)
+    return result
+
+
 def _load_daily_frame(
     symbol: str,
     *,
@@ -1179,8 +1311,19 @@ def _aggregate_window(
     ]
     if frame.empty:
         return pd.DataFrame(columns=columns)
+    suffix = "next" if ret_col == "next_ret" else ret_col.removeprefix("ret_")
+    benchmark_col = "benchmark_next_ret" if suffix == "next" else f"benchmark_ret_{suffix}"
+    excess_col = "excess_next_ret" if suffix == "next" else f"excess_ret_{suffix}"
+    industry_col = "industry_next_ret" if suffix == "next" else f"industry_ret_{suffix}"
+    industry_excess_col = (
+        "industry_excess_next_ret" if suffix == "next" else f"industry_excess_ret_{suffix}"
+    )
+    working = frame.copy()
+    for column in (benchmark_col, excess_col, industry_col, industry_excess_col):
+        if column not in working.columns:
+            working[column] = float("nan")
     grouped = (
-        frame.groupby(group_cols, dropna=False)
+        working.groupby(group_cols, dropna=False)
         .agg(
             count=("symbol", "count"),
             avg_ret=(ret_col, "mean"),
@@ -1192,6 +1335,11 @@ def _aggregate_window(
             avg_low=(low_col, "mean"),
             max_ret=(ret_col, "max"),
             min_ret=(ret_col, "min"),
+            avg_benchmark_ret=(benchmark_col, "mean"),
+            avg_excess_ret=(excess_col, "mean"),
+            excess_win_rate=(excess_col, lambda values: float((values.dropna() > 0).mean()) if values.notna().any() else float("nan")),
+            avg_industry_ret=(industry_col, "mean"),
+            avg_industry_excess_ret=(industry_excess_col, "mean"),
         )
         .reset_index()
     )
@@ -1210,6 +1358,11 @@ def _aggregate_metric_columns() -> list[str]:
         "avg_low",
         "max_ret",
         "min_ret",
+        "avg_benchmark_ret",
+        "avg_excess_ret",
+        "excess_win_rate",
+        "avg_industry_ret",
+        "avg_industry_excess_ret",
     ]
 
 

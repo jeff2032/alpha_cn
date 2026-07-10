@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
 from pathlib import Path
 from time import sleep
 
@@ -74,6 +75,7 @@ from quant_a_stock.strategy.registry import available_strategy_names
 from quant_a_stock.strategy.registry import generate_strategy_signals
 from quant_a_stock.strategy.registry import get_strategy
 from quant_a_stock.strategy.sma_trend_filter import STRATEGY_NAME
+from quant_a_stock.warehouse import backfill_research_foundation
 from quant_a_stock.warehouse import backfill_research_snapshots
 from quant_a_stock.warehouse import ingest_latest_reports
 from quant_a_stock.warehouse import sync_candidate_lifecycles_to_warehouse
@@ -1833,6 +1835,7 @@ def research_review(args: argparse.Namespace) -> None:
         until=args.until,
         top_movers=args.top_movers,
         universe_file=Path(args.universe_file) if args.universe_file else None,
+        benchmark_symbol=args.benchmark_symbol,
     )
     date_prefix = args.until or (review.snapshot_dates[-1] if review.snapshot_dates else None)
     md_path, details_path, summary_path = save_research_review_reports(review, date_prefix=date_prefix)
@@ -1851,9 +1854,15 @@ def research_review(args: argparse.Namespace) -> None:
                 "win_rate": "胜率",
                 "gt5_rate": "涨超5%",
                 "lt_minus5_rate": "跌超5%",
+                "avg_excess_ret": "基准超额",
+                "avg_industry_excess_ret": "行业超额",
             }
         )
-        print(display[["分层", "样本", "均值", "中位数", "胜率", "涨超5%", "跌超5%"]].to_string(index=False))
+        print(
+            display[
+                ["分层", "样本", "均值", "中位数", "胜率", "基准超额", "行业超额", "涨超5%", "跌超5%"]
+            ].to_string(index=False)
+        )
     if not review.by_tier_horizon.empty:
         horizon_display = review.by_tier_horizon[
             review.by_tier_horizon["tier"].isin(["A1", "A2", "A3", "B1", "B2"])
@@ -1867,11 +1876,15 @@ def research_review(args: argparse.Namespace) -> None:
                 "win_rate": "胜率",
                 "gt5_rate": "涨超5%",
                 "lt_minus5_rate": "跌超5%",
+                "avg_excess_ret": "基准超额",
+                "avg_industry_excess_ret": "行业超额",
             }
         )
         print("分层多周期表现:")
         print(
-            horizon_display[["分层", "周期", "样本", "均值", "中位数", "胜率", "涨超5%", "跌超5%"]].to_string(
+            horizon_display[
+                ["分层", "周期", "样本", "均值", "中位数", "胜率", "基准超额", "行业超额", "涨超5%", "跌超5%"]
+            ].to_string(
                 index=False
             )
         )
@@ -1944,6 +1957,7 @@ def warehouse_ingest(args: argparse.Namespace) -> None:
         reports_dir=Path(args.reports_dir) if args.reports_dir else None,
         warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
         run_id=args.run_id,
+        run_parameters=json.loads(args.parameters_json) if args.parameters_json else None,
     )
     print(f"研究仓库运行 ID: {result.run_id}")
     print(f"目标交易日: {result.target_date}")
@@ -2094,6 +2108,28 @@ def warehouse_backfill_snapshots(args: argparse.Namespace) -> None:
     if not result.status.empty:
         print("仓库状态:")
         print(result.status.to_string(index=False))
+
+
+def warehouse_backfill_foundation(args: argparse.Namespace) -> None:
+    result = backfill_research_foundation(
+        snapshot_root=Path(args.snapshot_root) if args.snapshot_root else None,
+        cache_dir=Path(args.cache_dir) if args.cache_dir else None,
+        universe_file=Path(args.universe_file) if args.universe_file else None,
+        warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
+        since=args.since,
+        until=args.until,
+        signal_top=args.signal_top,
+        strategy_version=args.strategy_version,
+        run_id=args.run_id,
+    )
+    print(f"研究地基回填运行 ID: {result.run_id}")
+    print(f"日期范围: {result.target_date}")
+    if result.ingested.empty:
+        print("没有找到可回填的数据。")
+        return
+    summary = result.ingested.groupby(["report_type", "status"], dropna=False)["row_count"].sum().reset_index()
+    print(summary.to_string(index=False))
+    print(f"DuckDB: {result.db_path}")
 
 
 def warehouse_sync_universe(args: argparse.Namespace) -> None:
@@ -2552,6 +2588,7 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--until", default=None)
     review.add_argument("--top-movers", type=int, default=20)
     review.add_argument("--universe-file", default=None)
+    review.add_argument("--benchmark-symbol", default="510300", help="复盘基准，默认沪深300 ETF 510300")
     review.set_defaults(func=research_review)
 
     tracking = subparsers.add_parser("track-candidates", help="生成 A1/A2/A3/B2 候选生命周期跟踪报告并写入仓库")
@@ -2574,6 +2611,7 @@ def build_parser() -> argparse.ArgumentParser:
     warehouse_ingest_parser.add_argument("--reports-dir", default=None)
     warehouse_ingest_parser.add_argument("--warehouse-dir", default=None)
     warehouse_ingest_parser.add_argument("--run-id", default=None)
+    warehouse_ingest_parser.add_argument("--parameters-json", default=None, help="本次研究参数 JSON，用于生成参数哈希")
     warehouse_ingest_parser.set_defaults(func=warehouse_ingest)
 
     warehouse_status_parser = subparsers.add_parser("warehouse-status", help="查看研究仓库表和日期覆盖情况")
@@ -2612,6 +2650,21 @@ def build_parser() -> argparse.ArgumentParser:
     warehouse_backfill_parser.add_argument("--run-id", default=None)
     warehouse_backfill_parser.add_argument("--display-top", type=int, default=30)
     warehouse_backfill_parser.set_defaults(func=warehouse_backfill_snapshots)
+
+    foundation_backfill_parser = subparsers.add_parser(
+        "warehouse-backfill-foundation",
+        help="回填 point-in-time 主数据、DecisionSignal 和生命周期新字段",
+    )
+    foundation_backfill_parser.add_argument("--since", default=None)
+    foundation_backfill_parser.add_argument("--until", default=None)
+    foundation_backfill_parser.add_argument("--snapshot-root", default=None)
+    foundation_backfill_parser.add_argument("--cache-dir", default=None)
+    foundation_backfill_parser.add_argument("--universe-file", default="data/universe/a_stock.csv")
+    foundation_backfill_parser.add_argument("--warehouse-dir", default=None)
+    foundation_backfill_parser.add_argument("--run-id", default=None)
+    foundation_backfill_parser.add_argument("--signal-top", type=int, default=80)
+    foundation_backfill_parser.add_argument("--strategy-version", default="research_candidates_v1")
+    foundation_backfill_parser.set_defaults(func=warehouse_backfill_foundation)
 
     warehouse_universe_parser = subparsers.add_parser("warehouse-sync-universe", help="把股票池文件写入仓库维表")
     warehouse_universe_parser.add_argument("--universe-file", default="data/universe/a_stock.csv")

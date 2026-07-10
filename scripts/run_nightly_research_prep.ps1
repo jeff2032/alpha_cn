@@ -616,9 +616,23 @@ try {
         "--since", $script:ResolvedTargetDate,
         "--until", $script:ResolvedTargetDate
     )
+    $manifestParameters = [ordered]@{
+        workflow = "nightly_prep"
+        target_date = $script:ResolvedTargetDate
+        stock_provider = $StockProvider
+        fallback_stock_provider = $FallbackStockProvider
+        workers = $Workers
+        lookback_days = $LookbackDays
+        sentiment_top = $SentimentTop
+        risk_days = $RiskDays
+        base_scan = "top=120,min_score=50,max_close_vs_trend=0.25,max_ret20=0.25"
+        accumulation_scan = "top=120,min_score=50,base_window=250,max_ret20=0.15,max_ret60=0.30,max_position=0.82"
+        trend_scan = "top=120,min_score=50,min_ret60=0.18,max_ret20=0.18,max_drawdown=0.32"
+    } | ConvertTo-Json -Compress
     Invoke-QuantStep -Name "研究仓库入库" -Arguments @(
         "warehouse-ingest",
-        "--target-date", $script:ResolvedTargetDate
+        "--target-date", $script:ResolvedTargetDate,
+        "--parameters-json", $manifestParameters
     )
 
     Save-PrepReport -Status "成功"

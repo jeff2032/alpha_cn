@@ -360,3 +360,22 @@ python -m quant_a_stock.cli research-candidates --target-date 目标日期 --top
 - `data/snapshots/research/YYYY-MM-DD/`
 
 这个目录保存每天的研究快照，后续做历史情绪和市场主线回测时会用到。
+
+## 相对收益复盘
+
+滚动复盘默认使用 `510300` 作为市场基准：
+
+```powershell
+python -m quant_a_stock.cli research-review --since 2026-06-12 --until 2026-07-09 --benchmark-symbol 510300
+```
+
+明细和汇总会同时保留：
+
+- 标的绝对收益
+- 基准收益与基准超额收益
+- 同日同行业已知候选的等权收益与行业超额收益
+- 超额胜率
+
+当前行业收益是 point-in-time 候选池内同行业其他标的的可用样本基准，不是完整行业指数；同行样本不足时留空。后续接入完整历史行业成分后，可以平滑替换基准来源。
+
+每日 Obsidian 导出结束后会核验 `复盘摘要`、`开盘决策` 和 `持仓观察`。缺失时任务会失败，并在 `reports/ops/obsidian_missing_*.md` 留下中文告警，不再静默跳过。

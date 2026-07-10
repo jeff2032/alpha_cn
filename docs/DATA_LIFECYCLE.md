@@ -71,6 +71,7 @@
 | `fundamental_watchlist_daily` | 每天每只基本面深研交接标的一行 | 保存交给 `ai-berkshire` 的优先级、建议研究技能、交接原因、核心问题、来源信号和风险标签 |
 | `stock_market_attitude_daily` | 每天每只候选一行 | 保存热度、资金承接、主题共振、盘面态度、事件、风险和拥挤度，输出强确认/温和确认/冷启动/虚热/过热分歧/风险压制 |
 | `candidate_lifecycle_daily` | 每个生命周期每天一行 | 观察新入池、继续、升级、降级、消失、命中、失败、移出 |
+| `research_outcome_daily` | 每个信号日、每只候选一行 | 保存绝对收益、基准收益、行业同类收益和超额收益；按信号日覆盖，避免滚动复盘重复计数 |
 | `missed_opportunity_daily` | 每个明显错过样本一行 | 记录当天大涨但没进入候选的票，以及 miss 原因、风险和是否可学习 |
 | `factor_diagnostics_daily` | 每个复盘聚合项一行 | 保存分层、动作桶、模型桶、阶段、亏损归因、miss 可学习性的统计结果 |
 | `strategy_review_daily` | 每个策略片段一行 | 把复盘统计粗标为有效、中性、拖后腿或样本不足，供后续策略反思使用 |
@@ -158,3 +159,25 @@ python -m quant_a_stock.cli track-candidates --since 2026-06-12 --until 2026-06-
 - `reports/candidate_lifecycle_tracking_*.md`
 - `data/warehouse/parquet/candidate_lifecycles/`
 - `data/warehouse/parquet/candidate_lifecycle_daily/`
+
+## 研究可信度地基
+
+`security_master_daily` 保存每个股票池快照日的证券状态，不用今天的股票池覆盖过去。当前字段包括市场、板块、ST/退市名称标记和当日涨跌幅制度。它从 2026-06-18 起有本项目快照历史；更早时期如果要做严格全市场回测，仍需补上市、退市、历史 ST 和行业成分的权威 point-in-time 数据。
+
+`run_manifest` 会固化：
+
+- 数据截止日和计划日
+- Git commit 与工作区是否未提交
+- 参数 JSON 与 SHA-256 参数哈希
+- 每个输入报告的状态、行数和内容指纹
+- 必需数据和增强数据的覆盖情况
+
+空表不再视为 `OK`。核心表为空标记 `FAIL`，资金流、问财等增强表为空标记 `WARN`。
+
+历史地基统一回填：
+
+```powershell
+python -m quant_a_stock.cli warehouse-backfill-foundation --since 2026-06-12 --until 2026-07-09
+```
+
+这个命令会回填 `security_master_daily`、`decision_signals`、`decision_signal_daily`，并重建带版本、原因标签和预期周期的生命周期日表。生命周期按真实 `target_date` 分区覆盖，避免每日运行重复累计整段历史。
