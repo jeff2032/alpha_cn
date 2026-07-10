@@ -17,7 +17,7 @@ from quant_a_stock.research.summary import save_daily_research_summary_markdown
 from quant_a_stock.warehouse import ingest_latest_reports
 
 
-PIPELINE_VERSION = "research_pipeline_v2026_07_10_validation_loop"
+PIPELINE_VERSION = "research_pipeline_v2026_07_11_shadow_lifecycle_gate"
 
 
 @dataclass(frozen=True)

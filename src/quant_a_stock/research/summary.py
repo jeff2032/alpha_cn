@@ -130,8 +130,12 @@ def build_market_temperature(
             continue
         close = frame["close"]
         latest = frame.iloc[-1]
+        ma5 = close.rolling(5).mean().iloc[-1]
         ma20 = close.rolling(20).mean().iloc[-1]
         ma60 = close.rolling(60).mean().iloc[-1]
+        ret1 = close.iloc[-1] / close.iloc[-2] - 1 if len(close) > 1 else 0.0
+        ret3 = close.iloc[-1] / close.iloc[-4] - 1 if len(close) > 3 else 0.0
+        ret5 = close.iloc[-1] / close.iloc[-6] - 1 if len(close) > 5 else 0.0
         ret20 = close.iloc[-1] / close.iloc[-21] - 1 if len(close) > 20 else 0.0
         ret60 = close.iloc[-1] / close.iloc[-61] - 1 if len(close) > 60 else 0.0
         high60 = frame["high"].rolling(60).max().iloc[-1]
@@ -149,8 +153,13 @@ def build_market_temperature(
                 "symbol": symbol,
                 "date": pd.Timestamp(latest["timestamp"]).date().isoformat(),
                 "close": round(float(close.iloc[-1]), 4),
+                "ma5": round(float(ma5), 4),
                 "ma20": round(float(ma20), 4),
                 "ma60": round(float(ma60), 4),
+                "ret1": round(float(ret1), 4),
+                "ret3": round(float(ret3), 4),
+                "ret5": round(float(ret5), 4),
+                "close_vs_ma5": round(float(close.iloc[-1] / ma5 - 1), 4),
                 "ret20": round(float(ret20), 4),
                 "ret60": round(float(ret60), 4),
                 "drawdown60": round(float(drawdown60), 4),
@@ -162,7 +171,7 @@ def build_market_temperature(
     if components.empty:
         return {"score": 0.0, "regime": "未知", "advice": "指数缓存不足，先按防守口径复盘。"}, components
 
-    score = float(components["score"].mean())
+    score = _apply_market_shock_cap(components, float(components["score"].mean()))
     regime = _market_regime(score)
     advice = _market_advice(regime)
     return {"score": round(score, 2), "regime": regime, "advice": advice}, components
@@ -427,6 +436,26 @@ def _market_regime(score: float) -> str:
     if score >= 42:
         return "震荡"
     return "防守"
+
+
+def _apply_market_shock_cap(components: pd.DataFrame, score: float) -> float:
+    if components.empty:
+        return score
+    ret1 = pd.to_numeric(components.get("ret1", pd.Series(dtype=float)), errors="coerce").dropna()
+    ret3 = pd.to_numeric(components.get("ret3", pd.Series(dtype=float)), errors="coerce").dropna()
+    ret5 = pd.to_numeric(components.get("ret5", pd.Series(dtype=float)), errors="coerce").dropna()
+    if not ret1.empty and ret1.median() <= -0.02 and (ret1 <= -0.03).any():
+        return min(score, 35.0)
+    weak_short_count = 0
+    if not ret3.empty:
+        weak_short_count += int((ret3 <= -0.03).sum())
+    if not ret5.empty:
+        weak_short_count += int((ret5 <= -0.04).sum())
+    if weak_short_count >= 2 or (not ret3.empty and ret3.median() <= -0.025):
+        return min(score, 38.0)
+    if not ret1.empty and ret1.median() <= -0.015:
+        return min(score, 45.0)
+    return score
 
 
 def _market_advice(regime: str) -> str:

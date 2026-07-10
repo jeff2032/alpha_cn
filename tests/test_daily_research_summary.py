@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from quant_a_stock.research.summary import _candidate_reason_lines
+from quant_a_stock.research.summary import _apply_market_shock_cap
 from quant_a_stock.research.summary import classify_theme_cluster
 
 
@@ -17,6 +18,18 @@ def test_classify_theme_cluster_uses_keywords_and_reports() -> None:
     )
 
     assert classify_theme_cluster(row) == "半导体链"
+
+
+def test_market_shock_cap_forces_defensive_regime_score() -> None:
+    components = pd.DataFrame(
+        [
+            {"ret1": -0.03, "ret3": -0.02, "ret5": -0.04},
+            {"ret1": -0.036, "ret3": -0.014, "ret5": -0.026},
+            {"ret1": -0.056, "ret3": -0.047, "ret5": -0.082},
+        ]
+    )
+
+    assert _apply_market_shock_cap(components, 80.0) == 35.0
 
 
 def test_classify_theme_cluster_falls_back_to_keyword_name() -> None:

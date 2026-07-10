@@ -17,6 +17,8 @@ from quant_a_stock.research.snapshot import SNAPSHOT_ROOT
 TRACKED_ACTION_BUCKETS = (
     "观察-A1低位潜伏",
     "主攻-A2启动确认",
+    "短线-A3一三日确认",
+    "升级-B2三五日观察",
     "主攻-A3趋势延续",
     "观察-B2a主线扩散待升级",
     "观察-B2s主线突发待确认",
@@ -38,7 +40,9 @@ ACTION_STAGE_RANK = {
     "补票-B2强主题": 2,
     "补票-B2a主线扩散": 2,
     "补票-主线突发": 2,
+    "升级-B2三五日观察": 2,
     "主攻-A2启动确认": 3,
+    "短线-A3一三日确认": 4,
     "主攻-A3趋势延续": 4,
 }
 TIER_STAGE_RANK = {
@@ -51,33 +55,37 @@ TIER_STAGE_RANK = {
 PRIMARY_HORIZON_BY_BUCKET = {
     "观察-A1低位潜伏": 30,
     "A1": 30,
-    "主攻-A2启动确认": 15,
-    "A2": 15,
-    "主攻-A3趋势延续": 10,
-    "A3": 10,
+    "主攻-A2启动确认": 5,
+    "A2": 5,
+    "短线-A3一三日确认": 3,
+    "主攻-A3趋势延续": 3,
+    "A3": 3,
+    "升级-B2三五日观察": 5,
     "观察-B2a主线扩散待升级": 10,
     "观察-B2s主线突发待确认": 5,
     "补票-B2a主线扩散": 10,
     "补票-主线突发": 5,
     "补票-B2强主题": 10,
     "观察-B2b主题待确认": 5,
-    "B2": 10,
+    "B2": 5,
 }
 
 TRACKING_WINDOW_BY_BUCKET = {
     "观察-A1低位潜伏": 30,
     "A1": 30,
-    "主攻-A2启动确认": 15,
-    "A2": 15,
-    "主攻-A3趋势延续": 10,
-    "A3": 10,
+    "主攻-A2启动确认": 5,
+    "A2": 5,
+    "短线-A3一三日确认": 3,
+    "主攻-A3趋势延续": 3,
+    "A3": 3,
+    "升级-B2三五日观察": 5,
     "观察-B2a主线扩散待升级": 10,
     "观察-B2s主线突发待确认": 5,
     "补票-B2a主线扩散": 10,
     "补票-主线突发": 5,
     "补票-B2强主题": 10,
     "观察-B2b主题待确认": 5,
-    "B2": 10,
+    "B2": 5,
 }
 
 
@@ -807,7 +815,7 @@ def _render_lifecycle_markdown(tracking: CandidateLifecycleTracking, *, top: int
 
     active = lifecycles[lifecycles["status"] == "active"].copy()
     actionable_labels = ["pending", "neutral"]
-    main_buckets = {"主攻-A2启动确认", "主攻-A3趋势延续"}
+    main_buckets = {"主攻-A2启动确认", "短线-A3一三日确认", "主攻-A3趋势延续"}
     secondary_buckets = {
         "观察-B2a主线扩散待升级",
         "观察-B2s主线突发待确认",
@@ -815,6 +823,7 @@ def _render_lifecycle_markdown(tracking: CandidateLifecycleTracking, *, top: int
         "补票-主线突发",
         "补票-B2强主题",
         "观察-B2b主题待确认",
+        "升级-B2三五日观察",
         "观察-A1低位潜伏",
     }
 
@@ -902,7 +911,7 @@ def _render_lifecycle_markdown(tracking: CandidateLifecycleTracking, *, top: int
         [
             "### 今日主攻池",
             "",
-            "只放仍在观察窗口内、当前为 A2/A3 主攻且尚未命中或失败的票。",
+            "只放仍在观察窗口内、当前为 A2 主攻或 A3 短线且尚未命中或失败的票。",
             "",
             _markdown_table(_display_frame(main.head(8).loc[:, _existing(main, attention_columns)])),
             "",
@@ -999,7 +1008,7 @@ def _render_lifecycle_markdown(tracking: CandidateLifecycleTracking, *, top: int
             "",
             "- `active` 表示仍在观察窗口内，且最近消失不超过 3 个交易日。",
             "- `expired` 表示观察窗口已经走完，后续主要进入策略复盘。",
-            "- A3 主要看 1/3/5/10 日，A2 看 3/5/10/15 日，A1 看 10/20/30 日，B2a 只做 3/5/10 日升级观察，B2s/B2b 只给 3/5 日升级窗口。",
+            "- A3 只看 1/3 日，A2 看 3/5 日，A1 看 10/20/30 日，B2 统一只给 3/5 日升级窗口。",
             "- `strong_hit` / `hit` / `failed` 根据各分组主要观察窗口的最大浮盈和最大回撤打标。",
             "- 这份报告用于复盘和跟踪，不构成买卖建议。",
         ]
@@ -1149,7 +1158,9 @@ def _bucket_code(bucket_or_tier: str, tier: str) -> str:
         "补票-主线突发": "B2s",
         "观察-B2b主题待确认": "B2b",
         "主攻-A2启动确认": "A2",
+        "短线-A3一三日确认": "A3",
         "主攻-A3趋势延续": "A3",
+        "升级-B2三五日观察": "B2",
     }
     return mapping.get(bucket_or_tier, tier or bucket_or_tier or "NA")
 
@@ -1159,13 +1170,13 @@ def _expected_horizon(action_bucket: str, tier: str) -> str:
     if "A1" in bucket or tier == "A1":
         return "10-30d"
     if "A2" in bucket or tier == "A2":
-        return "3-15d"
+        return "3-5d"
     if "A3" in bucket or tier == "A3":
-        return "1-10d"
+        return "1-3d"
     if "B2a" in bucket:
-        return "3-10d"
+        return "3-5d"
     if "B2" in bucket or "主线突发" in bucket or tier.startswith("B"):
-        return "1-5d"
+        return "3-5d"
     return "observe"
 
 

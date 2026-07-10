@@ -44,8 +44,35 @@ def test_classify_and_summarize_cninfo_risk_events() -> None:
     assert row["symbol"] == "002137"
     assert row["risk_notice_count"] == 2
     assert row["risk_event_score"] == 8
-    assert row["high_risk_event_count"] == 1
+    assert row["high_risk_event_count"] == 0
     assert "监管问询" in row["risk_event_types"]
+
+
+def test_risk_event_classification_requires_explicit_adverse_context() -> None:
+    assert classify_risk_event("关于在充分尽职调查和内核基础上出具的承诺函") == ("", "", 0.0)
+
+    event_type, severity, score = classify_risk_event("关于收到中国证监会立案告知书的公告")
+
+    assert event_type == "立案处罚"
+    assert severity == "高"
+    assert score == 8.0
+
+
+def test_risk_event_summary_deduplicates_and_decays_old_events() -> None:
+    events = pd.DataFrame(
+        [
+            {"symbol": "002137", "date": "2026-07-09", "title": "关于收到监管问询函的公告"},
+            {"symbol": "002137", "date": "2026-07-09", "title": "关于收到监管问询函的公告"},
+            {"symbol": "002137", "date": "2026-05-12", "title": "关于股东减持计划的公告"},
+        ]
+    )
+
+    row = summarize_risk_events(events, as_of_date="2026-07-10", half_life_days=30).iloc[0]
+
+    assert row["risk_notice_count"] == 2
+    assert row["risk_event_score"] == 5.65
+    assert row["high_risk_event_count"] == 0
+    assert row["risk_event_age_days"] == 1
 
 
 def test_normalize_money_flow_frame_scores_recent_positive_flow() -> None:

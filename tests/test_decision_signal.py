@@ -26,7 +26,7 @@ def test_build_decision_signals_maps_core_and_watch_buckets() -> None:
                 "symbol": "600999",
                 "name": "招商证券",
                 "research_tier": "B2",
-                "action_bucket": "观察-B2s主线突发待确认",
+                "action_bucket": "升级-B2三五日观察",
                 "research_score": 56.0,
                 "risk_level": "中",
                 "total_penalty": 0,
@@ -50,8 +50,8 @@ def test_build_decision_signals_maps_core_and_watch_buckets() -> None:
     assert signals.loc[0, "symbol"] == "002137"
     assert signals.loc[0, "signal_type"] == "buy_watch"
     assert signals.loc[0, "confidence"] == "high"
-    assert signals.loc[0, "expected_horizon"] == "3-15d"
+    assert signals.loc[0, "expected_horizon"] == "3-5d"
     assert signals.loc[1, "signal_type"] == "upgrade_watch"
-    assert signals.loc[1, "expected_horizon"] == "1-5d"
+    assert signals.loc[1, "expected_horizon"] == "3-5d"
     assert signals.loc[2, "signal_type"] == "avoid"
     assert signals.loc[2, "decision_signal_version"] == DECISION_SIGNAL_VERSION

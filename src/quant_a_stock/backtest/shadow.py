@@ -25,6 +25,9 @@ SHADOW_PLAN_COLUMNS = [
     "industry",
     "research_score",
     "risk_level",
+    "market_regime",
+    "market_score",
+    "market_total_cap",
     "observe_condition",
     "invalid_condition",
     "frozen_at",
@@ -39,6 +42,13 @@ class ShadowPortfolioResult:
     positions: pd.DataFrame
 
 
+@dataclass(frozen=True)
+class ShadowBackfillResult:
+    plans: pd.DataFrame
+    summary: pd.DataFrame
+    plans_root: Path
+
+
 def freeze_shadow_plan(
     signals: pd.DataFrame,
     *,
@@ -48,25 +58,29 @@ def freeze_shadow_plan(
     max_single_weight: float = 0.15,
     max_total_weight: float = 0.80,
     max_industry_weight: float = 0.30,
+    market_regime: str = "",
+    market_score: float = 0.0,
 ) -> pd.DataFrame:
     if signals.empty:
         return pd.DataFrame(columns=SHADOW_PLAN_COLUMNS)
     frame = signals.copy()
     frame["symbol"] = frame["symbol"].astype(str).str.zfill(6)
     frame = frame[frame["risk_level"].isin(["低", "中", "未标注"])]
-    priority = {"buy_watch": 1, "hold_watch": 2, "upgrade_watch": 3, "watch": 4}
+    priority = {"buy_watch": 1, "upgrade_watch": 2}
     frame["_priority"] = frame["signal_type"].map(priority).fillna(9)
     frame = frame[frame["_priority"] < 9].sort_values(["_priority", "research_score"], ascending=[True, False])
 
+    market_cap = market_position_cap(market_regime) if market_regime else max_total_weight
+    effective_total_weight = min(max_total_weight, market_cap)
     rows = []
     total_weight = 0.0
     industry_weights: dict[str, float] = {}
-    base_weight = min(max_single_weight, max_total_weight / max(1, top))
+    base_weight = min(max_single_weight, effective_total_weight / max(1, top))
     for _, row in frame.iterrows():
-        if len(rows) >= top or total_weight >= max_total_weight - 1e-9:
+        if len(rows) >= top or total_weight >= effective_total_weight - 1e-9:
             break
         industry = str(row.get("theme_cluster", "") or row.get("matched_theme", "") or "")
-        weight = min(base_weight, max_total_weight - total_weight)
+        weight = min(base_weight, effective_total_weight - total_weight)
         if industry:
             weight = min(weight, max_industry_weight - industry_weights.get(industry, 0.0))
         if weight <= 1e-9:
@@ -86,6 +100,9 @@ def freeze_shadow_plan(
                 "industry": industry,
                 "research_score": row.get("research_score", 0),
                 "risk_level": row.get("risk_level", ""),
+                "market_regime": market_regime,
+                "market_score": round(float(market_score), 2),
+                "market_total_cap": round(effective_total_weight, 4),
                 "observe_condition": row.get("observe_condition", ""),
                 "invalid_condition": row.get("invalid_condition", ""),
                 "frozen_at": datetime.now().isoformat(timespec="seconds"),
@@ -96,6 +113,95 @@ def freeze_shadow_plan(
         if industry:
             industry_weights[industry] = industry_weights.get(industry, 0.0) + weight
     return pd.DataFrame(rows, columns=SHADOW_PLAN_COLUMNS)
+
+
+def market_position_cap(regime: str) -> float:
+    return {
+        "强势": 0.80,
+        "震荡偏强": 0.60,
+        "震荡": 0.40,
+        "防守": 0.20,
+        "未知": 0.20,
+    }.get(str(regime or ""), 0.20)
+
+
+def backfill_shadow_plans(
+    *,
+    since: str,
+    until: str,
+    snapshot_root: Path | None = None,
+    plans_root: Path | None = None,
+    cache_dir: Path | None = None,
+    top: int = 10,
+    signal_top: int = 80,
+    max_single_weight: float = 0.15,
+    max_total_weight: float = 0.80,
+    max_industry_weight: float = 0.30,
+    overwrite: bool = True,
+) -> ShadowBackfillResult:
+    from quant_a_stock.data.calendar import cached_trading_dates
+    from quant_a_stock.research.decision_signal import build_decision_signals
+    from quant_a_stock.research.summary import build_market_temperature
+
+    snapshots = snapshot_root or DEFAULT_PATHS.root / "data" / "snapshots" / "research"
+    output_root = plans_root or DEFAULT_PATHS.root / "data" / "shadow" / "backfill" / "plans"
+    start = pd.Timestamp(since).normalize()
+    end = pd.Timestamp(until).normalize()
+    trading_dates = cached_trading_dates(cache_dir=cache_dir)
+    next_session = {
+        trading_dates[index]: trading_dates[index + 1]
+        for index in range(len(trading_dates) - 1)
+    }
+    plans = []
+    summary_rows = []
+    for directory in sorted(snapshots.glob("????-??-??")):
+        target = pd.Timestamp(directory.name).normalize()
+        if target < start or target > end or target not in next_session:
+            continue
+        source = directory / "research_candidates.csv"
+        if not source.exists():
+            continue
+        candidates = pd.read_csv(source, dtype={"symbol": str})
+        plan_date = next_session[target].date().isoformat()
+        signals = build_decision_signals(
+            candidates,
+            target_date=target.date().isoformat(),
+            plan_date=plan_date,
+            top=signal_top,
+        )
+        market, _ = build_market_temperature(target_date=target.date().isoformat())
+        plan = freeze_shadow_plan(
+            signals,
+            target_date=target.date().isoformat(),
+            plan_date=plan_date,
+            top=max(5, min(10, int(top))),
+            max_single_weight=max_single_weight,
+            max_total_weight=max_total_weight,
+            max_industry_weight=max_industry_weight,
+            market_regime=str(market.get("regime", "未知")),
+            market_score=float(market.get("score", 0.0)),
+        )
+        save_shadow_plan(plan, plan_date=plan_date, root=output_root, overwrite=overwrite)
+        if not plan.empty:
+            plans.append(plan)
+        summary_rows.append(
+            {
+                "target_date": target.date().isoformat(),
+                "plan_date": plan_date,
+                "candidate_count": len(candidates),
+                "signal_count": len(signals),
+                "planned_count": len(plan),
+                "planned_weight": pd.to_numeric(
+                    plan.get("target_weight", pd.Series(dtype=float)), errors="coerce"
+                ).sum(),
+                "market_regime": market.get("regime", "未知"),
+                "market_score": market.get("score", 0.0),
+                "market_total_cap": market_position_cap(str(market.get("regime", "未知"))),
+                "underfilled": len(plan) < 5,
+            }
+        )
+    combined = pd.concat(plans, ignore_index=True) if plans else pd.DataFrame(columns=SHADOW_PLAN_COLUMNS)
+    return ShadowBackfillResult(combined, pd.DataFrame(summary_rows), output_root)
 
 
 def save_shadow_plan(plan: pd.DataFrame, *, plan_date: str, root: Path | None = None, overwrite: bool = False) -> Path:
@@ -114,10 +220,15 @@ def evaluate_shadow_portfolio(
     plans_root: Path | None = None,
     cache_dir: Path | None = None,
     until: str | None = None,
+    since: str | None = None,
     config: BacktestConfig = DEFAULT_BACKTEST_CONFIG,
 ) -> ShadowPortfolioResult:
     root = plans_root or DEFAULT_PATHS.root / "data" / "shadow" / "plans"
     plans = _load_plans(root)
+    if since and not plans.empty:
+        plans = plans[plans["plan_date"] >= pd.Timestamp(since)].copy()
+    if until and not plans.empty:
+        plans = plans[plans["plan_date"] <= pd.Timestamp(until)].copy()
     if plans.empty:
         return ShadowPortfolioResult(pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
     symbols = sorted(plans["symbol"].astype(str).str.zfill(6).unique())

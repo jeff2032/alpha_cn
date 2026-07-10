@@ -16,6 +16,7 @@ from quant_a_stock.backtest.research_portfolio import ResearchPortfolioConfig
 from quant_a_stock.backtest.research_portfolio import build_research_factor_panel
 from quant_a_stock.backtest.research_portfolio import optimize_research_portfolio
 from quant_a_stock.backtest.research_portfolio import run_research_portfolio_backtest
+from quant_a_stock.backtest.shadow import backfill_shadow_plans
 from quant_a_stock.backtest.shadow import evaluate_shadow_portfolio
 from quant_a_stock.backtest.shadow import freeze_shadow_plan
 from quant_a_stock.backtest.shadow import save_shadow_plan
@@ -66,6 +67,7 @@ from quant_a_stock.research.review import build_research_review
 from quant_a_stock.research.review import save_research_review_reports
 from quant_a_stock.research.snapshot import save_research_snapshot
 from quant_a_stock.research.summary import build_daily_research_summary
+from quant_a_stock.research.summary import build_market_temperature
 from quant_a_stock.research.summary import save_daily_research_summary_markdown
 from quant_a_stock.screening.patterns import AccumulationSetupConfig
 from quant_a_stock.screening.patterns import BaseBreakoutSetupConfig
@@ -1309,7 +1311,7 @@ def risk_events(args: argparse.Namespace) -> None:
     )
     events = result.frame if not result.frame.empty else pd.DataFrame(columns=RISK_EVENT_COLUMNS)
     csv_path = _save_frame_report(events, report_type="risk_events", date_prefix=target_date)
-    summary = summarize_risk_events(events)
+    summary = summarize_risk_events(events, as_of_date=target_date)
 
     print(f"风险扫描区间: {start_date} -> {target_date}")
     if summary.empty:
@@ -1469,7 +1471,10 @@ def research_candidates(args: argparse.Namespace) -> None:
             end_date=target_date,
         )
         errors.extend(notice_errors)
-    risk_event_summary = summarize_risk_events(_read_optional_report(risk_events_path))
+    risk_event_summary = summarize_risk_events(
+        _read_optional_report(risk_events_path),
+        as_of_date=target_date,
+    )
     risk_notices = _combine_risk_notice_summaries(risk_notices, risk_event_summary)
 
     candidates = build_research_candidates(
@@ -1693,7 +1698,12 @@ def factor_evidence(args: argparse.Namespace) -> None:
         limit=5000,
         warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
     )
-    result = analyze_factor_evidence(outcomes, horizon=args.horizon, quantile_count=args.quantiles)
+    result = analyze_factor_evidence(
+        outcomes,
+        horizon=args.horizon,
+        quantile_count=args.quantiles,
+        min_weighting_dates=args.min_dates,
+    )
     paths = save_factor_evidence(result, horizon=args.horizon)
     target_date = args.until or (
         pd.to_datetime(outcomes["signal_date"]).max().date().isoformat() if not outcomes.empty else datetime.now().date().isoformat()
@@ -1707,6 +1717,8 @@ def factor_evidence(args: argparse.Namespace) -> None:
             warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
         )
     print(result.summary.to_string(index=False) if not result.summary.empty else "因子历史字段或样本不足。")
+    if not result.summary.empty and not result.summary["eligible_for_weighting"].fillna(False).any():
+        print(f"样本门槛未满足：完整截面日期少于 {args.min_dates}，本次只做诊断，不调整因子权重。")
     print(f"因子汇总: {paths[0]}")
     print(f"分组收益: {paths[1]}")
     print(f"环境稳定性: {paths[2]}")
@@ -1724,6 +1736,7 @@ def shadow_freeze(args: argparse.Namespace) -> None:
         plan_date=args.plan_date,
         top=args.signal_top,
     )
+    market, _ = build_market_temperature(target_date=args.target_date)
     plan = freeze_shadow_plan(
         signals,
         target_date=args.target_date,
@@ -1732,6 +1745,8 @@ def shadow_freeze(args: argparse.Namespace) -> None:
         max_single_weight=args.max_single_weight,
         max_total_weight=args.max_total_weight,
         max_industry_weight=args.max_industry_weight,
+        market_regime=str(market.get("regime", "未知")),
+        market_score=float(market.get("score", 0.0)),
     )
     path = save_shadow_plan(
         plan,
@@ -1748,6 +1763,7 @@ def shadow_evaluate(args: argparse.Namespace) -> None:
         plans_root=Path(args.plans_root) if args.plans_root else None,
         cache_dir=Path(args.cache_dir) if args.cache_dir else None,
         until=args.until,
+        since=args.since,
     )
     equity_path = save_report(result.equity.to_dict("records"), report_type="shadow_portfolio_equity")
     trades_path = save_report(result.trades.to_dict("records"), report_type="shadow_portfolio_trades")
@@ -1756,6 +1772,38 @@ def shadow_evaluate(args: argparse.Namespace) -> None:
         print("还没有可评价的冻结计划和行情。")
     else:
         print(result.equity.tail(10).to_string(index=False))
+    print(f"净值: {equity_path}")
+    print(f"成交: {trades_path}")
+    print(f"持仓: {positions_path}")
+
+
+def shadow_backfill(args: argparse.Namespace) -> None:
+    backfill = backfill_shadow_plans(
+        since=args.since,
+        until=args.until,
+        snapshot_root=Path(args.snapshot_root) if args.snapshot_root else None,
+        plans_root=Path(args.plans_root) if args.plans_root else None,
+        cache_dir=Path(args.cache_dir) if args.cache_dir else None,
+        top=args.top,
+        signal_top=args.signal_top,
+        max_single_weight=args.max_single_weight,
+        max_total_weight=args.max_total_weight,
+        max_industry_weight=args.max_industry_weight,
+        overwrite=args.overwrite,
+    )
+    result = evaluate_shadow_portfolio(
+        plans_root=backfill.plans_root,
+        cache_dir=Path(args.cache_dir) if args.cache_dir else None,
+        since=args.since,
+        until=args.until,
+    )
+    summary_path = save_report(backfill.summary.to_dict("records"), report_type="shadow_backfill_summary")
+    equity_path = save_report(result.equity.to_dict("records"), report_type="shadow_backfill_equity")
+    trades_path = save_report(result.trades.to_dict("records"), report_type="shadow_backfill_trades")
+    positions_path = save_report(result.positions.to_dict("records"), report_type="shadow_backfill_positions")
+    print(backfill.summary.to_string(index=False) if not backfill.summary.empty else "没有可回填的历史快照。")
+    print(f"计划目录: {backfill.plans_root}")
+    print(f"回填摘要: {summary_path}")
     print(f"净值: {equity_path}")
     print(f"成交: {trades_path}")
     print(f"持仓: {positions_path}")
@@ -2329,18 +2377,22 @@ def warehouse_review(args: argparse.Namespace) -> None:
         until=args.until,
         warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
     )
+    lifecycle = review.get("lifecycle", pd.DataFrame())
     tier = review["tier"]
     bucket = review.get("bucket", pd.DataFrame())
     miss_risk = review["miss_risk"]
     reports = review["reports"]
-    if tier.empty and bucket.empty and miss_risk.empty and reports.empty:
+    if lifecycle.empty and tier.empty and bucket.empty and miss_risk.empty and reports.empty:
         print("研究仓库还没有可复盘的数据。")
         return
+    if not lifecycle.empty:
+        print("独立生命周期表现（默认策略评价口径）:")
+        print(lifecycle.to_string(index=False))
     if not bucket.empty:
-        print("模型桶表现:")
+        print("每日重复信号模型桶（仅作诊断）:")
         print(bucket.to_string(index=False))
     if not tier.empty:
-        print("分层表现:")
+        print("每日重复信号分层（仅作诊断）:")
         print(tier.to_string(index=False))
     if not miss_risk.empty:
         print("错过样本风险归因:")
@@ -2696,6 +2748,7 @@ def build_parser() -> argparse.ArgumentParser:
     factor.add_argument("--until", default=None)
     factor.add_argument("--horizon", choices=["1d", "3d", "5d", "10d", "15d", "20d", "30d"], default="5d")
     factor.add_argument("--quantiles", type=int, default=5)
+    factor.add_argument("--min-dates", type=int, default=40, help="允许进入权重评审的最少完整截面日期")
     factor.add_argument("--warehouse-dir", default=None)
     factor.add_argument("--write-warehouse", action=argparse.BooleanOptionalAction, default=True)
     factor.set_defaults(func=factor_evidence)
@@ -2717,7 +2770,22 @@ def build_parser() -> argparse.ArgumentParser:
     shadow.add_argument("--plans-root", default=None)
     shadow.add_argument("--cache-dir", default=None)
     shadow.add_argument("--until", default=None)
+    shadow.add_argument("--since", default=None)
     shadow.set_defaults(func=shadow_evaluate)
+
+    shadow_history = subparsers.add_parser("shadow-backfill", help="按历史每日快照冻结 5-10 只并以次日开盘重放")
+    shadow_history.add_argument("--since", required=True)
+    shadow_history.add_argument("--until", required=True)
+    shadow_history.add_argument("--snapshot-root", default=None)
+    shadow_history.add_argument("--plans-root", default=None)
+    shadow_history.add_argument("--cache-dir", default=None)
+    shadow_history.add_argument("--signal-top", type=int, default=80)
+    shadow_history.add_argument("--top", type=int, default=10)
+    shadow_history.add_argument("--max-single-weight", type=float, default=0.15)
+    shadow_history.add_argument("--max-total-weight", type=float, default=0.80)
+    shadow_history.add_argument("--max-industry-weight", type=float, default=0.30)
+    shadow_history.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=True)
+    shadow_history.set_defaults(func=shadow_backfill)
 
     snapshot = subparsers.add_parser("snapshot-research", help="归档每日研究报告快照")
     snapshot.add_argument("--target-date", default=None)

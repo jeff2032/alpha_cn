@@ -4,10 +4,12 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from quant_a_stock.backtest.research_portfolio import ResearchPortfolioConfig
 from quant_a_stock.backtest.shadow import evaluate_shadow_portfolio
 from quant_a_stock.backtest.shadow import freeze_shadow_plan
+from quant_a_stock.backtest.shadow import market_position_cap
 from quant_a_stock.backtest.shadow import save_shadow_plan
 from quant_a_stock.backtest.walk_forward import run_walk_forward_validation
 from quant_a_stock.data.cache import save_daily_cache
@@ -96,6 +98,8 @@ def test_factor_evidence_calculates_ic_quantiles_and_regimes() -> None:
 
     assert not result.summary.empty
     assert "mean_ic" in result.summary.columns
+    assert not result.summary["eligible_for_weighting"].any()
+    assert set(result.summary["weighting_status"]) == {"样本积累中"}
     assert set(result.quantiles["quantile"]) == {1, 2, 3, 4, 5}
     assert "震荡" in set(result.regimes["market_regime"])
 
@@ -145,3 +149,33 @@ def test_empty_shadow_plan_is_a_valid_all_cash_decision(tmp_path: Path) -> None:
     assert "symbol" in pd.read_csv(path).columns
     result = evaluate_shadow_portfolio(plans_root=tmp_path / "plans", until="2026-01-06")
     assert result.equity.empty
+
+
+def test_shadow_plan_applies_market_position_gate() -> None:
+    signals = pd.DataFrame(
+        [
+            {
+                "symbol": f"0000{index}",
+                "name": f"样本{index}",
+                "signal_type": "buy_watch",
+                "research_score": 80 - index,
+                "risk_level": "低",
+                "theme_cluster": f"主题{index}",
+            }
+            for index in range(1, 7)
+        ]
+    )
+
+    plan = freeze_shadow_plan(
+        signals,
+        target_date="2026-07-10",
+        plan_date="2026-07-13",
+        top=5,
+        market_regime="防守",
+        market_score=30,
+    )
+
+    assert len(plan) == 5
+    assert plan["target_weight"].sum() == pytest.approx(0.20)
+    assert set(plan["market_total_cap"]) == {0.20}
+    assert market_position_cap("震荡偏强") == 0.60

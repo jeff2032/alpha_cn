@@ -1377,6 +1377,7 @@ def warehouse_review(
     db_path = warehouse_db_path(warehouse_dir)
     if not db_path.exists():
         return {
+            "lifecycle": pd.DataFrame(),
             "tier": pd.DataFrame(),
             "bucket": pd.DataFrame(),
             "miss_risk": pd.DataFrame(),
@@ -1386,10 +1387,53 @@ def warehouse_review(
     with duckdb.connect(str(db_path), read_only=True) as conn:
         views = _warehouse_views(conn)
         tier = pd.DataFrame()
+        lifecycle = pd.DataFrame()
         bucket = pd.DataFrame()
         miss_risk = pd.DataFrame()
         reports = pd.DataFrame()
         review_table = "research_outcome_daily" if "research_outcome_daily" in views else "research_review_details"
+        if "candidate_lifecycles" in views:
+            lifecycle_clauses = [
+                "warehouse_target_date = (SELECT MAX(warehouse_target_date) FROM candidate_lifecycles"
+                + (" WHERE warehouse_target_date <= ?" if until else "")
+                + ")"
+            ]
+            lifecycle_params: list[object] = [until] if until else []
+            if since:
+                lifecycle_clauses.append("first_entry_date >= ?")
+                lifecycle_params.append(since)
+            if until:
+                lifecycle_clauses.append("first_entry_date <= ?")
+                lifecycle_params.append(until)
+            lifecycle_where = "WHERE " + " AND ".join(lifecycle_clauses)
+            lifecycle = conn.execute(
+                f"""
+                SELECT
+                    first_tier AS tier,
+                    COUNT(*) AS lifecycle_count,
+                    COUNT(ret_1d) AS count_1d,
+                    AVG(ret_1d) AS avg_ret_1d,
+                    MEDIAN(ret_1d) AS median_ret_1d,
+                    AVG(CASE WHEN ret_1d IS NULL THEN NULL WHEN ret_1d > 0 THEN 1 ELSE 0 END) AS win_rate_1d,
+                    COUNT(ret_3d) AS count_3d,
+                    AVG(ret_3d) AS avg_ret_3d,
+                    MEDIAN(ret_3d) AS median_ret_3d,
+                    AVG(CASE WHEN ret_3d IS NULL THEN NULL WHEN ret_3d > 0 THEN 1 ELSE 0 END) AS win_rate_3d,
+                    COUNT(ret_5d) AS count_5d,
+                    AVG(ret_5d) AS avg_ret_5d,
+                    MEDIAN(ret_5d) AS median_ret_5d,
+                    AVG(CASE WHEN ret_5d IS NULL THEN NULL WHEN ret_5d > 0 THEN 1 ELSE 0 END) AS win_rate_5d,
+                    COUNT(ret_10d) AS count_10d,
+                    AVG(ret_10d) AS avg_ret_10d,
+                    MEDIAN(ret_10d) AS median_ret_10d,
+                    AVG(CASE WHEN ret_10d IS NULL THEN NULL WHEN ret_10d > 0 THEN 1 ELSE 0 END) AS win_rate_10d
+                FROM candidate_lifecycles
+                {lifecycle_where}
+                GROUP BY first_tier
+                ORDER BY CASE first_tier WHEN 'A1' THEN 1 WHEN 'A2' THEN 2 WHEN 'A3' THEN 3 WHEN 'B2' THEN 4 WHEN 'B1' THEN 5 ELSE 9 END
+                """,
+                lifecycle_params,
+            ).df()
         if review_table in views:
             columns = _view_columns(conn, review_table)
             count_3d_expr = "COUNT(ret_3d)" if "ret_3d" in columns else "0"
@@ -1520,7 +1564,7 @@ def warehouse_review(
                 """,
                 report_params,
             ).df()
-    return {"tier": tier, "bucket": bucket, "miss_risk": miss_risk, "reports": reports}
+    return {"lifecycle": lifecycle, "tier": tier, "bucket": bucket, "miss_risk": miss_risk, "reports": reports}
 
 
 def _build_research_candidate_daily(frame: pd.DataFrame, *, target_date: str) -> pd.DataFrame:

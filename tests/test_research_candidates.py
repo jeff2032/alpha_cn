@@ -107,7 +107,7 @@ def test_build_research_candidates_adds_theme_and_penalties() -> None:
     assert leader["risk_level"] == "低"
     assert laggard["volume_overheat_penalty"] == 8.0
     assert laggard["ret20_overheat_penalty"] == 10.0
-    assert laggard["risk_notice_penalty"] == 10.0
+    assert laggard["risk_notice_penalty"] == 2.0
     assert laggard["new_stock_penalty"] == 5.0
     assert laggard["risk_level"] == "高"
     assert laggard["action_bucket"] == "回避-风险优先"
@@ -157,7 +157,7 @@ def test_build_research_candidates_classifies_trend_pullback_as_a3() -> None:
 
     leader = result.iloc[0]
     assert leader["research_tier"] == "A3"
-    assert leader["action_bucket"] == "主攻-A3趋势延续"
+    assert leader["action_bucket"] == "短线-A3一三日确认"
     assert leader["setup_phase"] == "强趋势再启动"
     assert leader["stage_bonus"] > 0
 
@@ -357,8 +357,8 @@ def test_build_research_candidates_marks_strong_theme_b2_as_replenish_watch() ->
     assert row["research_tier"] == "B2"
     assert bool(row["is_strong_theme_candidate"]) is True
     assert row["b2_subtype"] == "B2a"
-    assert row["action_bucket"] == "观察-B2a主线扩散待升级"
-    assert "主线扩散观察" in row["upgrade_hint"]
+    assert row["action_bucket"] == "升级-B2三五日观察"
+    assert "升级观察" in row["upgrade_hint"]
 
 
 def test_build_research_candidates_marks_mainline_surge_replenish() -> None:
@@ -406,8 +406,8 @@ def test_build_research_candidates_marks_mainline_surge_replenish() -> None:
     row = result.iloc[0]
     assert row["research_tier"] == "B2"
     assert row["b2_subtype"] == "B2s"
-    assert row["action_bucket"] == "观察-B2s主线突发待确认"
-    assert "主线突发观察" in row["upgrade_hint"]
+    assert row["action_bucket"] == "升级-B2三五日观察"
+    assert "升级观察" in row["upgrade_hint"]
 
 
 def test_build_research_candidates_marks_low_position_mainline_alert_as_b2s() -> None:
@@ -454,7 +454,7 @@ def test_build_research_candidates_marks_low_position_mainline_alert_as_b2s() ->
     row = result.iloc[0]
     assert row["research_tier"] == "B2"
     assert row["b2_subtype"] == "B2s"
-    assert row["action_bucket"] == "观察-B2s主线突发待确认"
+    assert row["action_bucket"] == "升级-B2三五日观察"
     assert row["risk_level"] == "低"
 
 
@@ -500,7 +500,7 @@ def test_build_research_candidates_marks_deep_low_software_mainline_alert_as_b2s
     row = result.iloc[0]
     assert row["research_tier"] == "B2"
     assert row["b2_subtype"] == "B2s"
-    assert row["action_bucket"] == "观察-B2s主线突发待确认"
+    assert row["action_bucket"] == "升级-B2三五日观察"
     assert row["risk_level"] == "低"
 
 
@@ -642,6 +642,6 @@ def test_build_research_candidates_uses_external_money_and_risk_factors() -> Non
     )
 
     risk_row = risk_result.iloc[0]
-    assert risk_row["risk_event_penalty"] == 8
+    assert risk_row["risk_event_penalty"] == 6
     assert "巨潮高风险事件" in risk_row["risk_tags"]
     assert risk_row["risk_level"] == "高"

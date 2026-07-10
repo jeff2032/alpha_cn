@@ -21,6 +21,9 @@ FACTOR_COLUMNS = {
     "公告风险": ("risk_event_score", -1),
 }
 
+MIN_FACTOR_WEIGHTING_DATES = 40
+RECOMMENDED_FACTOR_WEIGHTING_DATES = 60
+
 
 @dataclass(frozen=True)
 class FactorEvidenceResult:
@@ -34,6 +37,7 @@ def analyze_factor_evidence(
     *,
     horizon: str = "5d",
     quantile_count: int = 5,
+    min_weighting_dates: int = MIN_FACTOR_WEIGHTING_DATES,
 ) -> FactorEvidenceResult:
     target_col = f"excess_ret_{horizon}" if f"excess_ret_{horizon}" in outcomes.columns else f"ret_{horizon}"
     benchmark_col = f"benchmark_ret_{horizon}"
@@ -62,6 +66,7 @@ def analyze_factor_evidence(
         grouped = frame.groupby("quantile")[target_col].agg(["count", "mean", "median"]).reset_index()
         monotonicity = _safe_spearman(grouped["quantile"], grouped["mean"]) if len(grouped) >= 2 else float("nan")
         turnover = _top_quantile_turnover(frame, quantile_count=quantile_count)
+        date_count = frame["signal_date"].nunique()
         rows.append(
             {
                 "factor": factor_name,
@@ -70,7 +75,9 @@ def analyze_factor_evidence(
                 "horizon": horizon,
                 "factor_evidence_version": FACTOR_EVIDENCE_VERSION,
                 "samples": len(frame),
-                "dates": frame["signal_date"].nunique(),
+                "dates": date_count,
+                "eligible_for_weighting": date_count >= max(1, int(min_weighting_dates)),
+                "weighting_status": _weighting_status(date_count, min_dates=min_weighting_dates),
                 "mean_ic": daily_ic.mean() if not daily_ic.empty else float("nan"),
                 "ic_std": daily_ic.std(ddof=0) if not daily_ic.empty else float("nan"),
                 "ic_positive_rate": (daily_ic > 0).mean() if not daily_ic.empty else float("nan"),
@@ -146,6 +153,14 @@ def _market_regime(value: object) -> str:
     return "震荡"
 
 
+def _weighting_status(date_count: int, *, min_dates: int) -> str:
+    if date_count < max(1, int(min_dates)):
+        return "样本积累中"
+    if date_count < RECOMMENDED_FACTOR_WEIGHTING_DATES:
+        return "允许候选验证，暂不正式调权"
+    return "可进入正式调权评审"
+
+
 def _safe_spearman(left: pd.Series, right: pd.Series) -> float:
     pair = pd.DataFrame({"left": left, "right": right}).dropna()
     if len(pair) < 2 or pair["left"].nunique() < 2 or pair["right"].nunique() < 2:
@@ -158,6 +173,7 @@ def _render_markdown(result: FactorEvidenceResult, *, horizon: str) -> str:
         f"# 因子证据报告 {horizon}",
         "",
         "只使用已经进入历史复盘事实表的字段，不接入新增网站。IC、分组收益、换手和市场环境稳定性需要共同判断。",
+        f"少于 {MIN_FACTOR_WEIGHTING_DATES} 个完整截面日期不得调权；达到 {RECOMMENDED_FACTOR_WEIGHTING_DATES} 个日期后才进入正式调权评审。",
         "",
         "## 汇总",
         "",

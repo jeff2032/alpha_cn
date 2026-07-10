@@ -509,7 +509,7 @@ def test_backfill_research_foundation_builds_signals_master_and_lifecycle_fields
     lifecycle_daily = warehouse_query("candidate_lifecycle_daily", limit=20, warehouse_dir=warehouse_dir)
     assert len(lifecycle_daily) == 2
     assert set(lifecycle_daily["candidate_model_version"]) == {"candidate-test-v2"}
-    assert set(lifecycle_daily["expected_horizon"]) == {"1-5d", "3-15d"}
+    assert set(lifecycle_daily["expected_horizon"]) == {"3-5d"}
 
 
 def test_sync_candidate_lifecycles_to_warehouse(tmp_path: Path) -> None:

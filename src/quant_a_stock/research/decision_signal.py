@@ -114,8 +114,23 @@ def _signal_row(row: pd.Series, *, target_date: str, plan_date: str) -> dict:
 
 
 def _signal_type_and_bucket(action_bucket: str, tier: str, risk_level: str) -> tuple[str, str]:
+    if tier == "B1" or action_bucket.startswith("移出-B1"):
+        return "avoid", "移出推荐"
     if "回避" in action_bucket or risk_level in {"中高", "高"}:
         return "avoid", "风险回避"
+    if not action_bucket:
+        if tier == "A2":
+            return "buy_watch", "主攻"
+        if tier == "A3":
+            return "buy_watch", "短线"
+        if tier == "B2":
+            return "upgrade_watch", "升级观察"
+    if tier == "A2" and action_bucket.startswith("主攻"):
+        return "buy_watch", "主攻"
+    if tier == "A3" and action_bucket.startswith("短线"):
+        return "buy_watch", "短线"
+    if tier == "B2" and action_bucket.startswith("升级"):
+        return "upgrade_watch", "升级观察"
     if action_bucket.startswith("主攻"):
         return "buy_watch", "主攻"
     if "A3" in action_bucket and "观察" in action_bucket:
@@ -131,9 +146,13 @@ def _expected_horizon(action_bucket: str, tier: str) -> str:
     if tier == "A1" or "A1" in action_bucket:
         return "10-30d"
     if tier == "A2" or "A2" in action_bucket:
-        return "3-15d"
+        return "3-5d"
     if tier == "A3" or "A3" in action_bucket:
-        return "1-10d"
+        return "1-3d"
+    if tier == "B2" or "B2" in action_bucket:
+        return "3-5d"
+    if tier == "B1":
+        return "0d"
     if "B2a" in action_bucket:
         return "3-10d"
     if "B2s" in action_bucket or "主线突发" in action_bucket:
@@ -201,7 +220,7 @@ def _observe_condition(signal_type: str, action_bucket: str, tier: str) -> str:
     if signal_type == "buy_watch":
         return "看开盘承接、回踩不破、量能不过热，优先等分歧确认。"
     if signal_type == "upgrade_watch":
-        return "看次日持续性、主题扩散、盘中承接和公告/情绪补足。"
+        return "限定 3-5 日观察升级；看主题扩散、盘中承接和公告/情绪补足。"
     if tier == "A1" or "A1" in action_bucket:
         return "看 10-30 日内是否补量、补主题、升级到 A2/A3。"
     return "看是否维持形态、主题和风险三项不恶化。"
@@ -213,7 +232,9 @@ def _invalid_condition(signal_type: str, action_bucket: str, tier: str) -> str:
     if tier == "A2" or "A2" in action_bucket:
         return "跌回突破区间且放量转弱；高开后放量滞涨；主线明显转弱。"
     if tier == "A3" or "A3" in action_bucket:
-        return "趋势承接失败、跌破关键均线且主线退潮；连续冲高回落。"
+        return "1-3 日未延续、趋势承接失败或连续冲高回落即退出。"
+    if tier == "B2" or "B2" in action_bucket:
+        return "3-5 日未升级到 A2/A3，或主题热度消退且没有补量/承接，即移出。"
     if "B2s" in action_bucket or "主线突发" in action_bucket:
         return "1-5 日没有持续性或次日低开低走，降级为普通观察。"
     if "B2a" in action_bucket or "B2b" in action_bucket:

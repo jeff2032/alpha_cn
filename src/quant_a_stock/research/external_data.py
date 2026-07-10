@@ -55,25 +55,33 @@ class ExternalFetchResult:
 
 
 RISK_EVENT_RULES: list[tuple[str, str, list[str]]] = [
-    ("退市/ST风险", "高", ["退市", "风险警示", "ST"]),
-    ("立案处罚", "高", ["立案", "调查", "处罚", "处分", "行政监管"]),
-    ("监管问询", "中高", ["问询", "监管函", "关注函", "警示函"]),
-    ("财务审计风险", "中高", ["会计差错", "更正", "非标", "保留意见", "无法表示意见", "审计意见"]),
-    ("业绩风险", "中高", ["预亏", "亏损", "业绩预告修正", "业绩预告更正", "大幅下降"]),
-    ("减持解禁", "中", ["减持", "解禁"]),
-    ("质押冻结", "中", ["质押", "冻结", "轮候冻结"]),
-    ("诉讼仲裁", "中", ["诉讼", "仲裁"]),
-    ("债务担保风险", "中", ["债务逾期", "担保逾期", "违规担保", "资金占用"]),
-    ("异常波动", "中", ["异常波动", "交易异常"]),
+    ("退市/ST风险", "高", [r"终止上市", r"退市风险警示", r"实施(?:其他)?风险警示", r"撤销退市风险警示未获"]),
+    (
+        "立案处罚",
+        "高",
+        [r"立案告知书", r"被立案调查", r"涉嫌.{0,20}违法.{0,20}立案", r"行政处罚(?:决定书|事先告知书)", r"纪律处分决定"],
+    ),
+    ("监管问询", "中高", [r"问询函", r"监管函", r"关注函", r"警示函", r"责令改正"]),
+    (
+        "财务审计风险",
+        "中高",
+        [r"前期会计差错更正", r"非标准审计意见", r"保留意见", r"无法表示意见", r"否定意见", r"审计机构辞任"],
+    ),
+    ("业绩风险", "中高", [r"预计亏损", r"业绩预告修正", r"业绩预告更正", r"净利润.{0,12}大幅下降"]),
+    ("减持解禁", "中", [r"减持计划", r"减持股份", r"限售股解禁", r"解除限售"]),
+    ("质押冻结", "中", [r"股份质押", r"司法冻结", r"轮候冻结"]),
+    ("诉讼仲裁", "中", [r"重大诉讼", r"重大仲裁", r"涉及诉讼", r"涉及仲裁"]),
+    ("债务担保风险", "中", [r"债务逾期", r"担保逾期", r"违规担保", r"违规占用", r"存在.{0,10}资金占用"]),
+    ("异常波动", "低", [r"股票交易异常波动", r"股票交易严重异常波动"]),
 ]
 
 SEVERITY_SCORE = {"高": 8.0, "中高": 5.0, "中": 3.0, "低": 1.0}
 
 
 def classify_risk_event(title: str) -> tuple[str, str, float]:
-    text = str(title or "")
-    for event_type, severity, keywords in RISK_EVENT_RULES:
-        if any(keyword in text for keyword in keywords):
+    text = re.sub(r"\s+", "", str(title or ""))
+    for event_type, severity, patterns in RISK_EVENT_RULES:
+        if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns):
             return event_type, severity, SEVERITY_SCORE[severity]
     return "", "", 0.0
 
@@ -133,7 +141,13 @@ def _risk_events_from_cninfo_frame(frame: pd.DataFrame, *, symbol: str) -> list[
     return rows
 
 
-def summarize_risk_events(events: pd.DataFrame) -> pd.DataFrame:
+def summarize_risk_events(
+    events: pd.DataFrame,
+    *,
+    as_of_date: str | None = None,
+    lookback_days: int = 120,
+    half_life_days: float = 30.0,
+) -> pd.DataFrame:
     if events.empty:
         return pd.DataFrame(
             columns=[
@@ -143,22 +157,60 @@ def summarize_risk_events(events: pd.DataFrame) -> pd.DataFrame:
                 "risk_event_score",
                 "high_risk_event_count",
                 "risk_event_types",
+                "latest_risk_event_date",
+                "risk_event_age_days",
             ]
         )
     frame = events.copy()
     frame["symbol"] = frame["symbol"].map(normalize_symbol)
-    frame["severity_score"] = pd.to_numeric(frame.get("severity_score", 0.0), errors="coerce").fillna(0.0)
-    frame["is_high"] = frame.get("severity", "").astype(str).isin(["高", "中高"])
+    frame["title"] = frame.get("title", "").fillna("").astype(str)
+    classified = frame["title"].map(classify_risk_event)
+    frame["event_type"] = classified.map(lambda item: item[0])
+    frame["severity"] = classified.map(lambda item: item[1])
+    frame["severity_score"] = classified.map(lambda item: item[2])
+    frame = frame[frame["event_type"].ne("")].copy()
+    if frame.empty:
+        return summarize_risk_events(pd.DataFrame())
+    date_values = frame["date"] if "date" in frame.columns else pd.Series(pd.NaT, index=frame.index)
+    frame["date"] = pd.to_datetime(date_values, errors="coerce").dt.normalize()
+    frame["dedupe_title"] = frame["title"].map(_normalize_event_title)
+    frame = frame.drop_duplicates(subset=["symbol", "date", "dedupe_title", "event_type"], keep="last")
+
+    if as_of_date:
+        as_of = pd.Timestamp(as_of_date).normalize()
+        frame = frame[(frame["date"].isna()) | (frame["date"] <= as_of)].copy()
+        frame["event_age_days"] = (as_of - frame["date"]).dt.days.fillna(0).clip(lower=0)
+        frame = frame[frame["event_age_days"] <= max(1, int(lookback_days))].copy()
+    else:
+        frame["event_age_days"] = 0
+    if frame.empty:
+        return summarize_risk_events(pd.DataFrame())
+
+    half_life = max(1.0, float(half_life_days))
+    frame["effective_score"] = frame["severity_score"] * (0.5 ** (frame["event_age_days"] / half_life))
+    frame = frame[frame["effective_score"] >= 0.5].copy()
+    if frame.empty:
+        return summarize_risk_events(pd.DataFrame())
+    frame["is_high"] = frame["severity"].eq("高") & frame["effective_score"].ge(4.0)
+    frame = frame.sort_values(["symbol", "date", "effective_score"], ascending=[True, False, False])
     grouped = frame.groupby("symbol", as_index=False).agg(
         risk_notice_count=("title", "count"),
-        risk_event_score=("severity_score", "sum"),
+        risk_event_score=("effective_score", "sum"),
         high_risk_event_count=("is_high", "sum"),
         risk_notice_titles=("title", lambda values: "；".join(values.astype(str).head(5))),
         risk_event_types=("event_type", lambda values: "；".join(dict.fromkeys(values.astype(str)))),
+        latest_risk_event_date=("date", "max"),
+        risk_event_age_days=("event_age_days", "min"),
     )
-    grouped["risk_event_score"] = grouped["risk_event_score"].clip(upper=30).round(2)
+    grouped["risk_event_score"] = grouped["risk_event_score"].clip(upper=20).round(2)
     grouped["high_risk_event_count"] = grouped["high_risk_event_count"].astype(int)
+    grouped["latest_risk_event_date"] = grouped["latest_risk_event_date"].dt.date.astype("string").fillna("")
+    grouped["risk_event_age_days"] = grouped["risk_event_age_days"].astype(int)
     return grouped
+
+
+def _normalize_event_title(title: str) -> str:
+    return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", str(title or "")).lower()
 
 
 def fetch_eastmoney_money_flow(

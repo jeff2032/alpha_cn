@@ -47,8 +47,8 @@ class ResearchCandidateConfig:
     trend_resume_bonus: float = 2.5
     theme_bonus_max: float = 8.0
     co_rise_bonus_max: float = 5.0
-    risk_notice_penalty_per_hit: float = 5.0
-    risk_notice_penalty_max: float = 20.0
+    risk_notice_penalty_per_hit: float = 1.0
+    risk_notice_penalty_max: float = 4.0
     ret20_hot_threshold: float = 0.15
     ret20_extreme_threshold: float = 0.30
     ret60_hot_threshold: float = 0.55
@@ -326,7 +326,9 @@ def build_research_candidates(
     output["risk_notice_penalty"] = output["risk_notice_count"].map(
         lambda count: min(config.risk_notice_penalty_max, count * config.risk_notice_penalty_per_hit)
     )
-    output["risk_event_penalty"] = output["risk_event_score"].map(lambda score: min(15.0, score))
+    output["risk_event_penalty"] = output["risk_event_score"].map(
+        lambda score: min(10.0, max(0.0, score) * 0.75)
+    )
     output["money_flow_bonus"] = output["money_flow_score"].map(lambda score: min(6.0, max(0.0, score) * 0.08))
     output["external_screen_bonus"] = output.apply(_external_screen_bonus, axis=1)
     output["total_penalty"] = (
@@ -622,14 +624,14 @@ def _risk_tags(row: pd.Series, config: ResearchCandidateConfig) -> list[str]:
     amount_ma20 = _safe_number(row.get("amount_ma20", 0.0))
     listing_days = _safe_number(row.get("listing_days", 0.0))
 
-    if risk_count >= 2:
-        tags.append("公告风险多项命中")
-    elif risk_count >= 1:
-        tags.append("公告风险命中")
     if high_risk_event_count >= 1:
         tags.append("巨潮高风险事件")
     elif risk_event_score >= 6:
         tags.append("巨潮风险事件")
+    elif risk_event_score >= 2:
+        tags.append("公告风险待核验")
+    if risk_count >= 2 and risk_event_score >= 4:
+        tags.append("公告风险多项命中")
     if total_penalty >= 15:
         tags.append("总扣分偏高")
     if ret20 >= config.ret20_extreme_threshold:
@@ -666,11 +668,11 @@ def _risk_tags(row: pd.Series, config: ResearchCandidateConfig) -> list[str]:
 def _risk_level(row: pd.Series, config: ResearchCandidateConfig) -> str:
     tags = _risk_tags(row, config)
     joined = "；".join(tags)
-    if any(key in joined for key in ("巨潮高风险事件", "公告风险多项命中", "次新样本不足", "成交额偏低")):
+    if any(key in joined for key in ("巨潮高风险事件", "次新样本不足", "成交额偏低")):
         return "高"
-    if any(key in joined for key in ("巨潮风险事件", "公告风险命中", "总扣分偏高", "20日涨幅过热", "60日涨幅过热", "量能极端放大")):
+    if any(key in joined for key in ("巨潮风险事件", "总扣分偏高", "20日涨幅过热", "60日涨幅过热", "量能极端放大")):
         return "中高"
-    if any(key in joined for key in ("偏热", "位置偏高", "量价共振过热", "趋势高位拥挤", "放量回撤", "主力资金连续流出")):
+    if any(key in joined for key in ("公告风险", "偏热", "位置偏高", "量价共振过热", "趋势高位拥挤", "放量回撤", "主力资金连续流出")):
         return "中"
     return "低"
 
@@ -928,22 +930,24 @@ def _action_bucket(row: pd.Series) -> str:
     total_penalty = _safe_number(row.get("total_penalty", 0.0))
     if risk_level == "高" or total_penalty >= 18:
         return "回避-风险优先"
+    if tier == "B1":
+        return "移出-B1无持续性"
     if tier == "A2" and _is_risk_clean(row):
         return "主攻-A2启动确认"
     if _is_a3_actionable(row):
-        return "主攻-A3趋势延续"
+        return "短线-A3一三日确认"
     b2_subtype = str(row.get("b2_subtype", ""))
     if b2_subtype == "B2a":
-        return "观察-B2a主线扩散待升级"
+        return "升级-B2三五日观察"
     if b2_subtype == "B2s" or _is_mainline_surge_replenish(row):
-        return "观察-B2s主线突发待确认"
+        return "升级-B2三五日观察"
     if b2_subtype == "B2b":
         return "观察-B2b主题待确认"
     if tier == "A1":
         return "观察-A1低位潜伏"
     if tier == "A3":
         return "观察-A3高波动"
-    if tier in {"B1", "B2"}:
+    if tier == "B2":
         return "观察-B级候选"
     return "观察-低优先级"
 
@@ -951,7 +955,9 @@ def _action_bucket(row: pd.Series) -> str:
 def _action_rank(bucket: str) -> int:
     return {
         "主攻-A2启动确认": 1,
-        "主攻-A3趋势延续": 2,
+        "短线-A3一三日确认": 2,
+        "升级-B2三五日观察": 3,
+        "主攻-A3趋势延续": 3,
         "观察-B2a主线扩散待升级": 3,
         "补票-B2a主线扩散": 3,
         "观察-B2s主线突发待确认": 4,
@@ -961,6 +967,7 @@ def _action_rank(bucket: str) -> int:
         "观察-A1低位潜伏": 6,
         "观察-A3高波动": 7,
         "观察-B级候选": 8,
+        "移出-B1无持续性": 9,
         "观察-低优先级": 9,
         "回避-风险优先": 9,
     }.get(str(bucket), 9)
@@ -970,9 +977,11 @@ def _upgrade_hint(row: pd.Series) -> str:
     bucket = str(row.get("action_bucket", ""))
     risk_tags = str(row.get("risk_tags", "") or "无明显风险")
     if bucket == "主攻-A2启动确认":
-        return "启动确认主攻：看突破后承接、回踩不破和量能不过热。"
-    if bucket == "主攻-A3趋势延续":
-        return "趋势主攻：只看分歧低吸或强承接，不追高开加速。"
+        return "A2 主攻：按 3-5 日验证，观察突破承接、回踩不破和量能不过热。"
+    if bucket in {"短线-A3一三日确认", "主攻-A3趋势延续"}:
+        return "A3 短线：只按 1-3 日看分歧承接，不作为默认中线持有。"
+    if bucket == "升级-B2三五日观察":
+        return "B2 升级观察：3-5 日内升级到 A2/A3 才继续，否则移出。"
     if bucket in {"观察-B2a主线扩散待升级", "补票-B2a主线扩散"}:
         return "B2a 主线扩散观察：主题和资金已确认，但不是直接买点；先核验公告、盘中承接和次日持续性，满足条件再升级。"
     if bucket in {"观察-B2s主线突发待确认", "补票-主线突发"}:
@@ -987,6 +996,8 @@ def _upgrade_hint(row: pd.Series) -> str:
         return "趋势高波动观察：先处理过热/高位风险，再考虑低吸。"
     if bucket == "回避-风险优先":
         return f"风险优先回避：{risk_tags}。"
+    if bucket == "移出-B1无持续性":
+        return "B1 已移出推荐层，仅保留为内部对照样本。"
     return "观察为主：等待主线、量能或情绪进一步确认。"
 
 
