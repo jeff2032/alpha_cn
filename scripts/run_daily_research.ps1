@@ -1155,6 +1155,20 @@ try {
         "--fundamental-top", "20",
         "--no-write-warehouse"
     )
+    $shadowPlanPath = Join-Path $ProjectRoot "data/shadow/plans/plan_date=$planDate/plan.csv"
+    if (Test-Path -LiteralPath $shadowPlanPath) {
+        Write-Step "Shadow plan already frozen, skip: $shadowPlanPath"
+    } else {
+        Invoke-Quant @(
+            "shadow-freeze",
+            "--target-date", $targetDate,
+            "--plan-date", $planDate,
+            "--top", "10",
+            "--max-single-weight", "0.15",
+            "--max-total-weight", "0.80",
+            "--max-industry-weight", "0.30"
+        )
+    }
     $trackingSince = ([datetime]::Parse($targetDate)).AddDays(-45).ToString("yyyy-MM-dd")
     Invoke-Quant @(
         "research-review",

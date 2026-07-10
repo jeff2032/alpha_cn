@@ -63,6 +63,9 @@ MIDDLE_LAYER_TABLES = [
     "money_flow_daily",
     "external_screen_daily",
     "security_master_daily",
+    "factor_evidence_daily",
+    "factor_quantile_daily",
+    "factor_regime_daily",
 ]
 
 WAREHOUSE_TABLES = [
@@ -771,6 +774,59 @@ def sync_candidate_lifecycles_to_warehouse(
         parquet_root=parquet,
         ingested=ingested,
         status=status,
+    )
+
+
+def sync_factor_evidence_to_warehouse(
+    *,
+    summary: pd.DataFrame,
+    quantiles: pd.DataFrame,
+    regimes: pd.DataFrame,
+    target_date: str,
+    warehouse_dir: Path | None = None,
+    run_id: str | None = None,
+) -> WarehouseIngestResult:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    resolved_run_id = run_id or f"factor_evidence_{target_date}_{stamp}"
+    ingested_at = datetime.now().isoformat(timespec="seconds")
+    rows = []
+    for table_name, frame in (
+        ("factor_evidence_daily", summary),
+        ("factor_quantile_daily", quantiles),
+        ("factor_regime_daily", regimes),
+    ):
+        output = frame.copy()
+        output["target_date"] = target_date
+        output["warehouse_run_id"] = resolved_run_id
+        output["warehouse_target_date"] = target_date
+        output["warehouse_source_path"] = "generated:factor_evidence"
+        output["warehouse_ingested_at"] = ingested_at
+        _write_parquet(
+            output,
+            table_name,
+            target_date=target_date,
+            run_id=resolved_run_id,
+            warehouse_dir=warehouse_dir,
+        )
+        rows.append(
+            _report_row(
+                resolved_run_id,
+                target_date,
+                table_name,
+                None,
+                len(output),
+                "derived" if not output.empty else "empty",
+                ingested_at,
+            )
+        )
+    refresh_warehouse_views(warehouse_dir=warehouse_dir)
+    return WarehouseIngestResult(
+        run_id=resolved_run_id,
+        target_date=target_date,
+        db_path=warehouse_db_path(warehouse_dir),
+        parquet_root=parquet_root(warehouse_dir),
+        ingested=pd.DataFrame(rows),
+        status=warehouse_status(warehouse_dir=warehouse_dir),
     )
 
 

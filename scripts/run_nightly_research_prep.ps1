@@ -634,6 +634,16 @@ try {
         "--target-date", $script:ResolvedTargetDate,
         "--parameters-json", $manifestParameters
     )
+    Invoke-QuantStep -Name "影子组合收盘估值" -Arguments @(
+        "shadow-evaluate",
+        "--until", $script:ResolvedTargetDate
+    )
+    Invoke-QuantStep -Name "现有因子证据更新" -Arguments @(
+        "factor-evidence",
+        "--until", $script:ResolvedTargetDate,
+        "--horizon", "5d",
+        "--quantiles", "5"
+    )
 
     Save-PrepReport -Status "成功"
     Write-Step "Nightly research prep completed. Log: $script:LogPath"

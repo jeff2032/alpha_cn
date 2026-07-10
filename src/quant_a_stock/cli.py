@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 import json
 from pathlib import Path
 from time import sleep
@@ -12,12 +13,17 @@ from quant_a_stock.backtest.engine import run_backtest
 from quant_a_stock.backtest.engine import summarize_equity_curve
 from quant_a_stock.backtest.optimize import optimize_sma_trend_filter
 from quant_a_stock.backtest.research_portfolio import ResearchPortfolioConfig
+from quant_a_stock.backtest.research_portfolio import build_research_factor_panel
 from quant_a_stock.backtest.research_portfolio import optimize_research_portfolio
 from quant_a_stock.backtest.research_portfolio import run_research_portfolio_backtest
+from quant_a_stock.backtest.shadow import evaluate_shadow_portfolio
+from quant_a_stock.backtest.shadow import freeze_shadow_plan
+from quant_a_stock.backtest.shadow import save_shadow_plan
+from quant_a_stock.backtest.walk_forward import run_walk_forward_validation
 from quant_a_stock.backtest.report import save_report
 from quant_a_stock.backtest.validate import validate_strategy
 from quant_a_stock.cleaning.pipeline import clean_candles
-from quant_a_stock.config import DEFAULT_PATHS
+from quant_a_stock.config import BacktestConfig, DEFAULT_PATHS
 from quant_a_stock.data.akshare_client import fetch_daily
 from quant_a_stock.data.cache import daily_cache_path, load_daily_cache, save_daily_cache
 from quant_a_stock.data.calendar import resolve_cached_trading_date
@@ -49,6 +55,8 @@ from quant_a_stock.research.external_data import summarize_risk_events
 from quant_a_stock.research.fundamental_watchlist import build_fundamental_watchlist
 from quant_a_stock.research.fundamental_watchlist import load_holdings_file
 from quant_a_stock.research.fundamental_watchlist import save_fundamental_watchlist_context
+from quant_a_stock.research.factor_evidence import analyze_factor_evidence
+from quant_a_stock.research.factor_evidence import save_factor_evidence
 from quant_a_stock.research.lifecycle import build_candidate_lifecycle_tracking
 from quant_a_stock.research.lifecycle import save_candidate_lifecycle_reports
 from quant_a_stock.research.pipeline import ResearchPipelineConfig
@@ -80,6 +88,7 @@ from quant_a_stock.warehouse import backfill_research_snapshots
 from quant_a_stock.warehouse import ingest_latest_reports
 from quant_a_stock.warehouse import sync_candidate_lifecycles_to_warehouse
 from quant_a_stock.warehouse import sync_daily_candles_to_warehouse
+from quant_a_stock.warehouse import sync_factor_evidence_to_warehouse
 from quant_a_stock.warehouse import sync_stock_universe_to_warehouse
 from quant_a_stock.warehouse import warehouse_query as run_warehouse_query
 from quant_a_stock.warehouse import warehouse_review as build_warehouse_review
@@ -522,12 +531,13 @@ def _run_strategy_rows(
     *,
     strategy_name: str,
     strategy_params: dict[str, int | float],
+    backtest_config: BacktestConfig | None = None,
 ) -> list[dict]:
     rows: list[dict] = []
     curves: list[pd.DataFrame] = []
     for symbol, candles in candles_by_symbol.items():
         signal = generate_strategy_signals(strategy_name, candles, **strategy_params)
-        result = run_backtest(candles, signal, symbol=symbol)
+        result = run_backtest(candles, signal, symbol=symbol, config=backtest_config or BacktestConfig())
         metrics = {"strategy": strategy_name, **result.metrics}
         rows.append(metrics)
         curve = result.equity_curve[
@@ -969,6 +979,12 @@ def backtest(args: argparse.Namespace) -> None:
         candles_by_symbol,
         strategy_name=args.strategy,
         strategy_params=_strategy_params(args),
+        backtest_config=BacktestConfig(
+            min_commission=args.min_commission,
+            slippage_bps=args.slippage_bps,
+            lot_size=args.lot_size,
+            execution_model=args.execution_model,
+        ),
     )
 
     report_path = save_report(rows, report_type="backtest")
@@ -1574,6 +1590,9 @@ def research_backtest(args: argparse.Namespace) -> None:
             require_positive_trend_slope=args.require_positive_trend_slope,
             rebalance_frequency=args.rebalance_frequency,
             allow_stages=tuple(args.stages),
+            max_single_weight=args.max_single_weight,
+            max_total_weight=args.max_total_weight,
+            max_industry_weight=args.max_industry_weight,
         ),
     )
 
@@ -1626,6 +1645,120 @@ def research_optimize(args: argparse.Namespace) -> None:
     else:
         print(result.head(args.display_top).to_string(index=False))
     print(f"优化报告: {report_path}")
+
+
+def research_walk_forward(args: argparse.Namespace) -> None:
+    symbols = _research_backtest_symbols(args)
+    if args.limit:
+        symbols = symbols[: args.limit]
+    candles = _load_available_candles(symbols)
+    factors = build_research_factor_panel(candles)
+    configs = [
+        ResearchPortfolioConfig(
+            top_n=top_n,
+            min_score=min_score,
+            max_ret_20=max_ret,
+            min_amount_ma20=args.min_amount_ma20,
+            rebalance_frequency=frequency,
+            max_single_weight=args.max_single_weight,
+            max_total_weight=args.max_total_weight,
+            max_industry_weight=args.max_industry_weight,
+        )
+        for top_n in _parse_csv_ints(args.top_ns)
+        for min_score in _parse_csv_floats(args.min_scores)
+        for max_ret in _parse_csv_floats(args.max_ret_20s)
+        for frequency in args.rebalance_frequencies
+    ]
+    result = run_walk_forward_validation(
+        candles,
+        factors,
+        candidate_configs=configs,
+        train_days=args.train_days,
+        test_days=args.test_days,
+        step_days=args.step_days,
+        embargo_days=args.embargo_days,
+    )
+    folds_path = save_report(result.folds.to_dict("records"), report_type="research_walk_forward_folds")
+    aggregate_path = save_report(result.aggregate.to_dict("records"), report_type="research_walk_forward_summary")
+    print(result.aggregate.to_string(index=False) if not result.aggregate.empty else "没有足够日期形成样本外折。")
+    print(f"样本外折: {folds_path}")
+    print(f"汇总: {aggregate_path}")
+
+
+def factor_evidence(args: argparse.Namespace) -> None:
+    outcomes = run_warehouse_query(
+        "research_outcome_daily",
+        since=args.since,
+        until=args.until,
+        limit=5000,
+        warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
+    )
+    result = analyze_factor_evidence(outcomes, horizon=args.horizon, quantile_count=args.quantiles)
+    paths = save_factor_evidence(result, horizon=args.horizon)
+    target_date = args.until or (
+        pd.to_datetime(outcomes["signal_date"]).max().date().isoformat() if not outcomes.empty else datetime.now().date().isoformat()
+    )
+    if args.write_warehouse:
+        sync_factor_evidence_to_warehouse(
+            summary=result.summary,
+            quantiles=result.quantiles,
+            regimes=result.regimes,
+            target_date=target_date,
+            warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
+        )
+    print(result.summary.to_string(index=False) if not result.summary.empty else "因子历史字段或样本不足。")
+    print(f"因子汇总: {paths[0]}")
+    print(f"分组收益: {paths[1]}")
+    print(f"环境稳定性: {paths[2]}")
+    print(f"中文报告: {paths[3]}")
+
+
+def shadow_freeze(args: argparse.Namespace) -> None:
+    candidates = load_candidates_for_decision_signals(
+        target_date=args.target_date,
+        research_report=Path(args.research_report) if args.research_report else None,
+    )
+    signals = build_decision_signals(
+        candidates,
+        target_date=args.target_date,
+        plan_date=args.plan_date,
+        top=args.signal_top,
+    )
+    plan = freeze_shadow_plan(
+        signals,
+        target_date=args.target_date,
+        plan_date=args.plan_date,
+        top=args.top,
+        max_single_weight=args.max_single_weight,
+        max_total_weight=args.max_total_weight,
+        max_industry_weight=args.max_industry_weight,
+    )
+    path = save_shadow_plan(
+        plan,
+        plan_date=args.plan_date,
+        root=Path(args.plans_root) if args.plans_root else None,
+        overwrite=args.overwrite,
+    )
+    print(plan.to_string(index=False) if not plan.empty else "本次没有可冻结标的。")
+    print(f"冻结计划: {path}")
+
+
+def shadow_evaluate(args: argparse.Namespace) -> None:
+    result = evaluate_shadow_portfolio(
+        plans_root=Path(args.plans_root) if args.plans_root else None,
+        cache_dir=Path(args.cache_dir) if args.cache_dir else None,
+        until=args.until,
+    )
+    equity_path = save_report(result.equity.to_dict("records"), report_type="shadow_portfolio_equity")
+    trades_path = save_report(result.trades.to_dict("records"), report_type="shadow_portfolio_trades")
+    positions_path = save_report(result.positions.to_dict("records"), report_type="shadow_portfolio_positions")
+    if result.equity.empty:
+        print("还没有可评价的冻结计划和行情。")
+    else:
+        print(result.equity.tail(10).to_string(index=False))
+    print(f"净值: {equity_path}")
+    print(f"成交: {trades_path}")
+    print(f"持仓: {positions_path}")
 
 
 def snapshot_research(args: argparse.Namespace) -> None:
@@ -2347,6 +2480,10 @@ def build_parser() -> argparse.ArgumentParser:
     bt.add_argument("--strategy", default=STRATEGY_NAME)
     bt.add_argument("--symbols", nargs="+", required=True)
     bt.add_argument("--timeframe", default="1d")
+    bt.add_argument("--execution-model", choices=["realistic", "simple"], default="realistic")
+    bt.add_argument("--min-commission", type=float, default=5.0)
+    bt.add_argument("--slippage-bps", type=float, default=3.0)
+    bt.add_argument("--lot-size", type=int, default=100)
     _add_strategy_arguments(bt)
     bt.set_defaults(func=backtest)
 
@@ -2504,6 +2641,9 @@ def build_parser() -> argparse.ArgumentParser:
     research_bt.add_argument("--filter-max-ret-20", type=float, default=0.25)
     research_bt.add_argument("--require-positive-trend-slope", action=argparse.BooleanOptionalAction, default=True)
     research_bt.add_argument("--rebalance-frequency", choices=["D", "W", "M"], default="W")
+    research_bt.add_argument("--max-single-weight", type=float, default=0.15)
+    research_bt.add_argument("--max-total-weight", type=float, default=0.80)
+    research_bt.add_argument("--max-industry-weight", type=float, default=0.30)
     research_bt.add_argument("--limit", type=int, default=None)
     research_bt.set_defaults(func=research_backtest)
 
@@ -2527,6 +2667,57 @@ def build_parser() -> argparse.ArgumentParser:
     research_opt.add_argument("--limit", type=int, default=None)
     research_opt.add_argument("--display-top", type=int, default=20)
     research_opt.set_defaults(func=research_optimize)
+
+    walk = subparsers.add_parser("research-walk-forward", help="训练窗选参、测试窗记分的 walk-forward 样本外验证")
+    walk.add_argument("--symbols", nargs="+", default=None)
+    walk.add_argument("--universe-file", default=None)
+    walk.add_argument("--markets", nargs="+", default=["sh", "sz"])
+    walk.add_argument("--include-st", action="store_true")
+    walk.add_argument("--years", type=int, default=3)
+    walk.add_argument("--since", default=None)
+    walk.add_argument("--until", default=None)
+    walk.add_argument("--top-ns", default="5,10,20")
+    walk.add_argument("--min-scores", default="45,50,55")
+    walk.add_argument("--max-ret-20s", default="0.15,0.20,0.25")
+    walk.add_argument("--rebalance-frequencies", nargs="+", default=["W", "M"])
+    walk.add_argument("--train-days", type=int, default=252)
+    walk.add_argument("--test-days", type=int, default=63)
+    walk.add_argument("--step-days", type=int, default=63)
+    walk.add_argument("--embargo-days", type=int, default=5)
+    walk.add_argument("--min-amount-ma20", type=float, default=100_000_000.0)
+    walk.add_argument("--max-single-weight", type=float, default=0.15)
+    walk.add_argument("--max-total-weight", type=float, default=0.80)
+    walk.add_argument("--max-industry-weight", type=float, default=0.30)
+    walk.add_argument("--limit", type=int, default=None)
+    walk.set_defaults(func=research_walk_forward)
+
+    factor = subparsers.add_parser("factor-evidence", help="计算现有因子的 IC、分组收益、换手和环境稳定性")
+    factor.add_argument("--since", default=None)
+    factor.add_argument("--until", default=None)
+    factor.add_argument("--horizon", choices=["1d", "3d", "5d", "10d", "15d", "20d", "30d"], default="5d")
+    factor.add_argument("--quantiles", type=int, default=5)
+    factor.add_argument("--warehouse-dir", default=None)
+    factor.add_argument("--write-warehouse", action=argparse.BooleanOptionalAction, default=True)
+    factor.set_defaults(func=factor_evidence)
+
+    freeze = subparsers.add_parser("shadow-freeze", help="开盘前冻结 5-10 只影子组合计划")
+    freeze.add_argument("--target-date", required=True)
+    freeze.add_argument("--plan-date", required=True)
+    freeze.add_argument("--research-report", default=None)
+    freeze.add_argument("--plans-root", default=None)
+    freeze.add_argument("--signal-top", type=int, default=80)
+    freeze.add_argument("--top", type=int, default=10)
+    freeze.add_argument("--max-single-weight", type=float, default=0.15)
+    freeze.add_argument("--max-total-weight", type=float, default=0.80)
+    freeze.add_argument("--max-industry-weight", type=float, default=0.30)
+    freeze.add_argument("--overwrite", action="store_true")
+    freeze.set_defaults(func=shadow_freeze)
+
+    shadow = subparsers.add_parser("shadow-evaluate", help="按真实开盘成交规则重放影子组合并输出净值")
+    shadow.add_argument("--plans-root", default=None)
+    shadow.add_argument("--cache-dir", default=None)
+    shadow.add_argument("--until", default=None)
+    shadow.set_defaults(func=shadow_evaluate)
 
     snapshot = subparsers.add_parser("snapshot-research", help="归档每日研究报告快照")
     snapshot.add_argument("--target-date", default=None)

@@ -232,6 +232,8 @@ python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --to
 
 日常选股流程见 [docs/DAILY_RESEARCH.md](G:/OwnProject/alpha_cn/docs/DAILY_RESEARCH.md)。主要看 `daily_research_summary_*.md`，它会把市场温度、主线、候选分层、持续性和风险提醒合到一份中文报告里。
 
+真实成交、walk-forward、因子证据和影子组合操作见 [docs/RESEARCH_VALIDATION.md](G:/OwnProject/alpha_cn/docs/RESEARCH_VALIDATION.md)。
+
 ## 项目结构
 
 ```text

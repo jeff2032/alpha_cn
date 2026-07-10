@@ -21,6 +21,9 @@ class ResearchPortfolioConfig:
     require_positive_trend_slope: bool = True
     rebalance_frequency: str = "D"
     allow_stages: tuple[str, ...] = ("watch", "near_breakout")
+    max_single_weight: float = 0.15
+    max_total_weight: float = 0.80
+    max_industry_weight: float = 0.30
 
 
 @dataclass(frozen=True)
@@ -40,8 +43,11 @@ def run_research_portfolio_backtest(
     setup_config: BaseBreakoutSetupConfig = BaseBreakoutSetupConfig(),
     portfolio_config: ResearchPortfolioConfig = ResearchPortfolioConfig(),
     backtest_config: BacktestConfig = DEFAULT_BACKTEST_CONFIG,
+    industry_by_symbol: dict[str, str] | None = None,
 ) -> ResearchPortfolioBacktestResult:
     factors = build_research_factor_panel(candles_by_symbol, setup_config=setup_config)
+    if industry_by_symbol and not factors.empty:
+        factors["industry"] = factors["symbol"].map(industry_by_symbol).fillna("")
     return run_research_portfolio_backtest_from_factors(
         candles_by_symbol,
         factors,
@@ -358,11 +364,19 @@ def _select_holdings(
     rebalance_dates = _rebalance_dates(candidates["timestamp"].drop_duplicates().sort_values(), config.rebalance_frequency)
     rows = []
     for timestamp, group in candidates[candidates["timestamp"].isin(rebalance_dates)].groupby("timestamp"):
-        selected = group.sort_values(["score", "volume_ratio"], ascending=[False, False]).head(config.top_n)
-        if selected.empty:
+        ranked = group.sort_values(["score", "volume_ratio"], ascending=[False, False]).head(config.top_n)
+        if ranked.empty:
             continue
-        weight = 1.0 / len(selected)
-        for rank, (_, row) in enumerate(selected.iterrows(), start=1):
+        base_weight = min(config.max_single_weight, config.max_total_weight / max(1, config.top_n))
+        total_weight = 0.0
+        industry_weights: dict[str, float] = {}
+        for rank, (_, row) in enumerate(ranked.iterrows(), start=1):
+            industry = str(row.get("industry", "") or "")
+            weight = min(base_weight, config.max_total_weight - total_weight)
+            if industry:
+                weight = min(weight, config.max_industry_weight - industry_weights.get(industry, 0.0))
+            if weight <= 1e-9:
+                continue
             rows.append(
                 {
                     "timestamp": timestamp,
@@ -371,8 +385,14 @@ def _select_holdings(
                     "rank": rank,
                     "score": row["score"],
                     "stage": row["stage"],
+                    "industry": industry,
                 }
             )
+            total_weight += weight
+            if industry:
+                industry_weights[industry] = industry_weights.get(industry, 0.0) + weight
+            if total_weight >= config.max_total_weight - 1e-9:
+                break
     return pd.DataFrame(rows)
 
 

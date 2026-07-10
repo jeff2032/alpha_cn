@@ -25,10 +25,13 @@ class BacktestConfig:
     sell_commission_rate: float = 0.0003
     stamp_tax_rate: float = 0.0005
     transfer_fee_rate: float = 0.0
+    min_commission: float = 5.0
+    slippage_bps: float = 3.0
+    lot_size: int = 100
     trade_on_next_bar: bool = True
     t_plus_1: bool = True
+    execution_model: str = "realistic"
 
 
 DEFAULT_PATHS = ProjectPaths()
 DEFAULT_BACKTEST_CONFIG = BacktestConfig()
-

@@ -9,6 +9,7 @@ from quant_a_stock.warehouse import backfill_research_snapshots
 from quant_a_stock.warehouse import ingest_latest_reports
 from quant_a_stock.warehouse import sync_candidate_lifecycles_to_warehouse
 from quant_a_stock.warehouse import sync_daily_candles_to_warehouse
+from quant_a_stock.warehouse import sync_factor_evidence_to_warehouse
 from quant_a_stock.warehouse import sync_stock_universe_to_warehouse
 from quant_a_stock.warehouse import warehouse_query
 from quant_a_stock.warehouse import warehouse_review
@@ -550,3 +551,18 @@ def test_sync_candidate_lifecycles_to_warehouse(tmp_path: Path) -> None:
     assert lifecycle_rows == 1
     assert daily_rows == 1
     assert result.ingested["row_count"].sum() == 2
+
+
+def test_sync_factor_evidence_to_warehouse(tmp_path: Path) -> None:
+    result = sync_factor_evidence_to_warehouse(
+        summary=pd.DataFrame([{"factor": "低位程度", "mean_ic": 0.05}]),
+        quantiles=pd.DataFrame([{"factor": "低位程度", "quantile": 5, "avg_excess_ret": 0.02}]),
+        regimes=pd.DataFrame([{"factor": "低位程度", "market_regime": "震荡", "avg_excess_ret": 0.01}]),
+        target_date="2026-07-09",
+        warehouse_dir=tmp_path / "warehouse",
+        run_id="factor-test",
+    )
+
+    assert result.ingested["row_count"].sum() == 3
+    status = warehouse_status(warehouse_dir=tmp_path / "warehouse")
+    assert status.loc[status["table"] == "factor_evidence_daily", "rows"].iloc[0] == 1

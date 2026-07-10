@@ -72,6 +72,20 @@ def test_backtest_uses_shifted_signal_and_costs() -> None:
     result = run_backtest(candles, signal, symbol="510300", config=config)
 
     assert result.equity_curve.loc[1, "position"] == 0
-    assert result.equity_curve.loc[2, "position"] == 1
+    assert 0.95 < result.equity_curve.loc[2, "position"] < 1
+    assert result.equity_curve.loc[2, "shares"] % 100 == 0
+    assert result.equity_curve.loc[2, "commission"] >= 5
     assert result.equity_curve["cost"].sum() > 0
     assert result.metrics["trades"] == 1
+
+
+def test_realistic_backtest_blocks_limit_up_buy() -> None:
+    candles = _sample_candles(8)
+    candles.loc[2, ["open", "high", "low", "close"]] = candles.loc[1, "close"] * 1.10
+    signal = pd.Series([0, 1] + [1] * 6)
+
+    result = run_backtest(candles, signal, symbol="000001")
+
+    assert result.equity_curve.loc[2, "shares"] == 0
+    assert result.equity_curve.loc[2, "blocked_reason"] == "涨停不可买入"
+    assert result.metrics["blocked_trades"] >= 1

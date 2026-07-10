@@ -13,6 +13,7 @@ from quant_a_stock.research.candidates import ResearchCandidateConfig
 from quant_a_stock.research.version import CANDIDATE_MODEL_VERSION
 from quant_a_stock.research.version import DECISION_SIGNAL_VERSION
 from quant_a_stock.research.version import FACTOR_SCHEMA_VERSION
+from quant_a_stock.research.version import FACTOR_EVIDENCE_VERSION
 from quant_a_stock.research.version import FUNDAMENTAL_WATCHLIST_VERSION
 from quant_a_stock.research.version import WAREHOUSE_SCHEMA_VERSION
 
@@ -55,6 +56,7 @@ def default_research_parameters() -> dict[str, object]:
         "candidate_config": asdict(ResearchCandidateConfig()),
         "candidate_model_version": CANDIDATE_MODEL_VERSION,
         "factor_schema_version": FACTOR_SCHEMA_VERSION,
+        "factor_evidence_version": FACTOR_EVIDENCE_VERSION,
         "decision_signal_version": DECISION_SIGNAL_VERSION,
         "fundamental_watchlist_version": FUNDAMENTAL_WATCHLIST_VERSION,
         "warehouse_schema_version": WAREHOUSE_SCHEMA_VERSION,
