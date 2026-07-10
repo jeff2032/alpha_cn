@@ -79,6 +79,7 @@ def test_build_research_review_summarizes_candidates_and_missed_movers(tmp_path,
     assert "action_bucket" in review.details.columns
     assert "preferred_ret" in review.details.columns
     assert "risk_tags" in review.details.columns
+    assert "outcome_tags" in review.details.columns
     buckets = dict(zip(review.details["symbol"], review.details["model_bucket"]))
     assert buckets["000001"] == "A1/A2_early_setup"
     assert buckets["000002"] == "B_watchlist"
@@ -126,6 +127,28 @@ def test_build_research_review_summarizes_candidates_and_missed_movers(tmp_path,
     assert "亏损样本归因" in markdown
     assert "明显错过样本和风险提示" in markdown
     assert "risk_tags" in markdown
+
+
+def test_outcome_path_tags_do_not_change_pretrade_risk_level() -> None:
+    row = pd.Series(
+        {
+            "risk_level": "低",
+            "risk_tags": "",
+            "ret_20_pct": 0.02,
+            "ret_60_pct": 0.05,
+            "volume_ratio": 1.1,
+            "monthly_position_pct": 0.4,
+            "price_position_120_pct": 0.4,
+        }
+    )
+    outcome = {"next_low_ret": -0.08, "next_high_ret": 0.06, "next_ret": -0.01}
+
+    risk_tags = review_module._candidate_risk_tags(row)
+    outcome_tags = review_module._candidate_outcome_tags(outcome)
+
+    assert risk_tags == []
+    assert review_module._candidate_risk_level(risk_tags) == "低"
+    assert outcome_tags == ["次日回撤超5%", "冲高回落"]
 
 
 def _write_daily(path, symbol: str, closes: list[float]) -> None:

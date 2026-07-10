@@ -149,7 +149,8 @@ def build_research_review(
             action_bucket = _clean_text(row.get("action_bucket", "")) or _fallback_action_bucket(row["research_tier"])
             model_bucket = _model_bucket(row["research_tier"], action_bucket)
             preferred = _preferred_outcome(row["research_tier"], outcome)
-            risk_tags = _merge_tags(_split_tags(row.get("risk_tags", "")), _candidate_risk_tags(row, outcome))
+            risk_tags = _merge_tags(_split_tags(row.get("risk_tags", "")), _candidate_risk_tags(row))
+            outcome_tags = _candidate_outcome_tags(outcome)
             risk_level = _merge_risk_level(row.get("risk_level", ""), _candidate_risk_level(risk_tags))
             detail_rows.append(
                 {
@@ -184,6 +185,7 @@ def build_research_review(
                     "risk_level": risk_level,
                     "risk_tags": "；".join(risk_tags) if risk_tags else "无明显风险",
                     "primary_risk_tag": risk_tags[0] if risk_tags else "无明显风险",
+                    "outcome_tags": "；".join(outcome_tags) if outcome_tags else "无明显路径风险",
                     "score": _number(row.get("research_score", row.get("score", 0.0))),
                     "setup_phase": row.get("setup_phase", ""),
                     "stage": row.get("stage", ""),
@@ -915,7 +917,7 @@ def _outcome_label(preferred: dict) -> str:
     return "neutral"
 
 
-def _candidate_risk_tags(row: pd.Series, outcome: dict) -> list[str]:
+def _candidate_risk_tags(row: pd.Series) -> list[str]:
     tags: list[str] = []
     if _number(row.get("risk_notice_count", 0.0)) > 0:
         tags.append("公告风险命中")
@@ -934,6 +936,11 @@ def _candidate_risk_tags(row: pd.Series, outcome: dict) -> list[str]:
     amount_ma20 = _number(row.get("amount_ma20", 0.0))
     if amount_ma20 and amount_ma20 < 100_000_000:
         tags.append("成交额偏低")
+    return tags
+
+
+def _candidate_outcome_tags(outcome: dict) -> list[str]:
+    tags: list[str] = []
     if _number(outcome.get("next_low_ret", 0.0)) <= -0.05:
         tags.append("次日回撤超5%")
     if _number(outcome.get("next_high_ret", 0.0)) >= 0.05 and _number(outcome.get("next_ret", 0.0)) <= 0:
