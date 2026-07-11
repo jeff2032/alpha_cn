@@ -20,11 +20,12 @@ from quant_a_stock.backtest.shadow import backfill_shadow_plans
 from quant_a_stock.backtest.shadow import evaluate_shadow_portfolio
 from quant_a_stock.backtest.shadow import freeze_shadow_plan
 from quant_a_stock.backtest.shadow import save_shadow_plan
+from quant_a_stock.backtest.shadow import summarize_shadow_result
 from quant_a_stock.backtest.walk_forward import run_walk_forward_validation
 from quant_a_stock.backtest.report import save_report
 from quant_a_stock.backtest.validate import validate_strategy
 from quant_a_stock.cleaning.pipeline import clean_candles
-from quant_a_stock.config import BacktestConfig, DEFAULT_PATHS
+from quant_a_stock.config import BacktestConfig, DEFAULT_BACKTEST_CONFIG, DEFAULT_PATHS
 from quant_a_stock.data.akshare_client import fetch_daily
 from quant_a_stock.data.cache import daily_cache_path, load_daily_cache, save_daily_cache
 from quant_a_stock.data.calendar import resolve_cached_trading_date
@@ -56,6 +57,8 @@ from quant_a_stock.research.external_data import summarize_risk_events
 from quant_a_stock.research.fundamental_watchlist import build_fundamental_watchlist
 from quant_a_stock.research.fundamental_watchlist import load_holdings_file
 from quant_a_stock.research.fundamental_watchlist import save_fundamental_watchlist_context
+from quant_a_stock.research.fundamental_verdict import load_fundamental_verdicts
+from quant_a_stock.research.fundamental_verdict import merge_fundamental_verdicts
 from quant_a_stock.research.factor_evidence import analyze_factor_evidence
 from quant_a_stock.research.factor_evidence import save_factor_evidence
 from quant_a_stock.research.lifecycle import build_candidate_lifecycle_tracking
@@ -91,6 +94,7 @@ from quant_a_stock.warehouse import ingest_latest_reports
 from quant_a_stock.warehouse import sync_candidate_lifecycles_to_warehouse
 from quant_a_stock.warehouse import sync_daily_candles_to_warehouse
 from quant_a_stock.warehouse import sync_factor_evidence_to_warehouse
+from quant_a_stock.warehouse import sync_fundamental_verdicts_to_warehouse
 from quant_a_stock.warehouse import sync_stock_universe_to_warehouse
 from quant_a_stock.warehouse import warehouse_query as run_warehouse_query
 from quant_a_stock.warehouse import warehouse_review as build_warehouse_review
@@ -1736,6 +1740,12 @@ def shadow_freeze(args: argparse.Namespace) -> None:
         plan_date=args.plan_date,
         top=args.signal_top,
     )
+    if args.fundamental_verdict_report:
+        verdicts = load_fundamental_verdicts(
+            Path(args.fundamental_verdict_report),
+            target_date=args.target_date,
+        )
+        signals = merge_fundamental_verdicts(signals, verdicts)
     market, _ = build_market_temperature(target_date=args.target_date)
     plan = freeze_shadow_plan(
         signals,
@@ -1764,6 +1774,10 @@ def shadow_evaluate(args: argparse.Namespace) -> None:
         cache_dir=Path(args.cache_dir) if args.cache_dir else None,
         until=args.until,
         since=args.since,
+        mode=args.mode,
+        max_positions=args.max_positions,
+        cooldown_days=args.cooldown_days,
+        rebalance_tolerance=args.rebalance_tolerance,
     )
     equity_path = save_report(result.equity.to_dict("records"), report_type="shadow_portfolio_equity")
     trades_path = save_report(result.trades.to_dict("records"), report_type="shadow_portfolio_trades")
@@ -1772,6 +1786,12 @@ def shadow_evaluate(args: argparse.Namespace) -> None:
         print("还没有可评价的冻结计划和行情。")
     else:
         print(result.equity.tail(10).to_string(index=False))
+        summary = summarize_shadow_result(
+            result,
+            mode=args.mode,
+            initial_cash=DEFAULT_BACKTEST_CONFIG.initial_cash,
+        )
+        print(pd.DataFrame([summary]).to_string(index=False))
     print(f"净值: {equity_path}")
     print(f"成交: {trades_path}")
     print(f"持仓: {positions_path}")
@@ -1791,22 +1811,41 @@ def shadow_backfill(args: argparse.Namespace) -> None:
         max_industry_weight=args.max_industry_weight,
         overwrite=args.overwrite,
     )
-    result = evaluate_shadow_portfolio(
-        plans_root=backfill.plans_root,
-        cache_dir=Path(args.cache_dir) if args.cache_dir else None,
-        since=args.since,
-        until=args.until,
-    )
+    common = {
+        "plans_root": backfill.plans_root,
+        "cache_dir": Path(args.cache_dir) if args.cache_dir else None,
+        "since": args.since,
+        "until": args.until,
+        "max_positions": args.max_positions,
+        "cooldown_days": args.cooldown_days,
+        "rebalance_tolerance": args.rebalance_tolerance,
+    }
+    result = evaluate_shadow_portfolio(mode=args.mode, **common)
+    comparison_rows = []
+    for mode in ("stateful", "daily_target"):
+        comparison_result = result if mode == args.mode else evaluate_shadow_portfolio(mode=mode, **common)
+        comparison_rows.append(
+            summarize_shadow_result(
+                comparison_result,
+                mode=mode,
+                initial_cash=DEFAULT_BACKTEST_CONFIG.initial_cash,
+            )
+        )
+    comparison = pd.DataFrame(comparison_rows)
     summary_path = save_report(backfill.summary.to_dict("records"), report_type="shadow_backfill_summary")
     equity_path = save_report(result.equity.to_dict("records"), report_type="shadow_backfill_equity")
     trades_path = save_report(result.trades.to_dict("records"), report_type="shadow_backfill_trades")
     positions_path = save_report(result.positions.to_dict("records"), report_type="shadow_backfill_positions")
+    comparison_path = save_report(comparison.to_dict("records"), report_type="shadow_backfill_comparison")
     print(backfill.summary.to_string(index=False) if not backfill.summary.empty else "没有可回填的历史快照。")
     print(f"计划目录: {backfill.plans_root}")
     print(f"回填摘要: {summary_path}")
     print(f"净值: {equity_path}")
     print(f"成交: {trades_path}")
     print(f"持仓: {positions_path}")
+    print("模式对比:")
+    print(comparison.to_string(index=False))
+    print(f"模式对比报告: {comparison_path}")
 
 
 def snapshot_research(args: argparse.Namespace) -> None:
@@ -1966,6 +2005,31 @@ def fundamental_watchlist(args: argparse.Namespace) -> None:
         print(display[[column for column in columns if column in display.columns]].to_string(index=False))
     print(f"基本面深研清单 CSV: {csv_path}")
     print(f"ai-berkshire 交接 JSON: {context.path}")
+
+
+def import_fundamental_verdicts(args: argparse.Namespace) -> None:
+    source_path = Path(args.input)
+    verdicts = load_fundamental_verdicts(
+        source_path,
+        target_date=args.target_date,
+        source=args.source,
+    )
+    report_path = save_report(
+        verdicts.to_dict("records"),
+        report_type="fundamental_verdicts",
+        date_prefix=args.target_date,
+    )
+    if args.write_warehouse:
+        result = sync_fundamental_verdicts_to_warehouse(
+            verdicts=verdicts,
+            target_date=args.target_date,
+            source_path=source_path,
+            warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
+        )
+        print(f"仓库: {result.db_path}")
+    counts = verdicts["fundamental_verdict"].value_counts().rename_axis("结论").reset_index(name="数量")
+    print(counts.to_string(index=False) if not counts.empty else "没有有效基本面结论。")
+    print(f"基本面结论报告: {report_path}")
 
 
 def research_pipeline(args: argparse.Namespace) -> None:
@@ -2757,6 +2821,7 @@ def build_parser() -> argparse.ArgumentParser:
     freeze.add_argument("--target-date", required=True)
     freeze.add_argument("--plan-date", required=True)
     freeze.add_argument("--research-report", default=None)
+    freeze.add_argument("--fundamental-verdict-report", default=None)
     freeze.add_argument("--plans-root", default=None)
     freeze.add_argument("--signal-top", type=int, default=80)
     freeze.add_argument("--top", type=int, default=10)
@@ -2771,6 +2836,10 @@ def build_parser() -> argparse.ArgumentParser:
     shadow.add_argument("--cache-dir", default=None)
     shadow.add_argument("--until", default=None)
     shadow.add_argument("--since", default=None)
+    shadow.add_argument("--mode", choices=["stateful", "daily_target"], default="stateful")
+    shadow.add_argument("--max-positions", type=int, default=10)
+    shadow.add_argument("--cooldown-days", type=int, default=3)
+    shadow.add_argument("--rebalance-tolerance", type=float, default=0.02)
     shadow.set_defaults(func=shadow_evaluate)
 
     shadow_history = subparsers.add_parser("shadow-backfill", help="按历史每日快照冻结 5-10 只并以次日开盘重放")
@@ -2779,6 +2848,10 @@ def build_parser() -> argparse.ArgumentParser:
     shadow_history.add_argument("--snapshot-root", default=None)
     shadow_history.add_argument("--plans-root", default=None)
     shadow_history.add_argument("--cache-dir", default=None)
+    shadow_history.add_argument("--mode", choices=["stateful", "daily_target"], default="stateful")
+    shadow_history.add_argument("--max-positions", type=int, default=10)
+    shadow_history.add_argument("--cooldown-days", type=int, default=3)
+    shadow_history.add_argument("--rebalance-tolerance", type=float, default=0.02)
     shadow_history.add_argument("--signal-top", type=int, default=80)
     shadow_history.add_argument("--top", type=int, default=10)
     shadow_history.add_argument("--max-single-weight", type=float, default=0.15)
@@ -2822,6 +2895,14 @@ def build_parser() -> argparse.ArgumentParser:
     fundamental.add_argument("--display-top", type=int, default=20)
     fundamental.add_argument("--output-root", default=None)
     fundamental.set_defaults(func=fundamental_watchlist)
+
+    verdict = subparsers.add_parser("import-fundamental-verdicts", help="导入 ai-berkshire 返回的结构化基本面结论")
+    verdict.add_argument("--input", required=True)
+    verdict.add_argument("--target-date", required=True)
+    verdict.add_argument("--source", default="ai-berkshire")
+    verdict.add_argument("--warehouse-dir", default=None)
+    verdict.add_argument("--write-warehouse", action=argparse.BooleanOptionalAction, default=True)
+    verdict.set_defaults(func=import_fundamental_verdicts)
 
     pipeline = subparsers.add_parser("research-pipeline", help="运行研究内核收口流水线：快照、日报、决策信号、Context Pack、可选入仓")
     pipeline.add_argument("--target-date", default=None)

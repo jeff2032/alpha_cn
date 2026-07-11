@@ -67,7 +67,9 @@ data/shadow/plans/plan_date=YYYY-MM-DD/plan.csv
 python -m quant_a_stock.cli shadow-evaluate --until 2026-07-10
 ```
 
-输出包含成交受阻原因、成交数量、费用、每日净值、持仓权重和持有天数。达到预期周期上限、下一份计划移除或目标权重归零时，按下一可成交开盘退出。
+默认使用 `stateful` 状态化组合：新计划只补空余席位；已持仓标的至少走完所属信号的最短观察期，再根据是否继续入选决定退出；达到最长周期强制退出；完整退出后默认冷却 3 个交易日。市场仓位上限变化超过 2 个百分点时才减仓，避免每天因排名和目标权重小幅变化反复交易。
+
+输出包含成交受阻原因、成交原因、成交数量、费用、每日净值、持仓权重和持有天数。需要复现旧的“每天完全切换到最新名单”逻辑时使用 `--mode daily_target`。
 
 历史快照回填并按次日开盘重放：
 
@@ -75,7 +77,21 @@ python -m quant_a_stock.cli shadow-evaluate --until 2026-07-10
 python -m quant_a_stock.cli shadow-backfill --since 2026-06-15 --until 2026-07-10 --top 10 --signal-top 80
 ```
 
-回填严格读取当日已经冻结的研究快照，不用未来字段修饰过去。每天最多 10 只；有效标的不足 5 只时允许少于 5 只或全现金，不为凑数量放宽风险规则。
+回填严格读取当日已经冻结的研究快照，不用未来字段修饰过去。每天最多 10 只；有效标的不足 5 只时允许少于 5 只或全现金，不为凑数量放宽风险规则。命令会同时计算 `stateful` 与 `daily_target`，比较收益、最大回撤、交易次数、费用和平均持仓数；主报告默认保存状态化结果。
+
+可调整状态化参数：
+
+```powershell
+python -m quant_a_stock.cli shadow-evaluate --mode stateful --max-positions 10 --cooldown-days 3 --rebalance-tolerance 0.02
+```
+
+基本面结论是可选增强。导入 `ai-berkshire` 回流文件后，可在冻结时传入：
+
+```powershell
+python -m quant_a_stock.cli shadow-freeze --target-date 2026-07-10 --plan-date 2026-07-13 --fundamental-verdict-report reports/fundamental_verdicts_20260710_HHMMSS.csv
+```
+
+`reject` 阻止新入组合，`pass` 和 `watch` 在同类技术信号内调整优先级；没有基本面结论的标的仍按量化信号正常处理。
 
 当前动作周期统一为：A2 主攻 3-5 日、B2 升级观察 3-5 日、A3 短线 1-3 日；B1 只保留为内部对照，不进入影子组合。
 

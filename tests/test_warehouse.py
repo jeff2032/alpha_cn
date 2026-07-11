@@ -10,6 +10,7 @@ from quant_a_stock.warehouse import ingest_latest_reports
 from quant_a_stock.warehouse import sync_candidate_lifecycles_to_warehouse
 from quant_a_stock.warehouse import sync_daily_candles_to_warehouse
 from quant_a_stock.warehouse import sync_factor_evidence_to_warehouse
+from quant_a_stock.warehouse import sync_fundamental_verdicts_to_warehouse
 from quant_a_stock.warehouse import sync_stock_universe_to_warehouse
 from quant_a_stock.warehouse import warehouse_query
 from quant_a_stock.warehouse import warehouse_review
@@ -566,3 +567,31 @@ def test_sync_factor_evidence_to_warehouse(tmp_path: Path) -> None:
     assert result.ingested["row_count"].sum() == 3
     status = warehouse_status(warehouse_dir=tmp_path / "warehouse")
     assert status.loc[status["table"] == "factor_evidence_daily", "rows"].iloc[0] == 1
+
+
+def test_sync_fundamental_verdicts_to_warehouse(tmp_path: Path) -> None:
+    verdicts = pd.DataFrame(
+        [
+            {
+                "analysis_date": "2026-07-11",
+                "target_date": "2026-07-10",
+                "symbol": "000001",
+                "fundamental_verdict": "pass",
+                "quality_score": 82,
+            }
+        ]
+    )
+
+    result = sync_fundamental_verdicts_to_warehouse(
+        verdicts=verdicts,
+        target_date="2026-07-10",
+        warehouse_dir=tmp_path / "warehouse",
+    )
+    stored = warehouse_query(
+        "fundamental_verdict_daily",
+        warehouse_dir=tmp_path / "warehouse",
+    )
+
+    assert result.ingested.iloc[0]["row_count"] == 1
+    assert stored.iloc[0]["symbol"] == "000001"
+    assert stored.iloc[0]["fundamental_verdict"] == "pass"

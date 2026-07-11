@@ -3,7 +3,8 @@ from __future__ import annotations
 
 CANDIDATE_MODEL_VERSION = "candidate_model_v2026_07_11_lifecycle_gate"
 FACTOR_SCHEMA_VERSION = "factor_schema_v2026_07_11_risk_decay"
-WAREHOUSE_SCHEMA_VERSION = "warehouse_schema_v2026_07_10_validation_loop"
+WAREHOUSE_SCHEMA_VERSION = "warehouse_schema_v2026_07_11_fundamental_return"
 DECISION_SIGNAL_VERSION = "decision_signal_v2026_07_11_horizon_rules"
 FUNDAMENTAL_WATCHLIST_VERSION = "fundamental_watchlist_v2026_07_09_ai_berkshire"
+FUNDAMENTAL_VERDICT_VERSION = "fundamental_verdict_v2026_07_11_return_contract"
 FACTOR_EVIDENCE_VERSION = "factor_evidence_v2026_07_11_sample_gate"

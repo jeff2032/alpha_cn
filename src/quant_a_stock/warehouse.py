@@ -20,6 +20,7 @@ CSV_REPORT_SPECS = {
     "research_candidates": "research_candidates_*.csv",
     "decision_signals": "decision_signals_*.csv",
     "fundamental_watchlist": "fundamental_watchlist_*.csv",
+    "fundamental_verdicts": "fundamental_verdicts_*.csv",
     "daily_research_candidates": "daily_research_candidates_*.csv",
     "sentiment_scores": "sentiment_watchlist_*.csv",
     "market_themes": "market_theme_*.csv",
@@ -54,6 +55,7 @@ MIDDLE_LAYER_TABLES = [
     "research_candidate_daily",
     "decision_signal_daily",
     "fundamental_watchlist_daily",
+    "fundamental_verdict_daily",
     "stock_market_attitude_daily",
     "research_outcome_daily",
     "missed_opportunity_daily",
@@ -93,6 +95,7 @@ REQUIRED_QUALITY_REPORTS = {
 ENHANCEMENT_QUALITY_REPORTS = {
     "decision_signals",
     "fundamental_watchlist",
+    "fundamental_verdicts",
     "risk_events",
     "money_flow",
     "iwencai_import",
@@ -830,6 +833,49 @@ def sync_factor_evidence_to_warehouse(
     )
 
 
+def sync_fundamental_verdicts_to_warehouse(
+    *,
+    verdicts: pd.DataFrame,
+    target_date: str,
+    source_path: Path | None = None,
+    warehouse_dir: Path | None = None,
+    run_id: str | None = None,
+) -> WarehouseIngestResult:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    resolved_run_id = run_id or f"fundamental_verdict_{target_date}_{stamp}"
+    ingested_at = datetime.now().isoformat(timespec="seconds")
+    output = verdicts.copy()
+    output["warehouse_run_id"] = resolved_run_id
+    output["warehouse_target_date"] = target_date
+    output["warehouse_source_path"] = str(source_path) if source_path else "generated:fundamental_verdict"
+    output["warehouse_ingested_at"] = ingested_at
+    _write_parquet(
+        output,
+        "fundamental_verdict_daily",
+        target_date=target_date,
+        run_id=resolved_run_id,
+        warehouse_dir=warehouse_dir,
+    )
+    refresh_warehouse_views(warehouse_dir=warehouse_dir)
+    row = _report_row(
+        resolved_run_id,
+        target_date,
+        "fundamental_verdict_daily",
+        source_path,
+        len(output),
+        "derived" if not output.empty else "empty",
+        ingested_at,
+    )
+    return WarehouseIngestResult(
+        run_id=resolved_run_id,
+        target_date=target_date,
+        db_path=warehouse_db_path(warehouse_dir),
+        parquet_root=parquet_root(warehouse_dir),
+        ingested=pd.DataFrame([row]),
+        status=warehouse_status(warehouse_dir=warehouse_dir),
+    )
+
+
 def _build_security_master_daily(frame: pd.DataFrame, *, target_date: str) -> pd.DataFrame:
     output = pd.DataFrame(index=frame.index)
     output["as_of_date"] = target_date
@@ -1090,6 +1136,20 @@ def _write_middle_layer_from_reports(
                 target_date=target_date,
                 run_id=run_id,
                 source_path="derived:fundamental_watchlist",
+                ingested_at=ingested_at,
+                warehouse_dir=warehouse_dir,
+            )
+        )
+
+    fundamental_verdicts = frames.get("fundamental_verdicts")
+    if fundamental_verdicts is not None and not fundamental_verdicts.empty:
+        rows.append(
+            _write_middle_frame(
+                fundamental_verdicts,
+                "fundamental_verdict_daily",
+                target_date=target_date,
+                run_id=run_id,
+                source_path="derived:fundamental_verdicts",
                 ingested_at=ingested_at,
                 warehouse_dir=warehouse_dir,
             )

@@ -69,6 +69,7 @@
 | `research_candidate_daily` | 每天每只最终候选一行 | 保存分层、分组、分数、主题、风险、预期观察周期、原因标签和市场态度摘要 |
 | `decision_signal_daily` | 每天每只决策信号一行 | 保存 `buy_watch/upgrade_watch/hold_watch/watch/avoid` 等处理口径、置信度、观察周期、观察条件和失效条件 |
 | `fundamental_watchlist_daily` | 每天每只基本面深研交接标的一行 | 保存交给 `ai-berkshire` 的优先级、建议研究技能、交接原因、核心问题、来源信号和风险标签 |
+| `fundamental_verdict_daily` | 每次基本面深研返回的每只标的一行 | 保存 `pass/watch/reject`、质量分、估值风险、行业展望、催化周期和财务风险标签，供冻结计划读取 |
 | `stock_market_attitude_daily` | 每天每只候选一行 | 保存热度、资金承接、主题共振、盘面态度、事件、风险和拥挤度，输出强确认/温和确认/冷启动/虚热/过热分歧/风险压制 |
 | `candidate_lifecycle_daily` | 每个生命周期每天一行 | 观察新入池、继续、升级、降级、消失、命中、失败、移出 |
 | `research_outcome_daily` | 每个信号日、每只候选一行 | 保存绝对收益、基准收益、行业同类收益和超额收益；按信号日覆盖，避免滚动复盘重复计数 |
@@ -84,7 +85,7 @@
 ## 三项目协作边界
 
 - `alpha_cn`：负责全市场数据准备、形态/情绪/主线/风险筛选、候选生命周期、复盘和结构化信号输出。
-- `ai-berkshire`：只消费 `fundamental_watchlist` 这类小清单，做商业质量、景气周期、估值、财报和 thesis 漂移验证，不做全市场扫盘。
+- `ai-berkshire`：只消费 `fundamental_watchlist` 这类小清单，做商业质量、景气周期、估值、财报和 thesis 漂移验证，并通过 `fundamental_verdict_daily` 返回结构化结论，不做全市场扫盘。
 - `daily_stock_analysis`：只消费 `Context Pack` 或数仓视图，负责 AI 解读、交互入口、Web/API/通知，不重复实现候选筛选逻辑。
 
 `run_manifest` 和 `data_quality_daily` 是早上判断“今天能不能用”的第一入口。结构化 CSV 是数据质量判断主依据；Markdown 和 Obsidian 属于用户展示层，不决定研究数据是否可用。

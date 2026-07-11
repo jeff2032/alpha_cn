@@ -14,6 +14,8 @@ from quant_a_stock.backtest.shadow import save_shadow_plan
 from quant_a_stock.backtest.walk_forward import run_walk_forward_validation
 from quant_a_stock.data.cache import save_daily_cache
 from quant_a_stock.research.factor_evidence import analyze_factor_evidence
+from quant_a_stock.research.fundamental_verdict import merge_fundamental_verdicts
+from quant_a_stock.research.fundamental_verdict import normalize_fundamental_verdicts
 
 
 def _candles(symbol: str, drift: float, days: int = 140) -> pd.DataFrame:
@@ -179,3 +181,81 @@ def test_shadow_plan_applies_market_position_gate() -> None:
     assert plan["target_weight"].sum() == pytest.approx(0.20)
     assert set(plan["market_total_cap"]) == {0.20}
     assert market_position_cap("震荡偏强") == 0.60
+
+
+def test_fundamental_verdict_normalizes_and_filters_shadow_plan() -> None:
+    raw = pd.DataFrame(
+        [
+            {"股票代码": "000001.SZ", "基本面结论": "通过", "质量分": "82", "估值风险": "低"},
+            {"股票代码": "000002", "基本面结论": "否决", "质量分": "35", "估值风险": "高"},
+        ]
+    )
+    verdicts = normalize_fundamental_verdicts(raw, target_date="2026-07-10")
+    signals = pd.DataFrame(
+        [
+            {"symbol": "000003", "name": "未深研", "signal_type": "buy_watch", "research_score": 99, "risk_level": "低"},
+            {"symbol": "000001", "name": "已通过", "signal_type": "buy_watch", "research_score": 80, "risk_level": "低"},
+            {"symbol": "000002", "name": "已否决", "signal_type": "buy_watch", "research_score": 90, "risk_level": "低"},
+        ]
+    )
+
+    plan = freeze_shadow_plan(
+        merge_fundamental_verdicts(signals, verdicts),
+        target_date="2026-07-10",
+        plan_date="2026-07-13",
+        top=1,
+    )
+
+    assert plan.iloc[0]["symbol"] == "000001"
+    assert plan.iloc[0]["fundamental_verdict"] == "pass"
+    assert "000002" not in set(plan["symbol"])
+
+
+def test_stateful_shadow_avoids_daily_rank_churn(tmp_path: Path) -> None:
+    plans_root = tmp_path / "plans"
+    cache_root = tmp_path / "cache"
+    common = {
+        "target_date": "2026-01-05",
+        "signal_type": "buy_watch",
+        "action_bucket": "主攻-A2启动确认",
+        "expected_horizon": "3-15d",
+        "max_hold_days": 15,
+        "industry": "电子",
+        "research_score": 80,
+        "risk_level": "低",
+        "market_regime": "强势",
+        "market_score": 80,
+        "market_total_cap": 0.8,
+    }
+    for plan_date, symbols in (("2026-01-06", ["000001", "000002"]), ("2026-01-07", ["000001", "000003"])):
+        rows = [{**common, "plan_date": plan_date, "symbol": symbol, "name": symbol, "target_weight": 0.2} for symbol in symbols]
+        save_shadow_plan(pd.DataFrame(rows), plan_date=plan_date, root=plans_root)
+    for symbol in ("000001", "000002", "000003"):
+        save_daily_cache(_candles(symbol, 0.0, days=5), symbol, cache_dir=cache_root)
+    for path in (cache_root / "akshare" / "daily").glob("*.csv"):
+        frame = pd.read_csv(path)
+        frame["timestamp"] = pd.bdate_range("2026-01-06", periods=len(frame)).astype(str)
+        frame.to_csv(path, index=False)
+
+    stateful = evaluate_shadow_portfolio(
+        plans_root=plans_root,
+        cache_dir=cache_root,
+        until="2026-01-08",
+        mode="stateful",
+        max_positions=2,
+    )
+    daily_target = evaluate_shadow_portfolio(
+        plans_root=plans_root,
+        cache_dir=cache_root,
+        until="2026-01-08",
+        mode="daily_target",
+    )
+
+    stateful_trades = int((stateful.trades["quantity"] > 0).sum())
+    daily_target_trades = int((daily_target.trades["quantity"] > 0).sum())
+    assert stateful_trades == 2
+    assert daily_target_trades > stateful_trades
+    assert set(stateful.positions.loc[stateful.positions["date"] == pd.Timestamp("2026-01-07"), "symbol"]) == {
+        "000001",
+        "000002",
+    }

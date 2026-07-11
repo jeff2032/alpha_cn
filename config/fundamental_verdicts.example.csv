@@ -1,0 +1,4 @@
+analysis_date,target_date,symbol,name,fundamental_verdict,quality_score,valuation_risk,industry_outlook,catalyst_horizon,financial_risk_tags,reason_summary,source
+2026-07-11,2026-07-10,600000,示例公司,pass,82,低,景气稳定,1-2季度,,基本面质量通过，继续结合技术信号观察,ai-berkshire
+2026-07-11,2026-07-10,000001,示例银行,watch,68,中,中性,半年,息差承压,估值不高但盈利趋势仍需确认,ai-berkshire
+2026-07-11,2026-07-10,300001,示例科技,reject,35,高,不确定,未知,现金流风险,当前风险收益比不适合进入影子组合,ai-berkshire

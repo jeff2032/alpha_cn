@@ -25,6 +25,11 @@ SHADOW_PLAN_COLUMNS = [
     "industry",
     "research_score",
     "risk_level",
+    "fundamental_verdict",
+    "quality_score",
+    "valuation_risk",
+    "financial_risk_tags",
+    "fundamental_reason_summary",
     "market_regime",
     "market_score",
     "market_total_cap",
@@ -49,6 +54,41 @@ class ShadowBackfillResult:
     plans_root: Path
 
 
+def summarize_shadow_result(
+    result: ShadowPortfolioResult,
+    *,
+    mode: str,
+    initial_cash: float,
+) -> dict[str, float | int | str]:
+    if result.equity.empty:
+        return {
+            "mode": mode,
+            "return_pct": 0.0,
+            "max_drawdown": 0.0,
+            "trades": 0,
+            "fees": 0.0,
+            "blocked_trades": 0,
+            "avg_holding_count": 0.0,
+        }
+    equity = pd.to_numeric(result.equity["equity"], errors="coerce").dropna()
+    running_max = equity.cummax()
+    drawdown = equity / running_max - 1.0
+    trades = result.trades.copy()
+    quantities = pd.to_numeric(trades.get("quantity", pd.Series(dtype=float)), errors="coerce").fillna(0)
+    blocked = trades.get("blocked_reason", pd.Series(dtype=str)).fillna("").astype(str)
+    return {
+        "mode": mode,
+        "return_pct": round(float(equity.iloc[-1] / initial_cash - 1.0), 6),
+        "max_drawdown": round(float(drawdown.min()), 6),
+        "trades": int((quantities > 0).sum()),
+        "fees": round(float(pd.to_numeric(trades.get("fees", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()), 2),
+        "blocked_trades": int((blocked != "").sum()),
+        "avg_holding_count": round(
+            float(pd.to_numeric(result.equity["holding_count"], errors="coerce").fillna(0).mean()), 2
+        ),
+    }
+
+
 def freeze_shadow_plan(
     signals: pd.DataFrame,
     *,
@@ -66,9 +106,18 @@ def freeze_shadow_plan(
     frame = signals.copy()
     frame["symbol"] = frame["symbol"].astype(str).str.zfill(6)
     frame = frame[frame["risk_level"].isin(["低", "中", "未标注"])]
+    if "fundamental_verdict" not in frame.columns:
+        frame["fundamental_verdict"] = ""
+    frame["fundamental_verdict"] = frame["fundamental_verdict"].fillna("").astype(str).str.lower()
+    frame = frame[frame["fundamental_verdict"] != "reject"]
     priority = {"buy_watch": 1, "upgrade_watch": 2}
     frame["_priority"] = frame["signal_type"].map(priority).fillna(9)
-    frame = frame[frame["_priority"] < 9].sort_values(["_priority", "research_score"], ascending=[True, False])
+    verdict_priority = {"pass": 1, "watch": 2, "": 3}
+    frame["_fundamental_priority"] = frame["fundamental_verdict"].map(verdict_priority).fillna(3)
+    frame = frame[frame["_priority"] < 9].sort_values(
+        ["_priority", "_fundamental_priority", "research_score"],
+        ascending=[True, True, False],
+    )
 
     market_cap = market_position_cap(market_regime) if market_regime else max_total_weight
     effective_total_weight = min(max_total_weight, market_cap)
@@ -100,6 +149,11 @@ def freeze_shadow_plan(
                 "industry": industry,
                 "research_score": row.get("research_score", 0),
                 "risk_level": row.get("risk_level", ""),
+                "fundamental_verdict": row.get("fundamental_verdict", ""),
+                "quality_score": row.get("quality_score", ""),
+                "valuation_risk": row.get("valuation_risk", ""),
+                "financial_risk_tags": row.get("financial_risk_tags", ""),
+                "fundamental_reason_summary": row.get("reason_summary", ""),
                 "market_regime": market_regime,
                 "market_score": round(float(market_score), 2),
                 "market_total_cap": round(effective_total_weight, 4),
@@ -222,7 +276,13 @@ def evaluate_shadow_portfolio(
     until: str | None = None,
     since: str | None = None,
     config: BacktestConfig = DEFAULT_BACKTEST_CONFIG,
+    mode: str = "stateful",
+    max_positions: int = 10,
+    cooldown_days: int = 3,
+    rebalance_tolerance: float = 0.02,
 ) -> ShadowPortfolioResult:
+    if mode not in {"stateful", "daily_target"}:
+        raise ValueError(f"Unsupported shadow evaluation mode: {mode}")
     root = plans_root or DEFAULT_PATHS.root / "data" / "shadow" / "plans"
     plans = _load_plans(root)
     if since and not plans.empty:
@@ -231,6 +291,7 @@ def evaluate_shadow_portfolio(
         plans = plans[plans["plan_date"] <= pd.Timestamp(until)].copy()
     if plans.empty:
         return ShadowPortfolioResult(pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+    plan_dates = _load_plan_dates(root, since=since, until=until)
     symbols = sorted(plans["symbol"].astype(str).str.zfill(6).unique())
     candles = {symbol: _load_candles(symbol, cache_dir=cache_dir) for symbol in symbols}
     all_dates = sorted(
@@ -246,7 +307,13 @@ def evaluate_shadow_portfolio(
     shares = {symbol: 0 for symbol in symbols}
     entry_index: dict[str, int] = {}
     max_hold = dict(zip(plans["symbol"], plans["max_hold_days"]))
+    min_hold = {
+        str(row["symbol"]): _min_hold_days(row.get("expected_horizon", ""))
+        for _, row in plans.iterrows()
+    }
+    last_exit_index: dict[str, int] = {}
     active_targets: dict[str, float] = {}
+    current_market_cap = 0.0
     equity_rows = []
     trade_rows = []
     position_rows = []
@@ -254,23 +321,45 @@ def evaluate_shadow_portfolio(
 
     for day_index, date in enumerate(all_dates):
         daily_plan = plan_by_date.get(date)
-        rebalance = daily_plan is not None
-        if rebalance:
-            active_targets = dict(zip(daily_plan["symbol"], daily_plan["target_weight"]))
-            max_hold.update(dict(zip(daily_plan["symbol"], daily_plan["max_hold_days"])))
-        for symbol, entered in list(entry_index.items()):
-            if day_index - entered >= int(max_hold.get(symbol, 10)):
-                active_targets[symbol] = 0.0
-                rebalance = True
-
         open_equity = cash + sum(shares[symbol] * _price(candles[symbol], date, "open") for symbol in symbols)
-        desired = {}
-        for symbol in symbols:
-            if rebalance:
-                price = _price(candles[symbol], date, "open")
-                desired[symbol] = _round_lot(open_equity * active_targets.get(symbol, 0.0) / price, config.lot_size) if price > 0 else shares[symbol]
-            else:
-                desired[symbol] = shares[symbol]
+        trade_reasons: dict[str, str] = {}
+        if mode == "daily_target":
+            desired, active_targets = _daily_target_desired(
+                date=date,
+                day_index=day_index,
+                is_plan_day=date in plan_dates,
+                daily_plan=daily_plan,
+                symbols=symbols,
+                shares=shares,
+                entry_index=entry_index,
+                max_hold=max_hold,
+                active_targets=active_targets,
+                candles=candles,
+                open_equity=open_equity,
+                config=config,
+            )
+            trade_reasons = {symbol: "daily_target_rebalance" for symbol in symbols if desired[symbol] != shares[symbol]}
+        else:
+            desired, current_market_cap, state_reasons = _stateful_desired(
+                date=date,
+                day_index=day_index,
+                is_plan_day=date in plan_dates,
+                daily_plan=daily_plan,
+                symbols=symbols,
+                shares=shares,
+                entry_index=entry_index,
+                last_exit_index=last_exit_index,
+                min_hold=min_hold,
+                max_hold=max_hold,
+                candles=candles,
+                open_equity=open_equity,
+                current_market_cap=current_market_cap,
+                max_positions=max_positions,
+                cooldown_days=cooldown_days,
+                rebalance_tolerance=rebalance_tolerance,
+                config=config,
+            )
+            trade_reasons.update(state_reasons)
 
         for side in ("sell", "buy"):
             for symbol in symbols:
@@ -283,7 +372,9 @@ def evaluate_shadow_portfolio(
                 index = int(frame.index.get_loc(date))
                 blocked = trade_block_reason(frame.reset_index(drop=False), index, side=side)
                 if blocked:
-                    trade_rows.append(_trade_row(date, symbol, side, 0, 0.0, 0.0, blocked))
+                    trade_rows.append(
+                        _trade_row(date, symbol, side, 0, 0.0, 0.0, blocked, trade_reasons.get(symbol, ""))
+                    )
                     continue
                 open_price = float(frame.loc[date, "open"])
                 if side == "sell":
@@ -297,6 +388,7 @@ def evaluate_shadow_portfolio(
                     shares[symbol] -= quantity
                     if shares[symbol] == 0:
                         entry_index.pop(symbol, None)
+                        last_exit_index[symbol] = day_index
                 else:
                     fill = open_price * (1 + config.slippage_bps / 10_000)
                     quantity = _affordable_quantity(delta, cash, fill, config)
@@ -307,7 +399,9 @@ def evaluate_shadow_portfolio(
                     if quantity and symbol not in entry_index:
                         entry_index[symbol] = day_index
                 if quantity:
-                    trade_rows.append(_trade_row(date, symbol, side, quantity, fill, fees, ""))
+                    trade_rows.append(
+                        _trade_row(date, symbol, side, quantity, fill, fees, "", trade_reasons.get(symbol, ""))
+                    )
 
         equity = cash + sum(shares[symbol] * _price(candles[symbol], date, "close") for symbol in symbols)
         equity_rows.append(
@@ -357,6 +451,158 @@ def _load_plans(root: Path) -> pd.DataFrame:
     return output
 
 
+def _load_plan_dates(root: Path, *, since: str | None, until: str | None) -> set[pd.Timestamp]:
+    dates: set[pd.Timestamp] = set()
+    for directory in sorted(root.glob("plan_date=*")) if root.exists() else []:
+        try:
+            date = pd.Timestamp(directory.name.split("=", 1)[1]).normalize()
+        except (IndexError, ValueError):
+            continue
+        if since and date < pd.Timestamp(since):
+            continue
+        if until and date > pd.Timestamp(until):
+            continue
+        dates.add(date)
+    return dates
+
+
+def _daily_target_desired(
+    *,
+    date: pd.Timestamp,
+    day_index: int,
+    is_plan_day: bool,
+    daily_plan: pd.DataFrame | None,
+    symbols: list[str],
+    shares: dict[str, int],
+    entry_index: dict[str, int],
+    max_hold: dict[str, int],
+    active_targets: dict[str, float],
+    candles: dict[str, pd.DataFrame],
+    open_equity: float,
+    config: BacktestConfig,
+) -> tuple[dict[str, int], dict[str, float]]:
+    rebalance = is_plan_day
+    if rebalance:
+        active_targets = (
+            dict(zip(daily_plan["symbol"], daily_plan["target_weight"]))
+            if daily_plan is not None
+            else {}
+        )
+        if daily_plan is not None:
+            max_hold.update(dict(zip(daily_plan["symbol"], daily_plan["max_hold_days"])))
+    for symbol, entered in list(entry_index.items()):
+        if day_index - entered >= int(max_hold.get(symbol, 10)):
+            active_targets[symbol] = 0.0
+            rebalance = True
+    desired = {}
+    for symbol in symbols:
+        if not rebalance:
+            desired[symbol] = shares[symbol]
+            continue
+        price = _price(candles[symbol], date, "open")
+        desired[symbol] = (
+            _round_lot(open_equity * active_targets.get(symbol, 0.0) / price, config.lot_size)
+            if price > 0
+            else shares[symbol]
+        )
+    return desired, active_targets
+
+
+def _stateful_desired(
+    *,
+    date: pd.Timestamp,
+    day_index: int,
+    is_plan_day: bool,
+    daily_plan: pd.DataFrame | None,
+    symbols: list[str],
+    shares: dict[str, int],
+    entry_index: dict[str, int],
+    last_exit_index: dict[str, int],
+    min_hold: dict[str, int],
+    max_hold: dict[str, int],
+    candles: dict[str, pd.DataFrame],
+    open_equity: float,
+    current_market_cap: float,
+    max_positions: int,
+    cooldown_days: int,
+    rebalance_tolerance: float,
+    config: BacktestConfig,
+) -> tuple[dict[str, int], float, dict[str, str]]:
+    desired = dict(shares)
+    reasons: dict[str, str] = {}
+
+    if daily_plan is not None and not daily_plan.empty:
+        for _, row in daily_plan.iterrows():
+            symbol = str(row["symbol"]).zfill(6)
+            min_hold[symbol] = _min_hold_days(row.get("expected_horizon", ""))
+            max_hold[symbol] = int(row.get("max_hold_days", _max_hold_days(row.get("expected_horizon", ""))))
+        if "market_total_cap" in daily_plan.columns:
+            parsed_cap = pd.to_numeric(daily_plan["market_total_cap"], errors="coerce").dropna()
+            if not parsed_cap.empty:
+                current_market_cap = float(parsed_cap.iloc[0])
+
+    if is_plan_day and (daily_plan is None or daily_plan.empty):
+        current_market_cap = 0.0
+        for symbol, quantity in shares.items():
+            if quantity > 0:
+                desired[symbol] = 0
+                reasons[symbol] = "all_cash_plan"
+        return desired, current_market_cap, reasons
+
+    for symbol, entered in list(entry_index.items()):
+        if day_index - entered >= int(max_hold.get(symbol, 10)):
+            desired[symbol] = 0
+            reasons[symbol] = "max_holding_period"
+
+    if daily_plan is not None and not daily_plan.empty:
+        plan_symbols = set(daily_plan["symbol"].astype(str).str.zfill(6))
+        for symbol, entered in list(entry_index.items()):
+            holding_days = day_index - entered
+            if symbol not in plan_symbols and holding_days >= int(min_hold.get(symbol, 1)):
+                desired[symbol] = 0
+                reasons[symbol] = "not_reselected_after_min_hold"
+
+        projected_count = sum(quantity > 0 for quantity in desired.values())
+        slots = max(0, int(max_positions) - projected_count)
+        for _, row in daily_plan.iterrows():
+            if slots <= 0:
+                break
+            symbol = str(row["symbol"]).zfill(6)
+            if desired.get(symbol, 0) > 0:
+                continue
+            last_exit = last_exit_index.get(symbol)
+            if last_exit is not None and day_index - last_exit < max(0, int(cooldown_days)):
+                continue
+            price = _price(candles[symbol], date, "open")
+            if price <= 0:
+                continue
+            target_weight = float(pd.to_numeric(pd.Series([row.get("target_weight", 0.0)]), errors="coerce").fillna(0.0).iloc[0])
+            quantity = _round_lot(open_equity * target_weight / price, config.lot_size)
+            if quantity <= 0:
+                continue
+            desired[symbol] = quantity
+            reasons[symbol] = "new_plan_entry"
+            slots -= 1
+
+    desired_value = sum(
+        quantity * _price(candles[symbol], date, "open")
+        for symbol, quantity in desired.items()
+        if quantity > 0
+    )
+    cap_value = max(0.0, current_market_cap) * open_equity
+    tolerance_value = max(0.0, float(rebalance_tolerance)) * open_equity
+    if desired_value > cap_value + tolerance_value and desired_value > 0:
+        scale = cap_value / desired_value if cap_value > 0 else 0.0
+        for symbol, quantity in list(desired.items()):
+            if quantity <= 0:
+                continue
+            reduced = _round_lot(quantity * scale, config.lot_size)
+            if reduced < quantity:
+                desired[symbol] = reduced
+                reasons[symbol] = "market_cap_deleveraging"
+    return desired, current_market_cap, reasons
+
+
 def _load_candles(symbol: str, *, cache_dir: Path | None) -> pd.DataFrame:
     frame = load_daily_cache(symbol, cache_dir=cache_dir).copy()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"])
@@ -385,7 +631,16 @@ def _affordable_quantity(desired: int, cash: float, fill: float, config: Backtes
     return 0
 
 
-def _trade_row(date: pd.Timestamp, symbol: str, side: str, quantity: int, fill: float, fees: float, blocked: str) -> dict:
+def _trade_row(
+    date: pd.Timestamp,
+    symbol: str,
+    side: str,
+    quantity: int,
+    fill: float,
+    fees: float,
+    blocked: str,
+    reason: str = "",
+) -> dict:
     return {
         "date": date,
         "symbol": symbol,
@@ -394,6 +649,7 @@ def _trade_row(date: pd.Timestamp, symbol: str, side: str, quantity: int, fill: 
         "fill_price": fill,
         "fees": fees,
         "blocked_reason": blocked,
+        "trade_reason": reason,
     }
 
 
@@ -401,3 +657,9 @@ def _max_hold_days(value: object) -> int:
     text = str(value or "")
     numbers = [int(part) for part in text.replace("d", "").split("-") if part.isdigit()]
     return max(numbers) if numbers else 10
+
+
+def _min_hold_days(value: object) -> int:
+    text = str(value or "")
+    numbers = [int(part) for part in text.replace("d", "").split("-") if part.isdigit()]
+    return min(numbers) if numbers else 1

@@ -97,6 +97,14 @@ python -m quant_a_stock.cli fundamental-watchlist --target-date 2026-06-12 --pla
 
 `fundamental_watchlist_*.csv` 不是新的选股模型，也不是用户直接看的荐股页。它从 `decision_signals` 中挑少量更值得验证基本面的标的，写入优先级、建议使用的 `ai-berkshire` 研究技能、交接原因和需要回答的问题。对应 JSON 会写到 `data/context/fundamental/数据截至日/ai_berkshire_plan_计划日期.json`。
 
+`ai-berkshire` 完成深研后，只需按 `config/fundamental_verdicts.example.csv` 返回结构化结论。AlphaCN 不复制财务分析过程，只接收结论：
+
+```powershell
+python -m quant_a_stock.cli import-fundamental-verdicts --input path/to/verdicts.csv --target-date 2026-07-10
+```
+
+命令会规范化 `pass/watch/reject`、质量分和风险摘要，写入 `fundamental_verdict_daily`。影子组合冻结时可显式读取该报告；基本面回流缺失不会阻塞每日量化流程。
+
 收口阶段也可以用统一研究流水线一次完成：
 
 ```powershell
