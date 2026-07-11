@@ -234,7 +234,7 @@ python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --to
 
 真实成交、walk-forward、因子证据和影子组合操作见 [docs/RESEARCH_VALIDATION.md](G:/OwnProject/alpha_cn/docs/RESEARCH_VALIDATION.md)。
 
-AlphaCN、Daily Stock Analysis 与 AI Berkshire 的启动、交接和健康检查见 [docs/PROJECT_ORCHESTRATION.md](G:/OwnProject/alpha_cn/docs/PROJECT_ORCHESTRATION.md)。
+AlphaCN、Codex 与 AI Berkshire 的每日协作、持仓交互和健康检查见 [docs/CODEX_RESEARCH_WORKFLOW.md](G:/OwnProject/alpha_cn/docs/CODEX_RESEARCH_WORKFLOW.md)。
 
 ## 项目结构
 

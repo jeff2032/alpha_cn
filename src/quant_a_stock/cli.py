@@ -36,10 +36,6 @@ from quant_a_stock.data.universe import filter_universe
 from quant_a_stock.data.universe import load_universe_file
 from quant_a_stock.data.universe import merge_universe_frames
 from quant_a_stock.data.universe import save_universe_file
-from quant_a_stock.integrations.daily_stock_analysis import build_daily_stock_analysis_handoff
-from quant_a_stock.integrations.daily_stock_analysis import daily_stock_analysis_health
-from quant_a_stock.integrations.daily_stock_analysis import daily_stock_analysis_model_ready
-from quant_a_stock.integrations.daily_stock_analysis import submit_daily_stock_analysis
 from quant_a_stock.research.candidates import ResearchCandidateConfig
 from quant_a_stock.research.candidates import build_research_candidates
 from quant_a_stock.research.candidates import fetch_company_profiles
@@ -2036,39 +2032,6 @@ def import_fundamental_verdicts(args: argparse.Namespace) -> None:
     print(f"基本面结论报告: {report_path}")
 
 
-def dsa_handoff(args: argparse.Namespace) -> None:
-    healthy, detail = daily_stock_analysis_health(args.base_url, timeout=args.health_timeout)
-    model_ready, model_detail = daily_stock_analysis_model_ready(args.base_url, timeout=args.health_timeout) if healthy else (False, "DSA 离线")
-    handoff = build_daily_stock_analysis_handoff(
-        context_path=Path(args.context_pack) if args.context_pack else None,
-        context_root=Path(args.context_root) if args.context_root else None,
-        output_root=Path(args.output_root) if args.output_root else None,
-        target_date=args.target_date,
-        plan_date=args.plan_date,
-        top=args.top,
-    )
-    print(f"数据截至: {handoff.target_date}，计划日期: {handoff.plan_date}")
-    print(f"DSA 状态: {'在线' if healthy else '离线'} ({detail})")
-    print(f"DSA 模型: {'就绪' if model_ready else '待配置'} ({model_detail})")
-    print(f"交接标的: {' '.join(handoff.symbols) if handoff.symbols else '无'}")
-    print(f"交接文件: {handoff.output_path}")
-    if not args.submit:
-        print("当前为 dry-run；使用 --submit 才会向 DSA 提交分析任务。")
-        return
-    if not healthy:
-        raise RuntimeError("DSA 未通过健康检查，拒绝提交。请先启动 Daily Stock Analysis。")
-    if not model_ready:
-        raise RuntimeError("DSA 主模型尚未配置，拒绝提交。请先在 DSA Settings 完成 LLM 主渠道设置。")
-    result = submit_daily_stock_analysis(
-        handoff,
-        base_url=args.base_url,
-        notify=args.notify,
-        report_type=args.report_type,
-        timeout=args.submit_timeout,
-    )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-
-
 def research_pipeline(args: argparse.Namespace) -> None:
     resolved_target = _resolve_trading_date(args.target_date)
     _announce_trading_date_resolution(args.target_date, resolved_target)
@@ -2940,21 +2903,6 @@ def build_parser() -> argparse.ArgumentParser:
     verdict.add_argument("--warehouse-dir", default=None)
     verdict.add_argument("--write-warehouse", action=argparse.BooleanOptionalAction, default=True)
     verdict.set_defaults(func=import_fundamental_verdicts)
-
-    dsa = subparsers.add_parser("dsa-handoff", help="把 AlphaCN 最终量化候选交给 Daily Stock Analysis 解读")
-    dsa.add_argument("--context-pack", default=None)
-    dsa.add_argument("--context-root", default=None)
-    dsa.add_argument("--output-root", default=None)
-    dsa.add_argument("--target-date", default=None)
-    dsa.add_argument("--plan-date", default=None)
-    dsa.add_argument("--base-url", default="http://127.0.0.1:8000")
-    dsa.add_argument("--top", type=int, default=8)
-    dsa.add_argument("--report-type", choices=["brief", "simple", "detailed", "full"], default="detailed")
-    dsa.add_argument("--health-timeout", type=float, default=5.0)
-    dsa.add_argument("--submit-timeout", type=float, default=30.0)
-    dsa.add_argument("--submit", action=argparse.BooleanOptionalAction, default=False)
-    dsa.add_argument("--notify", action=argparse.BooleanOptionalAction, default=False)
-    dsa.set_defaults(func=dsa_handoff)
 
     pipeline = subparsers.add_parser("research-pipeline", help="运行研究内核收口流水线：快照、日报、决策信号、Context Pack、可选入仓")
     pipeline.add_argument("--target-date", default=None)

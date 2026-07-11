@@ -1,1 +1,0 @@
-"""External project integration adapters."""

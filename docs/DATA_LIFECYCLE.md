@@ -86,7 +86,7 @@
 
 - `alpha_cn`：负责全市场数据准备、形态/情绪/主线/风险筛选、候选生命周期、复盘和结构化信号输出。
 - `ai-berkshire`：只消费 `fundamental_watchlist` 这类小清单，做商业质量、景气周期、估值、财报和 thesis 漂移验证，并通过 `fundamental_verdict_daily` 返回结构化结论，不做全市场扫盘。
-- `daily_stock_analysis`：只消费 `Context Pack` 或数仓视图，负责 AI 解读、交互入口、Web/API/通知，不重复实现候选筛选逻辑。
+- `Codex`：只消费 `Context Pack`、数仓视图和用户持仓，负责每日复盘、持仓交互和结论整理，不重复实现候选筛选逻辑。
 
 `run_manifest` 和 `data_quality_daily` 是早上判断“今天能不能用”的第一入口。结构化 CSV 是数据质量判断主依据；Markdown 和 Obsidian 属于用户展示层，不决定研究数据是否可用。
 

@@ -111,7 +111,7 @@ python -m quant_a_stock.cli import-fundamental-verdicts --input path/to/verdicts
 python -m quant_a_stock.cli research-pipeline --target-date 2026-06-12 --plan-date 2026-06-15 --top 30 --signal-top 80 --fundamental-top 20 --no-write-warehouse
 ```
 
-这条命令只做 `alpha_cn` 的研究内核收口：归档快照、生成每日复盘、派生决策信号、导出基本面深研交接清单、导出 Context Pack，可选入仓。它不做 AI 解读、不做 Web/Bot/桌面交互，避免和 `daily_stock_analysis` 重叠。
+这条命令只做 `alpha_cn` 的研究内核收口：归档快照、生成每日复盘、派生决策信号、导出基本面深研交接清单、导出 Context Pack，可选入仓。它不在量化流水线里生成主观 AI 结论；每日解读、持仓讨论和策略反思由 Codex 交互层完成。
 
 导出给 AI 解读、Web 壳或其他项目读取的结构化上下文：
 
@@ -119,7 +119,7 @@ python -m quant_a_stock.cli research-pipeline --target-date 2026-06-12 --plan-da
 python -m quant_a_stock.cli export-context-pack --target-date 2026-06-12 --plan-date 2026-06-15 --top 30
 ```
 
-Context Pack 写入 `data/context/research/数据截至日/plan_计划日期.json`，内容包括市场口径、主线、候选分层、决策信号、基本面深研交接清单、复盘摘要、生命周期和本地持仓匹配。它是机器可读接口，不替代 Obsidian 的用户决策页；后续 `daily_stock_analysis` 只需要读取这层 JSON 做 AI 解读和交互，`ai-berkshire` 只读取小清单做深研。
+Context Pack 写入 `data/context/research/数据截至日/plan_计划日期.json`，内容包括市场口径、主线、候选分层、决策信号、基本面深研交接清单、复盘摘要、生命周期和本地持仓匹配。它是机器可读接口，不替代 Obsidian 的用户决策页；Codex 读取这层 JSON 做每日复盘、持仓交互和结论整理，AI Berkshire Skills 只对少量重点标的做深研。
 
 夜间版本会抓公司资料、公告风险、巨潮结构化风险事件和东财资金流，允许慢慢跑。它会先补基础行情；如果补完后过期标的超过阈值，默认 30 只，会在同一个任务里等待并重试，默认最多 6 轮、每轮间隔 30 分钟；仍未达标时才跳过后续慢分析并写运维报告。手动执行完整夜间准备：
 
