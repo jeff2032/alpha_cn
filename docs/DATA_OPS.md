@@ -343,7 +343,15 @@ python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --to
 python -m quant_a_stock.cli warehouse-ingest --target-date 2026-06-18 --plan-date 2026-06-19
 ```
 
-这一步会同时派生中间层事实表：`run_manifest`、`data_quality_daily`、`research_candidate_daily`、`stock_market_attitude_daily`、`risk_event_daily`、`money_flow_daily`、`external_screen_daily`、`missed_opportunity_daily`、`factor_diagnostics_daily`、`strategy_review_daily`。同一天重复跑会覆盖同日分区，不会把行数翻倍。
+这一步会同时派生中间层事实表：`run_manifest`、`run_manifest_history`、`data_quality_daily`、`research_candidate_daily`、`stock_market_attitude_daily`、`risk_event_daily`、`money_flow_daily`、`external_screen_daily`、`missed_opportunity_daily`、`factor_diagnostics_daily`、`strategy_review_daily`。拿到同日有效报告时会原子替换同日事实分区，不会把行数翻倍；`run_manifest_history` 按运行追加，保留每次执行的审计记录。
+
+历史安全规则：
+
+- 缺少同日报告或报告为空时，默认保留仓库中已有的同日分区，并把本次质量状态标记为 `*_preserved`。
+- 只有确认需要删除旧分区时才使用 `--clear-missing-partitions`；日常任务不要传这个参数。
+- 正式研究快照一旦生成就不可覆盖。相同内容重复跑会直接复用；内容变化会报错。
+- 历史重建必须传独立标识，例如 `research-pipeline --target-date 2026-07-08 --rebuild-run-id rule-v2`，结果写入 `data/snapshots/research/rebuilds/`。
+- 历史 `sentiment-score` 和 `market-theme` 默认禁用当前人气榜、当前热门关键词等实时源。在线回抓的历史情绪即使按发布日期过滤，仍标记为非 point-in-time；只有当日冻结快照可进入正式因子统计。显式传 `--allow-live-historical` 会进一步混入实时源，只能用于排障。
 
 早上先看运行清单和数据质量：
 
@@ -401,7 +409,7 @@ python -m quant_a_stock.cli warehouse-review --since 2026-06-12 --until 2026-06-
 - DuckDB：`data/warehouse/alpha_cn.duckdb`
 - Parquet：`data/warehouse/parquet/`
 
-研究报告和快照入库是按目标交易日覆盖的。同一天重复跑不会把行数翻倍，只保留最新一版报告结果。日线行情按股票代码覆盖。这个目录不提交 git。
+研究事实按目标交易日原子替换，正式快照不可变，运行清单历史按 run_id 追加。日线行情按股票代码原子替换；`daily_candles_index` 对外视图按目标日和代码去重，只展示最新同步状态。这个目录不提交 git。
 
 ## 报告位置
 

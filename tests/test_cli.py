@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from quant_a_stock.cli import build_parser
+from quant_a_stock.cli import _align_adjusted_cache_basis
 from quant_a_stock.cli import _add_names_from_universe
 from quant_a_stock.cli import _balanced_scan_selection
 from quant_a_stock.cli import _incremental_start_from_last
@@ -351,6 +352,29 @@ def test_incremental_start_from_last_respects_lookback_and_since() -> None:
         )
         == "2026-06-01"
     )
+
+
+def test_adjusted_incremental_cache_aligns_old_price_basis() -> None:
+    cached = pd.DataFrame(
+        [
+            {"timestamp": "2026-01-01", "open": 10, "high": 11, "low": 9, "close": 10, "volume": 100},
+            {"timestamp": "2026-01-02", "open": 20, "high": 22, "low": 18, "close": 20, "volume": 200},
+            {"timestamp": "2026-01-03", "open": 30, "high": 33, "low": 27, "close": 30, "volume": 300},
+        ]
+    )
+    downloaded = pd.DataFrame(
+        [
+            {"timestamp": "2026-01-01", "close": 5},
+            {"timestamp": "2026-01-02", "close": 10},
+            {"timestamp": "2026-01-03", "close": 15},
+        ]
+    )
+
+    aligned = _align_adjusted_cache_basis(cached, downloaded, adjust="qfq")
+
+    assert aligned["close"].tolist() == [5.0, 10.0, 15.0]
+    assert aligned["open"].tolist() == [5.0, 10.0, 15.0]
+    assert aligned["volume"].tolist() == [100, 200, 300]
 
 
 def test_cache_status_command_parses_arguments() -> None:

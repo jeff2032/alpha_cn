@@ -44,6 +44,14 @@ def analyze_factor_evidence(
     if outcomes.empty or target_col not in outcomes.columns:
         return FactorEvidenceResult(pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
     base = outcomes.copy()
+    point_in_time_column = next(
+        (column for column in ("point_in_time", "sentiment_point_in_time") if column in base.columns),
+        None,
+    )
+    if point_in_time_column:
+        values = base[point_in_time_column]
+        explicit_false = values.fillna("").astype(str).str.lower().isin({"false", "0", "no", "n", "否"})
+        base = base[~explicit_false].copy()
     base["signal_date"] = pd.to_datetime(base["signal_date"])
     base[target_col] = pd.to_numeric(base[target_col], errors="coerce")
     rows = []

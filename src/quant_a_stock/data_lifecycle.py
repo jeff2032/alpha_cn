@@ -99,10 +99,10 @@ def build_data_loop_status(
             ),
             _layer_row(
                 "research_snapshots",
-                "过渡快照",
+                "正式研究快照",
                 root / "data" / "snapshots" / "research",
-                "保留最近 30 天；入仓后可清旧",
-                "每日 CSV 快照，用于回填和排障，不应成为长期主数据。",
+                "不可变；长期保留",
+                "冻结当日研究事实，用于回填、审计和防止历史判断被回跑改写。",
             ),
             _layer_row(
                 "reports",
@@ -194,7 +194,7 @@ def build_retention_plan(
     )
     rows.extend(
         _old_snapshot_dirs(
-            root / "data" / "snapshots" / "research",
+            root / "data" / "snapshots" / "research" / "rebuilds",
             days=policy.snapshots_days,
             now=current,
         )
@@ -377,12 +377,12 @@ def _old_snapshot_dirs(root: Path, *, days: int, now: datetime) -> list[dict]:
         rows.append(
             {
                 "action": "delete_dir",
-                "layer": "research_snapshots",
+                "layer": "research_snapshot_rebuilds",
                 "path": str(path),
                 "files": len(files),
                 "mb": round(total / 1024 / 1024, 2),
                 "last_modified": datetime.fromtimestamp(newest).strftime("%Y-%m-%d %H:%M:%S"),
-                "reason": "研究快照已回填数仓后，只保留近期排障窗口。",
+                "reason": "历史重建副本只保留近期排障窗口；正式快照不自动清理。",
             }
         )
     return rows

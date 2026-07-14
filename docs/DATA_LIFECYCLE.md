@@ -55,7 +55,8 @@
 - 因子挖掘优先读 `data/warehouse/parquet/` 或 DuckDB view。
 - 不再从散落的 `reports/*.csv` 拼长期统计。
 - `reports/` 只作为当天运行产物和排障入口。
-- `data/snapshots/` 只作为快照过渡层，不作为最终主存储。
+- `data/snapshots/research/<交易日>/` 是不可变研究事实快照，长期保留，用于审计和历史回填；DuckDB + Parquet 仍是统计查询主存储。
+- 历史规则重建写入 `data/snapshots/research/rebuilds/`，只保留近期排障窗口，不覆盖正式快照。
 - 开盘决策、持仓观察和复盘摘要进入 Obsidian；后续如果要量化“人工是否采纳”，再单独入仓。
 
 ## 中间层事实表
@@ -64,7 +65,8 @@
 
 | 表 | 粒度 | 用途 |
 | --- | --- | --- |
-| `run_manifest` | 每次入仓运行一行 | 保存 run_id、target_date、plan_date、仓库版本、质量状态、缺失源和警告源 |
+| `run_manifest` | 每个目标日最新一次运行一行 | 保存该日期当前采用的运行版本和质量状态 |
+| `run_manifest_history` | 每次入仓运行一行 | 按 run_id 追加保存参数、代码提交、数据覆盖和质量状态，支持完整审计 |
 | `data_quality_daily` | 每个报告源每天一行 | 保存候选、情绪、主线、资金、风险、问财、复盘等数据源是否就绪 |
 | `research_candidate_daily` | 每天每只最终候选一行 | 保存分层、分组、分数、主题、风险、预期观察周期、原因标签和市场态度摘要 |
 | `decision_signal_daily` | 每天每只决策信号一行 | 保存 `buy_watch/upgrade_watch/hold_watch/watch/avoid` 等处理口径、置信度、观察周期、观察条件和失效条件 |

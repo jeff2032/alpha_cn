@@ -9,6 +9,7 @@ from quant_a_stock.data.universe import normalize_symbol
 from quant_a_stock.sentiment.provider import fetch_hot_keywords
 from quant_a_stock.sentiment.provider import fetch_hot_rank
 from quant_a_stock.sentiment.provider import fetch_hot_rank_latest
+from quant_a_stock.sentiment.provider import FetchResult
 from quant_a_stock.sentiment.provider import fetch_limit_pool
 from quant_a_stock.sentiment.provider import fetch_research_reports
 from quant_a_stock.sentiment.provider import fetch_stock_news
@@ -52,6 +53,7 @@ class SentimentConfig:
     research_days: int = 90
     hot_rank_top: int = 500
     target_date: str | None = None
+    allow_live_historical: bool = False
 
 
 def latest_weekday(value: str | None = None) -> pd.Timestamp:
@@ -248,8 +250,14 @@ def build_sentiment_scores(
 ) -> tuple[pd.DataFrame, dict]:
     target_date = latest_weekday(config.target_date)
     date_compact = target_date.strftime("%Y%m%d")
+    historical_run = target_date < pd.Timestamp.now().normalize()
+    use_live_only_sources = not historical_run or config.allow_live_historical
 
-    hot_rank_result = fetch_hot_rank()
+    hot_rank_result = (
+        fetch_hot_rank()
+        if use_live_only_sources
+        else FetchResult(pd.DataFrame(), "historical_run_live_source_blocked")
+    )
     hot_rank = hot_rank_result.frame
     rank_map: dict[str, int] = {}
     if not hot_rank.empty and {"symbol", "当前排名"}.issubset(hot_rank.columns):
@@ -272,8 +280,16 @@ def build_sentiment_scores(
 
         news_result = fetch_stock_news(symbol)
         research_result = fetch_research_reports(symbol)
-        keyword_result = fetch_hot_keywords(symbol)
-        latest_rank_result = fetch_hot_rank_latest(symbol)
+        keyword_result = (
+            fetch_hot_keywords(symbol)
+            if use_live_only_sources
+            else FetchResult(pd.DataFrame(), "historical_run_live_source_blocked")
+        )
+        latest_rank_result = (
+            fetch_hot_rank_latest(symbol)
+            if use_live_only_sources
+            else FetchResult(pd.DataFrame(), "historical_run_live_source_blocked")
+        )
 
         if news_result.error:
             errors.append(f"{symbol} 新闻: {news_result.error}")
@@ -340,6 +356,14 @@ def build_sentiment_scores(
                 "in_strong_pool": symbol in strong_symbols,
                 "latest_news": news_stats["latest_news"],
                 "latest_core_news": news_stats["latest_core_news"],
+                "point_in_time": not historical_run,
+                "data_mode": (
+                    "live"
+                    if not historical_run
+                    else "historical_with_live_sources"
+                    if config.allow_live_historical
+                    else "historical_date_filtered"
+                ),
             }
         )
 
@@ -356,16 +380,33 @@ def build_sentiment_scores(
         "limit_pool_error": limit_pool_result.error,
         "strong_pool_error": strong_pool_result.error,
         "errors": errors,
+        "point_in_time": not historical_run,
+        "data_mode": (
+            "live"
+            if not historical_run
+            else "historical_with_live_sources"
+            if config.allow_live_historical
+            else "historical_date_filtered"
+        ),
     }
     return result, meta
 
 
-def build_market_theme(date: str | None = None) -> tuple[pd.DataFrame, dict]:
+def build_market_theme(
+    date: str | None = None,
+    *,
+    allow_live_historical: bool = False,
+) -> tuple[pd.DataFrame, dict]:
     target_date = latest_weekday(date)
     date_compact = target_date.strftime("%Y%m%d")
+    historical_run = target_date < pd.Timestamp.now().normalize()
     limit_result = fetch_limit_pool(date_compact)
     strong_result = fetch_strong_pool(date_compact)
-    hot_result = fetch_hot_rank()
+    hot_result = (
+        fetch_hot_rank()
+        if not historical_run or allow_live_historical
+        else FetchResult(pd.DataFrame(), "historical_run_live_source_blocked")
+    )
 
     frames = []
     for label, frame in (("涨停池", limit_result.frame), ("强势股池", strong_result.frame)):
@@ -412,5 +453,13 @@ def build_market_theme(date: str | None = None) -> tuple[pd.DataFrame, dict]:
         "strong_pool_error": strong_result.error,
         "hot_rank_error": hot_result.error,
         "hot_top": hot_top,
+        "point_in_time": not (historical_run and allow_live_historical),
+        "data_mode": (
+            "live"
+            if not historical_run
+            else "historical_with_live_sources"
+            if allow_live_historical
+            else "historical_point_in_time"
+        ),
     }
     return theme, meta

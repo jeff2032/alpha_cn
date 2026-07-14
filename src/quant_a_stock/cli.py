@@ -453,14 +453,58 @@ def _incremental_since(
     )
 
 
-def _merge_with_daily_cache(symbol: str, candles: pd.DataFrame) -> pd.DataFrame:
+def _merge_with_daily_cache(
+    symbol: str,
+    candles: pd.DataFrame,
+    *,
+    adjust: str | None = None,
+) -> pd.DataFrame:
     try:
         cached = load_daily_cache(symbol)
     except FileNotFoundError:
         return candles
 
+    cached = _align_adjusted_cache_basis(cached, candles, adjust=adjust)
     merged = pd.concat([cached, candles], ignore_index=True)
     return clean_candles(merged, symbol=symbol)
+
+
+def _align_adjusted_cache_basis(
+    cached: pd.DataFrame,
+    downloaded: pd.DataFrame,
+    *,
+    adjust: str | None,
+) -> pd.DataFrame:
+    """Align an old adjusted cache to the newest provider adjustment basis.
+
+    qfq/hfq history is multiplicatively restated after corporate actions. The
+    incremental request deliberately overlaps the cache, which lets us infer
+    that factor without downloading the complete history on every run.
+    """
+
+    if str(adjust or "").lower() not in {"qfq", "hfq"}:
+        return cached
+    required = {"timestamp", "close"}
+    if not required.issubset(cached.columns) or not required.issubset(downloaded.columns):
+        return cached
+    old = cached[["timestamp", "close"]].copy()
+    new = downloaded[["timestamp", "close"]].copy()
+    old["timestamp"] = pd.to_datetime(old["timestamp"], errors="coerce")
+    new["timestamp"] = pd.to_datetime(new["timestamp"], errors="coerce")
+    overlap = old.merge(new, on="timestamp", suffixes=("_old", "_new")).dropna()
+    overlap = overlap[(overlap["close_old"] > 0) & (overlap["close_new"] > 0)]
+    if len(overlap) < 3:
+        return cached
+    ratios = overlap["close_new"] / overlap["close_old"]
+    factor = float(ratios.median())
+    relative_spread = float((ratios / factor - 1).abs().median()) if factor else float("inf")
+    if not factor or abs(factor - 1.0) <= 1e-4 or relative_spread > 5e-3:
+        return cached
+    output = cached.copy()
+    for column in ("open", "high", "low", "close"):
+        if column in output.columns:
+            output[column] = pd.to_numeric(output[column], errors="coerce") * factor
+    return output
 
 
 def _strategy_params(args: argparse.Namespace) -> dict[str, int | float]:
@@ -583,7 +627,7 @@ def sync_daily(args: argparse.Namespace) -> None:
                 retry_wait=args.retry_wait,
             )
             if args.incremental:
-                candles = _merge_with_daily_cache(symbol, candles)
+                candles = _merge_with_daily_cache(symbol, candles, adjust=args.adjust)
             path = save_daily_cache(candles, symbol)
             prefix = "增量" if args.incremental else "全量"
             print(f"{symbol}: {prefix}保存 {len(candles)} 行 -> {path}")
@@ -734,7 +778,7 @@ def _sync_stock_universe_symbol(
             retry_wait=args.retry_wait,
         )
         if args.incremental:
-            candles = _merge_with_daily_cache(symbol, candles)
+            candles = _merge_with_daily_cache(symbol, candles, adjust=args.adjust)
         path = save_daily_cache(candles, symbol)
         status = "增量保存" if args.incremental else "已保存"
         result = {
@@ -1226,6 +1270,7 @@ def sentiment_score(args: argparse.Namespace) -> None:
             research_days=args.research_days,
             hot_rank_top=args.hot_rank_top,
             target_date=target_date,
+            allow_live_historical=args.allow_live_historical,
         ),
     )
     csv_path = save_report(
@@ -1277,7 +1322,10 @@ def sentiment_score(args: argparse.Namespace) -> None:
 def market_theme(args: argparse.Namespace) -> None:
     target_date = _resolve_trading_date(args.target_date).date().isoformat()
     _announce_trading_date_resolution(args.target_date, pd.Timestamp(target_date))
-    theme, meta = build_market_theme(target_date)
+    theme, meta = build_market_theme(
+        target_date,
+        allow_live_historical=args.allow_live_historical,
+    )
     csv_path = save_report(
         theme.to_dict("records"),
         report_type="market_theme",
@@ -2045,6 +2093,7 @@ def research_pipeline(args: argparse.Namespace) -> None:
             fundamental_top=args.fundamental_top,
             reports_dir=Path(args.reports_dir) if args.reports_dir else None,
             write_warehouse=args.write_warehouse,
+            rebuild_run_id=args.rebuild_run_id,
         )
     )
     print(f"研究流水线版本: {result.version}")
@@ -2203,6 +2252,7 @@ def warehouse_ingest(args: argparse.Namespace) -> None:
         warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
         run_id=args.run_id,
         run_parameters=json.loads(args.parameters_json) if args.parameters_json else None,
+        clear_missing_partitions=args.clear_missing_partitions,
     )
     print(f"研究仓库运行 ID: {result.run_id}")
     print(f"目标交易日: {result.target_date}")
@@ -2678,11 +2728,21 @@ def build_parser() -> argparse.ArgumentParser:
     sentiment.add_argument("--hot-rank-top", type=int, default=500)
     sentiment.add_argument("--top", type=int, default=None)
     sentiment.add_argument("--display-top", type=int, default=30)
+    sentiment.add_argument(
+        "--allow-live-historical",
+        action="store_true",
+        help="历史回跑时允许混入当前人气/关键词；会标记为非 point-in-time",
+    )
     sentiment.set_defaults(func=sentiment_score)
 
     theme = subparsers.add_parser("market-theme", help="生成市场主线观察报告")
     theme.add_argument("--target-date", default=None)
     theme.add_argument("--top", type=int, default=20)
+    theme.add_argument(
+        "--allow-live-historical",
+        action="store_true",
+        help="历史回跑时允许混入当前人气榜；会标记为非 point-in-time",
+    )
     theme.set_defaults(func=market_theme)
 
     risk = subparsers.add_parser("risk-events", help="抓取并结构化巨潮公告风险事件")
@@ -2912,6 +2972,11 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--fundamental-top", type=int, default=20)
     pipeline.add_argument("--reports-dir", default=None)
     pipeline.add_argument("--write-warehouse", action=argparse.BooleanOptionalAction, default=False)
+    pipeline.add_argument(
+        "--rebuild-run-id",
+        default=None,
+        help="把历史重建结果写入独立 rebuilds 目录，不覆盖正式快照",
+    )
     pipeline.set_defaults(func=research_pipeline)
 
     context_pack = subparsers.add_parser("export-context-pack", help="导出给 AI/外部入口读取的结构化研究上下文 JSON")
@@ -2952,6 +3017,11 @@ def build_parser() -> argparse.ArgumentParser:
     warehouse_ingest_parser.add_argument("--warehouse-dir", default=None)
     warehouse_ingest_parser.add_argument("--run-id", default=None)
     warehouse_ingest_parser.add_argument("--parameters-json", default=None, help="本次研究参数 JSON，用于生成参数哈希")
+    warehouse_ingest_parser.add_argument(
+        "--clear-missing-partitions",
+        action="store_true",
+        help="显式清空目标日缺失或空报告的旧分区；默认保留已有数据",
+    )
     warehouse_ingest_parser.set_defaults(func=warehouse_ingest)
 
     warehouse_status_parser = subparsers.add_parser("warehouse-status", help="查看研究仓库表和日期覆盖情况")

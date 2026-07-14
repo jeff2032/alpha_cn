@@ -2,14 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import os
 from pathlib import Path
 import shutil
+import uuid
 
 import duckdb
 import pandas as pd
 
 from quant_a_stock.config import DEFAULT_PATHS
 from quant_a_stock.data.calendar import cached_trading_dates
+from quant_a_stock.io_utils import exclusive_file_lock
 from quant_a_stock.research.decision_signal import build_decision_signals
 from quant_a_stock.research.lifecycle import build_candidate_lifecycle_tracking
 from quant_a_stock.research.provenance import build_run_provenance
@@ -51,6 +54,7 @@ MARKDOWN_REPORT_SPECS = {
 
 MIDDLE_LAYER_TABLES = [
     "run_manifest",
+    "run_manifest_history",
     "data_quality_daily",
     "research_candidate_daily",
     "decision_signal_daily",
@@ -132,6 +136,30 @@ def ingest_latest_reports(
     warehouse_dir: Path | None = None,
     run_id: str | None = None,
     run_parameters: dict | None = None,
+    clear_missing_partitions: bool = False,
+) -> WarehouseIngestResult:
+    lock_path = warehouse_root(warehouse_dir) / ".locks" / "warehouse_ingest.lock"
+    with exclusive_file_lock(lock_path, owner=f"warehouse-ingest:{target_date}"):
+        return _ingest_latest_reports_unlocked(
+            target_date=target_date,
+            plan_date=plan_date,
+            reports_dir=reports_dir,
+            warehouse_dir=warehouse_dir,
+            run_id=run_id,
+            run_parameters=run_parameters,
+            clear_missing_partitions=clear_missing_partitions,
+        )
+
+
+def _ingest_latest_reports_unlocked(
+    *,
+    target_date: str,
+    plan_date: str | None = None,
+    reports_dir: Path | None = None,
+    warehouse_dir: Path | None = None,
+    run_id: str | None = None,
+    run_parameters: dict | None = None,
+    clear_missing_partitions: bool = False,
 ) -> WarehouseIngestResult:
     reports_root = reports_dir or DEFAULT_PATHS.reports
     root = warehouse_root(warehouse_dir)
@@ -150,15 +178,32 @@ def ingest_latest_reports(
         if path is None:
             latest_path = _latest_file(reports_root, pattern)
             status = "missing_for_date" if latest_path is not None else "missing"
-            _clear_target_partition(table_name, target_date=target_date, warehouse_dir=warehouse_dir)
+            if clear_missing_partitions:
+                _clear_target_partition(table_name, target_date=target_date, warehouse_dir=warehouse_dir)
+            elif _target_partition_exists(table_name, target_date=target_date, warehouse_dir=warehouse_dir):
+                status = f"{status}_preserved"
             report_rows.append(_report_row(resolved_run_id, target_date, table_name, latest_path, 0, status, ingested_at))
             continue
         try:
             frame = pd.read_csv(path, dtype={"symbol": str})
         except pd.errors.EmptyDataError:
-            _clear_target_partition(table_name, target_date=target_date, warehouse_dir=warehouse_dir)
+            status = "empty"
+            if clear_missing_partitions:
+                _clear_target_partition(table_name, target_date=target_date, warehouse_dir=warehouse_dir)
+            elif _target_partition_exists(table_name, target_date=target_date, warehouse_dir=warehouse_dir):
+                status = "empty_preserved"
             report_rows.append(
-                _report_row(resolved_run_id, target_date, table_name, path, 0, "empty", ingested_at)
+                _report_row(resolved_run_id, target_date, table_name, path, 0, status, ingested_at)
+            )
+            continue
+        if frame.empty:
+            status = "empty"
+            if clear_missing_partitions:
+                _clear_target_partition(table_name, target_date=target_date, warehouse_dir=warehouse_dir)
+            elif _target_partition_exists(table_name, target_date=target_date, warehouse_dir=warehouse_dir):
+                status = "empty_preserved"
+            report_rows.append(
+                _report_row(resolved_run_id, target_date, table_name, path, 0, status, ingested_at)
             )
             continue
         output = _with_metadata(
@@ -211,17 +256,29 @@ def ingest_latest_reports(
             warehouse_dir=warehouse_dir,
         )
     )
+    manifest_frame = _build_run_manifest(
+        base_report_index,
+        target_date=target_date,
+        plan_date=plan_date,
+        run_id=resolved_run_id,
+        ingested_at=ingested_at,
+        run_parameters=run_parameters,
+    )
     system_rows.append(
         _write_middle_frame(
-            _build_run_manifest(
-                base_report_index,
-                target_date=target_date,
-                plan_date=plan_date,
-                run_id=resolved_run_id,
-                ingested_at=ingested_at,
-                run_parameters=run_parameters,
-            ),
+            manifest_frame,
             "run_manifest",
+            target_date=target_date,
+            run_id=resolved_run_id,
+            source_path="derived:report_index",
+            ingested_at=ingested_at,
+            warehouse_dir=warehouse_dir,
+        )
+    )
+    system_rows.append(
+        _write_append_only_middle_frame(
+            manifest_frame,
+            "run_manifest_history",
             target_date=target_date,
             run_id=resolved_run_id,
             source_path="derived:report_index",
@@ -1312,6 +1369,27 @@ def _write_middle_frame(
     return _report_row(run_id, target_date, table_name, None, len(output), "derived", ingested_at)
 
 
+def _write_append_only_middle_frame(
+    frame: pd.DataFrame,
+    table_name: str,
+    *,
+    target_date: str,
+    run_id: str,
+    source_path: str,
+    ingested_at: str,
+    warehouse_dir: Path | None,
+) -> dict:
+    output = frame.copy()
+    if output.empty:
+        return _report_row(run_id, target_date, table_name, None, 0, "empty", ingested_at)
+    output["warehouse_run_id"] = run_id
+    output["warehouse_target_date"] = target_date
+    output["warehouse_source_path"] = source_path
+    output["warehouse_ingested_at"] = ingested_at
+    _write_run_parquet(output, table_name, run_id=run_id, warehouse_dir=warehouse_dir)
+    return _report_row(run_id, target_date, table_name, None, len(output), "appended", ingested_at)
+
+
 def _write_date_partitioned_middle_frame(
     frame: pd.DataFrame,
     table_name: str,
@@ -1356,12 +1434,28 @@ def refresh_warehouse_views(*, warehouse_dir: Path | None = None) -> None:
                 conn.execute(f"DROP VIEW IF EXISTS {table_name}")
                 continue
             pattern = _duckdb_path(table_root / "**" / "*.parquet")
-            conn.execute(
-                f"""
-                CREATE OR REPLACE VIEW {table_name} AS
-                SELECT * FROM read_parquet('{pattern}', union_by_name=true)
-                """
-            )
+            if table_name == "daily_candles_index":
+                conn.execute(
+                    f"""
+                    CREATE OR REPLACE VIEW {table_name} AS
+                    SELECT * EXCLUDE (_row_number)
+                    FROM (
+                        SELECT *, ROW_NUMBER() OVER (
+                            PARTITION BY warehouse_target_date, symbol
+                            ORDER BY warehouse_ingested_at DESC, warehouse_run_id DESC
+                        ) AS _row_number
+                        FROM read_parquet('{pattern}', union_by_name=true)
+                    )
+                    WHERE _row_number = 1
+                    """
+                )
+            else:
+                conn.execute(
+                    f"""
+                    CREATE OR REPLACE VIEW {table_name} AS
+                    SELECT * FROM read_parquet('{pattern}', union_by_name=true)
+                    """
+                )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS warehouse_meta (
@@ -1641,6 +1735,8 @@ def _build_research_candidate_daily(frame: pd.DataFrame, *, target_date: str) ->
     output["factor_schema_version"] = _column(frame, "factor_schema_version", default="")
     output["shape_score"] = _numeric_column(frame, "score")
     output["sentiment_score"] = _numeric_column(frame, "sentiment_score")
+    output["sentiment_point_in_time"] = _column(frame, "point_in_time", default="")
+    output["sentiment_data_mode"] = _column(frame, "data_mode", default="")
     output["money_flow_score"] = _numeric_column(frame, "money_flow_score")
     output["money_flow_bonus"] = _numeric_column(frame, "money_flow_bonus")
     output["main_net_inflow_3d"] = _numeric_column(frame, "main_net_inflow_3d")
@@ -1749,6 +1845,8 @@ def _build_stock_market_attitude_daily(frame: pd.DataFrame, *, target_date: str)
     output["attitude_reasons"] = attitude["reasons"]
     output["attitude_risks"] = attitude["risks"]
     output["data_sources"] = "candidate, sentiment, theme, price_volume, risk_notice, money_flow, external_screen"
+    output["sentiment_point_in_time"] = _column(frame, "point_in_time", default="")
+    output["sentiment_data_mode"] = _column(frame, "data_mode", default="")
     return output
 
 
@@ -2263,18 +2361,26 @@ def _write_parquet(
     warehouse_dir: Path | None,
 ) -> Path:
     output_dir = parquet_root(warehouse_dir) / table_name / f"target_date={target_date}"
-    _replace_target_partition(output_dir, warehouse_dir=warehouse_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{_safe_filename(run_id)}.parquet"
-    with duckdb.connect() as conn:
-        conn.register("warehouse_frame", frame)
-        conn.execute(f"COPY warehouse_frame TO '{_duckdb_path(output_path)}' (FORMAT PARQUET)")
-    return output_path
+    staging_dir = output_dir.parent / f".{output_dir.name}.{uuid.uuid4().hex}.tmp"
+    staging_dir.mkdir(parents=True, exist_ok=False)
+    staging_path = staging_dir / f"{_safe_filename(run_id)}.parquet"
+    try:
+        _copy_frame_to_parquet(frame, staging_path)
+        _swap_partition(staging_dir, output_dir, warehouse_dir=warehouse_dir)
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+    return output_dir / staging_path.name
 
 
 def _clear_target_partition(table_name: str, *, target_date: str, warehouse_dir: Path | None) -> None:
     output_dir = parquet_root(warehouse_dir) / table_name / f"target_date={target_date}"
     _replace_target_partition(output_dir, warehouse_dir=warehouse_dir)
+
+
+def _target_partition_exists(table_name: str, *, target_date: str, warehouse_dir: Path | None) -> bool:
+    output_dir = parquet_root(warehouse_dir) / table_name / f"target_date={target_date}"
+    return output_dir.exists() and any(output_dir.glob("*.parquet"))
 
 
 def _report_row(
@@ -2440,6 +2546,28 @@ def _replace_target_partition(output_dir: Path, *, warehouse_dir: Path | None) -
         shutil.rmtree(output_dir)
 
 
+def _swap_partition(staging_dir: Path, output_dir: Path, *, warehouse_dir: Path | None) -> None:
+    parquet = parquet_root(warehouse_dir).resolve()
+    target = output_dir.resolve()
+    if parquet not in target.parents:
+        raise ValueError(f"Refuse to replace partition outside warehouse parquet root: {target}")
+    backup_dir = output_dir.parent / f".{output_dir.name}.{uuid.uuid4().hex}.bak"
+    had_existing = output_dir.exists()
+    swap_completed = False
+    try:
+        if had_existing:
+            os.replace(output_dir, backup_dir)
+        os.replace(staging_dir, output_dir)
+        swap_completed = True
+    except Exception:
+        if had_existing and backup_dir.exists() and not output_dir.exists():
+            os.replace(backup_dir, output_dir)
+        raise
+    finally:
+        if swap_completed and backup_dir.exists():
+            shutil.rmtree(backup_dir)
+
+
 def _write_symbol_parquet(
     frame: pd.DataFrame,
     table_name: str,
@@ -2454,11 +2582,12 @@ def _write_symbol_parquet(
     target = output_path.resolve()
     if table_root not in target.parents:
         raise ValueError(f"Refuse to write parquet outside table root: {target}")
-    if output_path.exists():
-        output_path.unlink()
-    with duckdb.connect() as conn:
-        conn.register("warehouse_frame", frame)
-        conn.execute(f"COPY warehouse_frame TO '{_duckdb_path(output_path)}' (FORMAT PARQUET)")
+    temp_path = output_dir / f".{output_path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        _copy_frame_to_parquet(frame, temp_path)
+        os.replace(temp_path, output_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
     return output_path
 
 
@@ -2476,12 +2605,19 @@ def _write_run_parquet(
     target = output_path.resolve()
     if table_root not in target.parents:
         raise ValueError(f"Refuse to write parquet outside table root: {target}")
-    if output_path.exists():
-        output_path.unlink()
+    temp_path = output_dir / f".{output_path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        _copy_frame_to_parquet(frame, temp_path)
+        os.replace(temp_path, output_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return output_path
+
+
+def _copy_frame_to_parquet(frame: pd.DataFrame, output_path: Path) -> None:
     with duckdb.connect() as conn:
         conn.register("warehouse_frame", frame)
         conn.execute(f"COPY warehouse_frame TO '{_duckdb_path(output_path)}' (FORMAT PARQUET)")
-    return output_path
 
 
 def _snapshot_dirs(root: Path, *, since: str | None, until: str | None) -> list[Path]:

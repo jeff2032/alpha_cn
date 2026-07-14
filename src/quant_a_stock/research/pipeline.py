@@ -5,6 +5,7 @@ from pathlib import Path
 
 from quant_a_stock.backtest.report import save_report
 from quant_a_stock.config import DEFAULT_PATHS
+from quant_a_stock.io_utils import exclusive_file_lock
 from quant_a_stock.research.context_pack import save_research_context_pack
 from quant_a_stock.research.decision_signal import build_decision_signals
 from quant_a_stock.research.decision_signal import load_candidates_for_decision_signals
@@ -17,7 +18,7 @@ from quant_a_stock.research.summary import save_daily_research_summary_markdown
 from quant_a_stock.warehouse import ingest_latest_reports
 
 
-PIPELINE_VERSION = "research_pipeline_v2026_07_11_shadow_lifecycle_gate"
+PIPELINE_VERSION = "research_pipeline_v2026_07_14_immutable_rerun"
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class ResearchPipelineConfig:
     fundamental_top: int = 20
     reports_dir: Path | None = None
     write_warehouse: bool = False
+    rebuild_run_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,13 @@ class ResearchPipelineResult:
 
 
 def run_research_pipeline(config: ResearchPipelineConfig) -> ResearchPipelineResult:
+    reports_dir = config.reports_dir or DEFAULT_PATHS.reports
+    lock_path = reports_dir / ".locks" / "research_pipeline.lock"
+    with exclusive_file_lock(lock_path, owner=f"research-pipeline:{config.target_date}"):
+        return _run_research_pipeline_unlocked(config)
+
+
+def _run_research_pipeline_unlocked(config: ResearchPipelineConfig) -> ResearchPipelineResult:
     """Finalize a research day from existing scan/candidate reports.
 
     This is the alpha_cn research kernel, not an AI/product UI layer. It assumes
@@ -61,7 +70,11 @@ def run_research_pipeline(config: ResearchPipelineConfig) -> ResearchPipelineRes
     artifacts: dict[str, Path] = {}
 
     snapshot_reports = _latest_research_reports(config.target_date, reports_dir=reports_dir)
-    snapshot_dir = save_research_snapshot(target_date=config.target_date, reports=snapshot_reports)
+    snapshot_dir = save_research_snapshot(
+        target_date=config.target_date,
+        reports=snapshot_reports,
+        rebuild_run_id=config.rebuild_run_id,
+    )
     artifacts["snapshot"] = snapshot_dir
     steps.append(ResearchPipelineStep("snapshot", "ok", str(snapshot_dir)))
 

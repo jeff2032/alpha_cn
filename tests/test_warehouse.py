@@ -302,11 +302,22 @@ def test_ingest_latest_reports_requires_matching_target_date(tmp_path: Path) -> 
     candidates = result.ingested[result.ingested["report_type"] == "research_candidates"].iloc[0]
     sentiment = result.ingested[result.ingested["report_type"] == "sentiment_scores"].iloc[0]
     assert candidates["status"] == "ingested"
-    assert sentiment["status"] == "missing_for_date"
+    assert sentiment["status"] == "missing_for_date_preserved"
     assert "20260617" in sentiment["source_path"]
     status = warehouse_status(warehouse_dir=warehouse_dir)
     sentiment_rows = status.loc[status["table"] == "sentiment_scores", "rows"].iloc[0]
-    assert sentiment_rows == 0
+    assert sentiment_rows == 1
+
+    ingest_latest_reports(
+        target_date="2026-06-18",
+        reports_dir=reports_dir,
+        warehouse_dir=warehouse_dir,
+        run_id="date-filter-explicit-clear",
+        clear_missing_partitions=True,
+    )
+    cleared_status = warehouse_status(warehouse_dir=warehouse_dir)
+    cleared_rows = cleared_status.loc[cleared_status["table"] == "sentiment_scores", "rows"].iloc[0]
+    assert cleared_rows == 0
 
 
 def test_ingest_latest_reports_treats_zero_byte_csv_as_empty(tmp_path: Path) -> None:
@@ -438,10 +449,12 @@ def test_sync_universe_and_daily_candles_to_warehouse(tmp_path: Path) -> None:
     security_rows = status.loc[status["table"] == "security_master_daily", "rows"].iloc[0]
     candle_rows = status.loc[status["table"] == "daily_candles", "rows"].iloc[0]
     candle_symbols = status.loc[status["table"] == "daily_candles", "symbols"].iloc[0]
+    candle_index_rows = status.loc[status["table"] == "daily_candles_index", "rows"].iloc[0]
     assert universe_rows == 1
     assert security_rows == 1
     assert candle_rows == 2
     assert candle_symbols == 1
+    assert candle_index_rows == 1
 
     security = warehouse_query("security_master_daily", warehouse_dir=warehouse_dir)
     assert security.loc[0, "as_of_date"] == "2026-06-18"

@@ -39,3 +39,30 @@ def test_save_daily_cache_keeps_only_standard_cache_columns(tmp_path) -> None:
         "symbol",
         "is_suspended",
     ]
+
+
+def test_older_writer_cannot_remove_newer_cached_dates(tmp_path) -> None:
+    cache_dir = tmp_path / "cache"
+    newer = pd.DataFrame(
+        [
+            {"timestamp": "2026-07-13", "close": 10, "symbol": "000001"},
+            {"timestamp": "2026-07-14", "close": 11, "symbol": "000001"},
+        ]
+    )
+    stale = pd.DataFrame(
+        [
+            {"timestamp": "2026-07-12", "close": 9, "symbol": "000001"},
+            {"timestamp": "2026-07-13", "close": 9.5, "symbol": "000001"},
+        ]
+    )
+
+    save_daily_cache(newer, "000001", cache_dir=cache_dir)
+    save_daily_cache(stale, "000001", cache_dir=cache_dir)
+    loaded = load_daily_cache("000001", cache_dir=cache_dir)
+
+    assert loaded["timestamp"].dt.strftime("%Y-%m-%d").tolist() == [
+        "2026-07-12",
+        "2026-07-13",
+        "2026-07-14",
+    ]
+    assert loaded.loc[loaded["timestamp"] == pd.Timestamp("2026-07-13"), "close"].iloc[0] == 10
