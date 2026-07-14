@@ -540,19 +540,32 @@ try {
         "--target-date", $script:ResolvedTargetDate,
         "--top", "20"
     )
-    Invoke-QuantStep -Name "资金流缓存" -Arguments @(
+    $moneyFlowProbeStartedAt = Get-Date
+    $moneyFlowTop = [Math]::Min(30, $SentimentTop)
+    Invoke-QuantStep -Name "资金流核心候选探测" -Arguments @(
         "money-flow",
         "--latest-scan",
         "--target-date", $script:ResolvedTargetDate,
-        "--top", $SentimentTop.ToString([Globalization.CultureInfo]::InvariantCulture),
+        "--top", $moneyFlowTop.ToString([Globalization.CultureInfo]::InvariantCulture),
         "--lookback-days", "10",
         "--display-top", "30",
-        "--retries", "3",
-        "--retry-wait", "2",
-        "--sleep", "0.4",
-        "--min-success-rate", "0.60",
+        "--retries", "1",
+        "--retry-wait", "0",
+        "--sleep", "0.1",
+        "--min-success-rate", "0.30",
         "--soft-fail"
     )
+    $moneyFlowDateToken = ([datetime]::Parse($script:ResolvedTargetDate)).ToString("yyyyMMdd")
+    $moneyFlowReport = Get-ChildItem -LiteralPath (Join-Path $ProjectRoot "reports") -Filter ("money_flow_{0}_*.csv" -f $moneyFlowDateToken) |
+        Where-Object { $_.LastWriteTime -ge $moneyFlowProbeStartedAt.AddSeconds(-1) } |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+    if ($null -eq $moneyFlowReport) {
+        Add-StepResult -Name "资金流覆盖策略" -Status "降级" -Detail "核心候选探测未达到最低成功率，跳过全量抓取；候选池按资金流缺失继续。"
+        Write-Step "Money-flow probe produced no valid report; continue without the optional factor."
+    } else {
+        Add-StepResult -Name "资金流覆盖策略" -Status "通过" -Detail ("已缓存核心候选：" + $moneyFlowReport.FullName)
+    }
     Invoke-QuantStep -Name "巨潮风险事件缓存" -Arguments @(
         "risk-events",
         "--latest-scan",
