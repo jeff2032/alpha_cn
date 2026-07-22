@@ -6,6 +6,7 @@ from quant_a_stock.data.universe import filter_universe
 from quant_a_stock.data.universe import infer_market
 from quant_a_stock.data.universe import merge_universe_frames
 from quant_a_stock.data.universe import normalize_symbol
+from quant_a_stock.data.universe import _standardize_universe_frame
 
 
 def test_normalize_symbol_removes_market_prefix() -> None:
@@ -32,6 +33,30 @@ def test_filter_universe_excludes_st_and_markets() -> None:
     result = filter_universe(raw, markets={"sh", "sz"}, exclude_st=True)
 
     assert result["symbol"].tolist() == ["688143"]
+
+
+def test_filter_universe_excludes_delisted_and_pt_names() -> None:
+    raw = pd.DataFrame(
+        {
+            "symbol": ["000001", "000004", "000003"],
+            "name": ["平安银行", "国华退", "PT金田A"],
+        }
+    )
+
+    result = filter_universe(raw, exclude_st=True)
+
+    assert result["symbol"].tolist() == ["000001"]
+
+
+def test_exchange_universe_accepts_english_code_and_name_columns() -> None:
+    raw = pd.DataFrame({"code": ["000001", "600000"], "name": ["平安银行", "浦发银行"]})
+
+    result = _standardize_universe_frame(raw, provider="exchange").frame
+
+    assert result[["symbol", "name", "market"]].to_dict("records") == [
+        {"symbol": "000001", "name": "平安银行", "market": "sz"},
+        {"symbol": "600000", "name": "浦发银行", "market": "sh"},
+    ]
 
 
 def test_merge_universe_frames_keeps_old_and_new_symbols() -> None:

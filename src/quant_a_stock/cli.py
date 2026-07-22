@@ -163,6 +163,31 @@ def _cached_symbols() -> list[str]:
     return sorted(path.stem for path in cache_dir.glob("*.csv"))
 
 
+def _operational_cached_symbols() -> list[str]:
+    cached = set(_cached_symbols())
+    universe_path = DEFAULT_PATHS.root / "data" / "universe" / "a_stock.csv"
+    if not universe_path.exists():
+        return sorted(cached)
+    universe = load_universe_file(universe_path)
+    return sorted(set(universe["symbol"].astype(str)) & cached)
+
+
+def _filter_exact_cross_section(
+    candles_by_symbol: dict[str, pd.DataFrame],
+    *,
+    target_date: str,
+) -> tuple[dict[str, pd.DataFrame], list[str]]:
+    target = pd.Timestamp(target_date).normalize()
+    eligible: dict[str, pd.DataFrame] = {}
+    stale: list[str] = []
+    for symbol, candles in candles_by_symbol.items():
+        if candles.empty or pd.Timestamp(candles["timestamp"].iloc[-1]).normalize() != target:
+            stale.append(symbol)
+            continue
+        eligible[symbol] = candles
+    return eligible, stale
+
+
 def _latest_report(pattern: str) -> Path | None:
     reports_dir = DEFAULT_PATHS.reports
     if not reports_dir.exists():
@@ -655,13 +680,13 @@ def list_stock_universe(args: argparse.Namespace) -> None:
 
 
 def refresh_stock_universe(args: argparse.Namespace) -> None:
-    frames = []
+    provider_frames = []
     provider_rows = []
     existing_path = Path(args.existing_file)
+    existing = pd.DataFrame(columns=["symbol", "name", "market"])
     if existing_path.exists():
         existing = load_universe_file(existing_path)
-        frames.append(existing)
-        provider_rows.append({"source": str(existing_path), "status": "保留旧池", "symbols": len(existing), "error": ""})
+        provider_rows.append({"source": str(existing_path), "status": "失败时兜底", "symbols": len(existing), "error": ""})
     elif args.require_existing:
         raise SystemExit(f"Universe file not found: {existing_path}")
     else:
@@ -670,16 +695,23 @@ def refresh_stock_universe(args: argparse.Namespace) -> None:
     for provider in args.providers:
         try:
             universe = fetch_stock_universe(provider)
-            frames.append(universe.frame)
+            provider_frames.append(universe.frame)
             provider_rows.append(
-                {"source": provider, "status": "已获取", "symbols": len(universe.frame), "error": ""}
+                {"source": provider, "status": "已选为当前池", "symbols": len(universe.frame), "error": ""}
             )
+            break
         except Exception as exc:
             provider_rows.append(
                 {"source": provider, "status": "失败", "symbols": 0, "error": f"{type(exc).__name__}: {exc}"}
             )
             if args.strict:
                 raise
+
+    frames = [provider_frames[0]] if provider_frames else ([existing] if not existing.empty else [])
+    if not provider_frames and not existing.empty:
+        provider_rows.append(
+            {"source": str(existing_path), "status": "在线源失败，使用旧池", "symbols": len(existing), "error": ""}
+        )
 
     manual_files = [Path(value) for value in args.manual_files]
     for manual_path in manual_files:
@@ -699,7 +731,7 @@ def refresh_stock_universe(args: argparse.Namespace) -> None:
     if args.limit:
         filtered = filtered.head(args.limit)
 
-    old_symbols = set(existing["symbol"].astype(str)) if existing_path.exists() else set()
+    old_symbols = set(existing["symbol"].astype(str)) if not existing.empty else set()
     new_symbols = set(filtered["symbol"].astype(str))
     added = sorted(new_symbols - old_symbols)
     removed = sorted(old_symbols - new_symbols)
@@ -1109,11 +1141,21 @@ def scan_pattern(args: argparse.Namespace) -> None:
         _announce_trading_date_resolution(args.target_date, resolved_target)
         target_date = resolved_target.date().isoformat()
 
-    symbols = args.symbols or _cached_symbols()
+    symbols = args.symbols or _operational_cached_symbols()
     if not symbols:
         raise SystemExit("没有传入标的，也没有找到本地缓存 CSV。")
 
     candles_by_symbol = _load_candles(symbols, until=target_date)
+    if target_date:
+        candles_by_symbol, stale_symbols = _filter_exact_cross_section(
+            candles_by_symbol,
+            target_date=target_date,
+        )
+        if stale_symbols:
+            print(
+                f"跳过 {len(stale_symbols)} 个在 {target_date} 无行情的标的"
+                "（停牌、退市或缓存过期）。"
+            )
     if args.pattern == "base_breakout_setup":
         config = BaseBreakoutSetupConfig(
             base_window=args.base_window,
@@ -2245,13 +2287,18 @@ def warehouse_ingest(args: argparse.Namespace) -> None:
     resolved_target_date = _resolve_trading_date(args.target_date)
     _announce_trading_date_resolution(args.target_date, resolved_target_date)
     target_date = resolved_target_date.date().isoformat()
+    run_parameters = None
+    if args.parameters_file:
+        run_parameters = json.loads(Path(args.parameters_file).read_text(encoding="utf-8-sig"))
+    elif args.parameters_json:
+        run_parameters = json.loads(args.parameters_json)
     result = ingest_latest_reports(
         target_date=target_date,
         plan_date=args.plan_date,
         reports_dir=Path(args.reports_dir) if args.reports_dir else None,
         warehouse_dir=Path(args.warehouse_dir) if args.warehouse_dir else None,
         run_id=args.run_id,
-        run_parameters=json.loads(args.parameters_json) if args.parameters_json else None,
+        run_parameters=run_parameters,
         clear_missing_partitions=args.clear_missing_partitions,
     )
     print(f"研究仓库运行 ID: {result.run_id}")
@@ -2564,7 +2611,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     refresh_universe = subparsers.add_parser(
         "refresh-stock-universe",
-        help="合并多个数据源、旧股票池和必保清单，刷新 A 股股票池",
+        help="按优先级选择首个可用活跃数据源，失败时才回退旧池，并合并必保清单",
     )
     refresh_universe.add_argument("--providers", nargs="+", choices=["eastmoney", "exchange", "sina"], default=["eastmoney", "exchange", "sina"])
     refresh_universe.add_argument("--existing-file", default="data/universe/a_stock.csv")
@@ -3016,7 +3063,13 @@ def build_parser() -> argparse.ArgumentParser:
     warehouse_ingest_parser.add_argument("--reports-dir", default=None)
     warehouse_ingest_parser.add_argument("--warehouse-dir", default=None)
     warehouse_ingest_parser.add_argument("--run-id", default=None)
-    warehouse_ingest_parser.add_argument("--parameters-json", default=None, help="本次研究参数 JSON，用于生成参数哈希")
+    parameters_group = warehouse_ingest_parser.add_mutually_exclusive_group()
+    parameters_group.add_argument("--parameters-json", default=None, help="本次研究参数 JSON，用于生成参数哈希")
+    parameters_group.add_argument(
+        "--parameters-file",
+        default=None,
+        help="本次研究参数 JSON 文件；Windows/PowerShell 自动任务优先使用此方式",
+    )
     warehouse_ingest_parser.add_argument(
         "--clear-missing-partitions",
         action="store_true",

@@ -8,6 +8,7 @@ import pandas as pd
 
 from quant_a_stock.config import DEFAULT_PATHS
 from quant_a_stock.data.cache import daily_cache_path
+from quant_a_stock.io_utils import atomic_write_csv
 
 
 UniverseProvider = Literal["auto", "eastmoney", "exchange", "sina"]
@@ -57,6 +58,8 @@ def _standardize_universe_frame(frame: pd.DataFrame, *, provider: str) -> StockU
         "名称": "name",
         "证券简称": "name",
         "A股简称": "name",
+        "code": "symbol",
+        "name": "name",
     }
     output = frame.rename(columns=rename_map).copy()
     if "symbol" not in output.columns:
@@ -110,7 +113,7 @@ def filter_universe(
     if markets is not None:
         output = output[output["market"].isin(markets)]
     if exclude_st:
-        output = output[~output["name"].str.contains("ST", case=False, na=False)]
+        output = output[~output["name"].str.contains(r"ST|退|^PT", case=False, na=False, regex=True)]
 
     return output.drop_duplicates(subset=["symbol"], keep="first").reset_index(drop=True)
 
@@ -161,7 +164,7 @@ def save_universe_file(
 ) -> Path:
     output_path = path or DEFAULT_PATHS.root / "data" / "universe" / "a_stock.csv"
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    universe.to_csv(output_path, index=False)
+    atomic_write_csv(universe, output_path, index=False)
     return output_path
 
 

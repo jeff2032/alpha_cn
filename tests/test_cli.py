@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from quant_a_stock.cli import _filter_exact_cross_section
 from quant_a_stock.cli import build_parser
 from quant_a_stock.cli import _align_adjusted_cache_basis
 from quant_a_stock.cli import _add_names_from_universe
@@ -33,6 +34,17 @@ def test_compare_command_parses_strategy_arguments() -> None:
     assert args.rsi_entry == 40
 
 
+def test_warehouse_ingest_accepts_parameters_file() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        ["warehouse-ingest", "--target-date", "2026-07-22", "--parameters-file", "run.json"]
+    )
+
+    assert args.parameters_file == "run.json"
+    assert args.parameters_json is None
+
+
 def test_scan_pattern_command_parses_setup_arguments() -> None:
     parser = build_parser()
 
@@ -58,6 +70,23 @@ def test_scan_pattern_command_parses_setup_arguments() -> None:
     assert args.proximity_pct == 0.03
     assert args.stages == ["watch", "near_breakout"]
     assert args.min_amount_ma20 == 100000000
+
+
+def test_filter_exact_cross_section_excludes_stale_symbol() -> None:
+    current = pd.DataFrame(
+        {"timestamp": pd.to_datetime(["2026-07-21", "2026-07-22"]), "close": [10, 11]}
+    )
+    stale = pd.DataFrame(
+        {"timestamp": pd.to_datetime(["2025-08-11", "2025-08-12"]), "close": [5, 5.1]}
+    )
+
+    eligible, stale_symbols = _filter_exact_cross_section(
+        {"000001": current, "601989": stale},
+        target_date="2026-07-22",
+    )
+
+    assert list(eligible) == ["000001"]
+    assert stale_symbols == ["601989"]
 
 
 def test_scan_pattern_command_parses_accumulation_arguments() -> None:

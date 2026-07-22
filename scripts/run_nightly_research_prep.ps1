@@ -279,12 +279,18 @@ function Get-LatestReport {
 function Save-PrepReport {
     param(
         [string]$Status,
-        [string]$Detail = ""
+        [string]$Detail = "",
+        [switch]$CheckpointOnly
     )
 
     $opsDir = Join-Path $ProjectRoot "reports/ops"
     New-Item -ItemType Directory -Force -Path $opsDir | Out-Null
-    $reportPath = Join-Path $opsDir ("nightly_prep_{0}.md" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+    $currentPath = Join-Path $opsDir "nightly_prep_current.md"
+    $reportPath = if ($CheckpointOnly) {
+        $currentPath
+    } else {
+        Join-Path $opsDir ("nightly_prep_{0}.md" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+    }
 
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add("# 夜间数据准备报告")
@@ -323,6 +329,9 @@ function Save-PrepReport {
     $lines.Add("这份报告只说明数据准备状态，不构成买卖建议。")
 
     $lines -join "`n" | Set-Content -LiteralPath $reportPath -Encoding UTF8
+    if (-not $CheckpointOnly) {
+        Copy-Item -LiteralPath $reportPath -Destination $currentPath -Force
+    }
     Write-Step "Nightly prep report: $reportPath"
 }
 
@@ -403,6 +412,7 @@ try {
         if ($attempt -lt $attemptLimit) {
             $detail = "过期标的 $script:FinalStaleCount 只，超过阈值 $MaxStaleAllowed；等待 $RetryWaitMinutes 分钟后重试。"
             Add-StepResult -Name "等待行情更新($attempt/$attemptLimit)" -Status "等待" -Detail $detail
+            Save-PrepReport -Status "行情准备中" -Detail $detail -CheckpointOnly
             Write-Step $detail
             Start-Sleep -Seconds ([Math]::Max(1, $RetryWaitMinutes) * 60)
         }
@@ -642,10 +652,12 @@ try {
         accumulation_scan = "top=120,min_score=50,base_window=250,max_ret20=0.15,max_ret60=0.30,max_position=0.82"
         trend_scan = "top=120,min_score=50,min_ret60=0.18,max_ret20=0.18,max_drawdown=0.32"
     } | ConvertTo-Json -Compress
+    $manifestParametersPath = Join-Path $ProjectRoot "logs/nightly_run_parameters.json"
+    $manifestParameters | Set-Content -LiteralPath $manifestParametersPath -Encoding UTF8
     Invoke-QuantStep -Name "研究仓库入库" -Arguments @(
         "warehouse-ingest",
         "--target-date", $script:ResolvedTargetDate,
-        "--parameters-json", $manifestParameters
+        "--parameters-file", $manifestParametersPath
     )
     Invoke-QuantStep -Name "影子组合收盘估值" -Arguments @(
         "shadow-evaluate",
