@@ -11,6 +11,7 @@
     [string]$ProbeSymbol = "000001",
     [string]$ObsidianVaultPath = "G:\Program Files (x86)\Obsidian_base",
     [string]$ObsidianExportDir = "中国A股荐股",
+    [string]$RebuildRunId = "",
     [switch]$NoObsidianExport,
     [switch]$ExportOnly,
     [switch]$Force
@@ -256,6 +257,18 @@ function Normalize-DateString {
     } catch {
         throw "Invalid date: $Value. Expected format like 2026-06-17."
     }
+}
+
+function Get-HistoricalRebuildNotice {
+    param([string]$DataDate)
+
+    if ([string]::IsNullOrWhiteSpace($RebuildRunId)) {
+        return ""
+    }
+    return @"
+> [!warning] 历史补算
+> 本页基于 $DataDate 收盘数据事后重建（运行标识：$RebuildRunId），用于补齐研究档案；它不是当时盘前冻结的原始预测，不能用于评价当时是否真实推荐。
+"@
 }
 
 function Resolve-TargetDateString {
@@ -603,12 +616,15 @@ function New-PreMarketPlanReport {
 
     $planPath = Join-Path $TargetDir "$ReportDate.md"
     $digestLink = "../复盘摘要/$DataDate.md"
+    $rebuildNotice = Get-HistoricalRebuildNotice -DataDate $DataDate
 
     @"
 # $ReportDate 开盘决策
 
 计划日期：$ReportDate
 数据来源：$DataDate 收盘后
+
+$rebuildNotice
 
 这份是给 $ReportDate 开盘前使用的决策页，只保留少量主攻、可继续观察和升级观察。完整内部报告仍保留在项目 reports/ 和数仓里。
 $DataDate 的简短复盘见：[$DataDate 复盘摘要]($digestLink)。
@@ -729,10 +745,13 @@ function New-DailyReviewDigestReport {
     }
 
     $digestPath = Join-Path $TargetDir "$DataDate.md"
+    $rebuildNotice = Get-HistoricalRebuildNotice -DataDate $DataDate
     @"
 # $DataDate 复盘摘要
 
 数据日期：$DataDate
+
+$rebuildNotice
 
 ## 收盘口径
 
@@ -822,11 +841,14 @@ function New-HoldingObservationReport {
     }
 
     $holdingPath = Join-Path $TargetDir "$ReportDate.md"
+    $rebuildNotice = Get-HistoricalRebuildNotice -DataDate $DataDate
     @"
 # $ReportDate 持仓观察
 
 计划日期：$ReportDate
 数据来源：$DataDate 收盘后
+
+$rebuildNotice
 
 这页只处理已有持仓，不是新增推荐。输出口径用于观察和复盘，不构成买卖建议。
 
@@ -984,7 +1006,7 @@ try {
 
     if ($ExportOnly) {
         Write-Step "ExportOnly enabled; skip data sync and research generation."
-        Invoke-Quant @(
+        $pipelineArgs = @(
             "research-pipeline",
             "--target-date", $targetDate,
             "--plan-date", $planDate,
@@ -993,6 +1015,10 @@ try {
             "--fundamental-top", "20",
             "--no-write-warehouse"
         )
+        if (-not [string]::IsNullOrWhiteSpace($RebuildRunId)) {
+            $pipelineArgs += @("--rebuild-run-id", $RebuildRunId)
+        }
+        Invoke-Quant $pipelineArgs
         Export-DailyReportsToObsidian -ReportDate $planDate -DataDate $targetDate
         Assert-ObsidianDailyOutputs -ReportDate $planDate -DataDate $targetDate
         Write-Step "ExportOnly completed. Log: $logPath"
@@ -1146,7 +1172,7 @@ try {
         "--no-fetch-profiles",
         "--no-fetch-notices"
     )
-    Invoke-Quant @(
+    $pipelineArgs = @(
         "research-pipeline",
         "--target-date", $targetDate,
         "--plan-date", $planDate,
@@ -1155,8 +1181,14 @@ try {
         "--fundamental-top", "20",
         "--no-write-warehouse"
     )
+    if (-not [string]::IsNullOrWhiteSpace($RebuildRunId)) {
+        $pipelineArgs += @("--rebuild-run-id", $RebuildRunId)
+    }
+    Invoke-Quant $pipelineArgs
     $shadowPlanPath = Join-Path $ProjectRoot "data/shadow/plans/plan_date=$planDate/plan.csv"
-    if (Test-Path -LiteralPath $shadowPlanPath) {
+    if (-not [string]::IsNullOrWhiteSpace($RebuildRunId)) {
+        Write-Step "Historical rebuild; skip shadow plan freeze to preserve the original decision record."
+    } elseif (Test-Path -LiteralPath $shadowPlanPath) {
         Write-Step "Shadow plan already frozen, skip: $shadowPlanPath"
     } else {
         Invoke-Quant @(
@@ -1184,7 +1216,8 @@ try {
         "--top", "80"
     )
     $manifestParameters = [ordered]@{
-        workflow = "daily_decision"
+        workflow = if ([string]::IsNullOrWhiteSpace($RebuildRunId)) { "daily_decision" } else { "historical_rebuild" }
+        rebuild_run_id = $RebuildRunId
         target_date = $targetDate
         plan_date = $planDate
         base_scan = "top=160,min_score=45,max_close_vs_trend=0.25,max_ret20=0.25"
@@ -1194,11 +1227,13 @@ try {
         fundamental_top = 20
         review_days = 45
     } | ConvertTo-Json -Compress
+    $manifestParametersPath = Join-Path $ProjectRoot "logs/daily_run_parameters.json"
+    $manifestParameters | Set-Content -LiteralPath $manifestParametersPath -Encoding UTF8
     Invoke-Quant @(
         "warehouse-ingest",
         "--target-date", $targetDate,
         "--plan-date", $planDate,
-        "--parameters-json", $manifestParameters
+        "--parameters-file", $manifestParametersPath
     )
 
     Export-DailyReportsToObsidian -ReportDate $planDate -DataDate $targetDate

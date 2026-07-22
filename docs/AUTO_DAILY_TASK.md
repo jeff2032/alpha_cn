@@ -151,6 +151,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_rese
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_research.ps1 -TargetDate 2026-07-03 -PlanDate 2026-07-06 -ExportOnly
 ```
 
+如果当天没有冻结快照、只能事后补算，必须传入独立重建标识。脚本会把快照写入 `rebuilds/`，跳过影子组合冻结，并在 Obsidian 三类文档顶部标明“历史补算”，避免冒充当时真实预测：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_daily_research.ps1 -TargetDate 2026-07-20 -PlanDate 2026-07-21 -Force -RebuildRunId recovery_20260722
+```
+
 如果数据源不稳定、失败数变多，可以临时降低并行数：
 
 ```powershell
