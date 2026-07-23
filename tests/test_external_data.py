@@ -8,6 +8,7 @@ from quant_a_stock.research.external_data import classify_risk_event
 from quant_a_stock.research.external_data import money_flow_success_rate
 from quant_a_stock.research.external_data import normalize_iwencai_export
 from quant_a_stock.research.external_data import normalize_money_flow_frame
+from quant_a_stock.research.external_data import normalize_ths_money_flow_rank
 from quant_a_stock.research.external_data import read_csv_flexible
 from quant_a_stock.research.external_data import summarize_risk_events
 
@@ -103,6 +104,43 @@ def test_money_flow_success_rate_counts_rows_without_errors() -> None:
     )
 
     assert money_flow_success_rate(frame) == 2 / 3
+
+
+def test_normalize_ths_money_flow_rank_builds_same_day_fallback() -> None:
+    current = pd.DataFrame(
+        [
+            {"股票代码": "002137", "净额": "1.2亿", "成交额": "6亿"},
+            {"股票代码": "600999", "净额": "-2000万", "成交额": "4亿"},
+        ]
+    )
+    flow_3d = pd.DataFrame(
+        [
+            {"股票代码": "002137", "资金流入净额": "2亿"},
+            {"股票代码": "600999", "资金流入净额": "-3000万"},
+        ]
+    )
+    flow_5d = pd.DataFrame(
+        [
+            {"股票代码": "002137", "资金流入净额": "3亿"},
+            {"股票代码": "600999", "资金流入净额": "-5000万"},
+        ]
+    )
+
+    result = normalize_ths_money_flow_rank(
+        current,
+        flow_3d=flow_3d,
+        flow_5d=flow_5d,
+        symbols=["2137"],
+        target_date="2026-07-23",
+    )
+
+    row = result.iloc[0]
+    assert row["symbol"] == "002137"
+    assert row["main_net_inflow_pct"] == 20.0
+    assert row["main_net_inflow_3d"] == 200_000_000
+    assert row["main_net_inflow_5d"] == 300_000_000
+    assert row["source"] == "10jqka_market_rank"
+    assert row["error"] == ""
 
 
 def test_normalize_iwencai_export_and_flexible_csv(tmp_path: Path) -> None:

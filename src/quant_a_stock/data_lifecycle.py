@@ -49,6 +49,8 @@ REQUIRED_NONEMPTY_TABLES = {
 }
 
 ENHANCEMENT_TABLES = {"risk_events", "money_flow", "iwencai_import"}
+MANUAL_OPTIONAL_TABLES = {"iwencai_import"}
+DEFERRED_RESULT_TABLES = {"research_outcome_daily"}
 
 
 @dataclass(frozen=True)
@@ -230,6 +232,16 @@ def _build_checks(
         row_count = int(table_status.iloc[0].get("rows", 0) or 0)
         last_date = str(table_status.iloc[0].get("last_target_date", "") or "")
         if row_count <= 0:
+            if table in MANUAL_OPTIONAL_TABLES:
+                rows.append(
+                    _check_row(
+                        f"warehouse_table:{table}",
+                        "OPTIONAL",
+                        "手工增强表暂无数据，不影响每日研究闭环。",
+                        target_date,
+                    )
+                )
+                continue
             level = "FAIL" if table in REQUIRED_NONEMPTY_TABLES else "WARN"
             role = "核心" if table in REQUIRED_NONEMPTY_TABLES else "增强"
             rows.append(_check_row(f"warehouse_table:{table}", level, f"{role}表存在但没有数据。", target_date))
@@ -239,6 +251,16 @@ def _build_checks(
             rows.append(_check_row(f"warehouse_table:{table}", level, f"表有 {row_count} 行，但缺少可核验日期。", target_date))
             continue
         if target_date and last_date and last_date < target_date:
+            if table in DEFERRED_RESULT_TABLES:
+                rows.append(
+                    _check_row(
+                        f"warehouse_table:{table}",
+                        "PENDING",
+                        f"最后日期 {last_date}；目标日 {target_date} 的结果需下一交易日行情后才能评价。",
+                        target_date,
+                    )
+                )
+                continue
             rows.append(
                 _check_row(
                     f"warehouse_table:{table}",

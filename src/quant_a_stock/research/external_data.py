@@ -225,27 +225,169 @@ def fetch_eastmoney_money_flow(
     import akshare as ak
 
     rows: list[dict] = []
-    errors: list[str] = []
-    for symbol in symbols:
-        code = normalize_symbol(symbol)
+    provider_errors: dict[str, str] = {}
+    requested_symbols = [normalize_symbol(symbol) for symbol in symbols]
+    fallback_error = ""
+    ths_attempted = False
+    if _is_current_target_date(target_date):
+        ths_attempted = True
+        initial = pd.DataFrame(
+            [_empty_money_flow_row(code, target_date, error="ths_missing") for code in requested_symbols],
+            columns=MONEY_FLOW_COLUMNS,
+        )
+        initial, fallback_error = _fill_money_flow_from_ths_rank(
+            initial,
+            symbols=requested_symbols,
+            target_date=target_date,
+            retries=retries,
+            retry_wait=retry_wait,
+        )
+        successful = initial[initial["error"].fillna("").astype(str).str.strip().eq("")]
+        rows.extend(successful.to_dict("records"))
+        requested_symbols = initial.loc[
+            initial["error"].fillna("").astype(str).str.strip().ne(""), "symbol"
+        ].astype(str).tolist()
+
+    for code in requested_symbols:
+        code = normalize_symbol(code)
         frame, error = _fetch_with_retries(
             lambda: ak.stock_individual_fund_flow(stock=code, market=_ak_market(code)),
             retries=retries,
             retry_wait=retry_wait,
         )
         if error:
-            errors.append(f"{code} 东财资金流: {error}")
+            provider_errors[code] = error
             rows.append(_empty_money_flow_row(code, target_date, error=error))
             if sleep_seconds > 0:
                 sleep(sleep_seconds)
             continue
         row = normalize_money_flow_frame(frame, symbol=code, target_date=target_date, lookback_days=lookback_days)
         if row.get("error"):
-            errors.append(f"{code} 东财资金流: {row['error']}")
+            provider_errors[code] = str(row["error"])
         rows.append(row)
         if sleep_seconds > 0:
             sleep(sleep_seconds)
-    return ExternalFetchResult(pd.DataFrame(rows, columns=MONEY_FLOW_COLUMNS), errors)
+
+    result = pd.DataFrame(rows, columns=MONEY_FLOW_COLUMNS)
+    if provider_errors and _is_current_target_date(target_date) and not ths_attempted:
+        result, fallback_error = _fill_money_flow_from_ths_rank(
+            result,
+            symbols=list(provider_errors),
+            target_date=target_date,
+            retries=retries,
+            retry_wait=retry_wait,
+        )
+
+    unresolved = set(
+        result.loc[result["error"].fillna("").astype(str).str.strip().ne(""), "symbol"].astype(str)
+    )
+    errors = [f"{code} 东财资金流: {provider_errors[code]}" for code in provider_errors if code in unresolved]
+    if fallback_error:
+        errors.append(f"同花顺全市场资金流备用源: {fallback_error}")
+    return ExternalFetchResult(result, errors)
+
+
+def _fill_money_flow_from_ths_rank(
+    result: pd.DataFrame,
+    *,
+    symbols: list[str],
+    target_date: str,
+    retries: int,
+    retry_wait: float,
+) -> tuple[pd.DataFrame, str]:
+    import akshare as ak
+
+    snapshots: dict[str, pd.DataFrame] = {}
+    errors: list[str] = []
+    for period in ("即时", "3日排行", "5日排行"):
+        frame, error = _fetch_with_retries(
+            lambda period=period: ak.stock_fund_flow_individual(symbol=period),
+            retries=retries,
+            retry_wait=retry_wait,
+        )
+        snapshots[period] = frame
+        if error:
+            errors.append(f"{period}: {error}")
+
+    fallback = normalize_ths_money_flow_rank(
+        snapshots.get("即时", pd.DataFrame()),
+        flow_3d=snapshots.get("3日排行", pd.DataFrame()),
+        flow_5d=snapshots.get("5日排行", pd.DataFrame()),
+        symbols=symbols,
+        target_date=target_date,
+    )
+    if fallback.empty:
+        return result, "；".join(errors) or "empty"
+
+    output = result.copy()
+    replacements = fallback.set_index("symbol").to_dict("index")
+    for index, row in output.iterrows():
+        replacement = replacements.get(str(row["symbol"]))
+        if replacement is None or not str(row.get("error", "") or "").strip():
+            continue
+        for column in MONEY_FLOW_COLUMNS:
+            if column == "symbol":
+                continue
+            output.at[index, column] = replacement[column]
+    return output, "；".join(errors)
+
+
+def normalize_ths_money_flow_rank(
+    current: pd.DataFrame,
+    *,
+    flow_3d: pd.DataFrame,
+    flow_5d: pd.DataFrame,
+    symbols: list[str],
+    target_date: str,
+) -> pd.DataFrame:
+    requested = {normalize_symbol(symbol) for symbol in symbols}
+    if current.empty or not requested:
+        return pd.DataFrame(columns=MONEY_FLOW_COLUMNS)
+
+    def rank_values(frame: pd.DataFrame, value_columns: list[str]) -> dict[str, float]:
+        symbol_col = _first_existing(frame, ["股票代码", "代码", "symbol"])
+        value_col = _first_existing(frame, value_columns)
+        if frame.empty or symbol_col is None or value_col is None:
+            return {}
+        return {
+            normalize_symbol(row[symbol_col]): _money_number(row[value_col])
+            for _, row in frame.iterrows()
+            if normalize_symbol(row[symbol_col]) in requested
+        }
+
+    current_values = rank_values(current, ["净额", "资金流入净额", "主力净额"])
+    turnover_values = rank_values(current, ["成交额"])
+    values_3d = rank_values(flow_3d, ["资金流入净额", "净额"])
+    values_5d = rank_values(flow_5d, ["资金流入净额", "净额"])
+    rows: list[dict] = []
+    for code in sorted(requested):
+        if code not in current_values:
+            continue
+        main_net = current_values[code]
+        turnover = turnover_values.get(code, 0.0)
+        main_pct = main_net / turnover * 100 if turnover else 0.0
+        net_3d = values_3d.get(code, main_net)
+        net_5d = values_5d.get(code, net_3d)
+        rows.append(
+            {
+                "symbol": code,
+                "date": target_date,
+                "main_net_inflow": round(main_net, 2),
+                "main_net_inflow_pct": round(main_pct, 4),
+                "main_net_inflow_3d": round(net_3d, 2),
+                "main_net_inflow_5d": round(net_5d, 2),
+                "positive_flow_days_5": 0,
+                "money_flow_score": _money_flow_score(main_net, main_pct, net_3d, net_5d, 0),
+                "source": "10jqka_market_rank",
+                "error": "",
+            }
+        )
+    return pd.DataFrame(rows, columns=MONEY_FLOW_COLUMNS)
+
+
+def _is_current_target_date(target_date: str) -> bool:
+    target = pd.to_datetime(target_date, errors="coerce")
+    return not pd.isna(target) and target.normalize() == pd.Timestamp.now().normalize()
 
 
 def money_flow_success_rate(frame: pd.DataFrame) -> float:

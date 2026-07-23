@@ -468,6 +468,7 @@ def test_cache_date_status_symbols_keeps_etf_codes(tmp_path, monkeypatch, capsys
         ]
     ).to_csv(daily_dir / "510300.csv", index=False)
     monkeypatch.setattr(cli_module, "DEFAULT_PATHS", ProjectPaths(root=tmp_path))
+    monkeypatch.setattr(cli_module, "daily_cache_path", lambda symbol: daily_dir / f"{symbol}.csv")
 
     parser = build_parser()
     args = parser.parse_args(
@@ -476,15 +477,18 @@ def test_cache_date_status_symbols_keeps_etf_codes(tmp_path, monkeypatch, capsys
             "--symbols",
             "510300",
             "--target-date",
-            "2026-06-23",
+            "2026-06-24",
             "--exact-target-date",
+            "--show-stale",
         ]
     )
     args.func(args)
 
     output = capsys.readouterr().out
     assert "总数: 1" in output
-    assert "已到目标日期: 1" in output
+    assert "未到目标日期: 1" in output
+    assert "510300" in output
+    assert "停牌/退市/源端缺失待核" in output
 
 
 def test_sentiment_score_command_parses_arguments() -> None:

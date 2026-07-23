@@ -1005,6 +1005,12 @@ def cache_date_status(args: argparse.Namespace) -> None:
                 cached = False
 
         stale = (last_date is None) or (last_date < target_date)
+        if not stale:
+            stale_reason = ""
+        elif not cached:
+            stale_reason = "缓存缺失或损坏"
+        else:
+            stale_reason = "目标日无K线（停牌/退市/源端缺失待核）"
         rows.append(
             {
                 "symbol": symbol,
@@ -1015,6 +1021,7 @@ def cache_date_status(args: argparse.Namespace) -> None:
                 "last": last_date.date().isoformat() if last_date is not None else "",
                 "rows": row_count,
                 "stale": stale,
+                "stale_reason": stale_reason,
                 "path": str(cache_path),
             }
         )
@@ -1040,7 +1047,7 @@ def cache_date_status(args: argparse.Namespace) -> None:
     if args.output_stale:
         output_path = Path(args.output_stale)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        stale_rows[["symbol", "name", "market", "first", "last", "rows"]].to_csv(
+        stale_rows[["symbol", "name", "market", "first", "last", "rows", "stale_reason"]].to_csv(
             output_path,
             index=False,
         )
@@ -1048,7 +1055,7 @@ def cache_date_status(args: argparse.Namespace) -> None:
 
     if args.show_stale and not stale_rows.empty:
         print(
-            stale_rows[["symbol", "name", "market", "first", "last", "rows"]]
+            stale_rows[["symbol", "name", "market", "first", "last", "rows", "stale_reason"]]
             .head(args.top)
             .to_string(index=False)
         )

@@ -426,7 +426,7 @@ try {
         return
     }
     if (([int]$script:FinalStaleCount) -gt 0) {
-        Add-StepResult -Name "慢准备门槛" -Status "继续" -Detail "仍有 $script:FinalStaleCount 只过期标的，未超过阈值 $MaxStaleAllowed，按可接受覆盖率继续。"
+        Add-StepResult -Name "慢准备门槛" -Status "继续" -Detail "仍有 $script:FinalStaleCount 只标的无目标日K线（可能停牌、退市或源端缺失），未超过阈值 $MaxStaleAllowed；精确日期扫描会自动排除。"
     } else {
         Add-StepResult -Name "慢准备门槛" -Status "通过" -Detail "全市场缓存已到目标日期。"
     }
@@ -626,6 +626,36 @@ try {
         "--target-date", $script:ResolvedTargetDate
     )
     if ($IndexSymbols.Count -gt 0) {
+        $closingStaleIndexSymbols = @(Get-IndexStaleSymbols -Symbols $IndexSymbols -TargetDate $script:ResolvedTargetDate)
+        if ($closingStaleIndexSymbols.Count -gt 0) {
+            $closingProvider = if ($FallbackEtfProvider) { $FallbackEtfProvider } else { $EtfProvider }
+            $closingIndexArgs = @(
+                "sync-daily",
+                "--symbols"
+            ) + $closingStaleIndexSymbols + @(
+                "--since", $Since,
+                "--until", $script:ResolvedTargetDate,
+                "--asset-type", "etf",
+                "--etf-provider", $closingProvider,
+                "--adjust", "none",
+                "--incremental",
+                "--lookback-days", $LookbackDays.ToString([Globalization.CultureInfo]::InvariantCulture),
+                "--retries", "3",
+                "--retry-wait", "1"
+            )
+            try {
+                Invoke-QuantStep -Name "ETF指数收尾补数" -Arguments $closingIndexArgs
+            } catch {
+                Write-Step ("Closing ETF retry failed: " + $_.Exception.Message)
+            }
+        }
+        $closingStaleIndexSymbols = @(Get-IndexStaleSymbols -Symbols $IndexSymbols -TargetDate $script:ResolvedTargetDate)
+        $script:FinalIndexStaleCount = $closingStaleIndexSymbols.Count
+        if ($closingStaleIndexSymbols.Count -gt 0) {
+            Add-StepResult -Name "ETF指数收尾复查" -Status "警告" -Detail ("源端仍未提供目标日行情：" + ($closingStaleIndexSymbols -join ", "))
+        } else {
+            Add-StepResult -Name "ETF指数收尾复查" -Status "通过" -Detail "ETF/指数在入仓前均已到目标日期。"
+        }
         $indexWarehouseArgs = @(
             "warehouse-sync-candles",
             "--symbols"
