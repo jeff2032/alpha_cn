@@ -23,6 +23,8 @@ CSV_REPORT_SPECS = {
     "research_candidates": "research_candidates_*.csv",
     "decision_signals": "decision_signals_*.csv",
     "fundamental_watchlist": "fundamental_watchlist_*.csv",
+    "fundamental_quality_screen": "fundamental_quality_screen_*.csv",
+    "fundamental_research_queue": "fundamental_research_queue_*.csv",
     "fundamental_verdicts": "fundamental_verdicts_*.csv",
     "daily_research_candidates": "daily_research_candidates_*.csv",
     "sentiment_scores": "sentiment_watchlist_*.csv",
@@ -60,6 +62,8 @@ MIDDLE_LAYER_TABLES = [
     "research_candidate_daily",
     "decision_signal_daily",
     "fundamental_watchlist_daily",
+    "fundamental_quality_daily",
+    "fundamental_research_queue_daily",
     "fundamental_verdict_daily",
     "stock_market_attitude_daily",
     "research_outcome_daily",
@@ -100,6 +104,8 @@ REQUIRED_QUALITY_REPORTS = {
 ENHANCEMENT_QUALITY_REPORTS = {
     "decision_signals",
     "fundamental_watchlist",
+    "fundamental_quality_screen",
+    "fundamental_research_queue",
     "fundamental_verdicts",
     "risk_events",
     "money_flow",
@@ -1194,6 +1200,34 @@ def _write_middle_layer_from_reports(
                 target_date=target_date,
                 run_id=run_id,
                 source_path="derived:fundamental_watchlist",
+                ingested_at=ingested_at,
+                warehouse_dir=warehouse_dir,
+            )
+        )
+
+    fundamental_quality = frames.get("fundamental_quality_screen")
+    if fundamental_quality is not None and not fundamental_quality.empty:
+        rows.append(
+            _write_middle_frame(
+                fundamental_quality,
+                "fundamental_quality_daily",
+                target_date=target_date,
+                run_id=run_id,
+                source_path="derived:fundamental_quality_screen",
+                ingested_at=ingested_at,
+                warehouse_dir=warehouse_dir,
+            )
+        )
+
+    fundamental_queue = frames.get("fundamental_research_queue")
+    if fundamental_queue is not None and not fundamental_queue.empty:
+        rows.append(
+            _write_middle_frame(
+                fundamental_queue,
+                "fundamental_research_queue_daily",
+                target_date=target_date,
+                run_id=run_id,
+                source_path="derived:fundamental_research_queue",
                 ingested_at=ingested_at,
                 warehouse_dir=warehouse_dir,
             )

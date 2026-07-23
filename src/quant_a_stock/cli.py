@@ -29,6 +29,7 @@ from quant_a_stock.config import BacktestConfig, DEFAULT_BACKTEST_CONFIG, DEFAUL
 from quant_a_stock.data.akshare_client import fetch_daily
 from quant_a_stock.data.cache import daily_cache_path, load_daily_cache, save_daily_cache
 from quant_a_stock.data.calendar import resolve_cached_trading_date
+from quant_a_stock.data.fundamentals import fetch_financial_indicators
 from quant_a_stock.data_lifecycle import build_data_loop_status
 from quant_a_stock.data_lifecycle import build_retention_plan
 from quant_a_stock.data.universe import fetch_stock_universe
@@ -57,6 +58,9 @@ from quant_a_stock.research.external_data import summarize_risk_events
 from quant_a_stock.research.fundamental_watchlist import build_fundamental_watchlist
 from quant_a_stock.research.fundamental_watchlist import load_holdings_file
 from quant_a_stock.research.fundamental_watchlist import save_fundamental_watchlist_context
+from quant_a_stock.research.fundamental_quality import build_fundamental_quality_row
+from quant_a_stock.research.fundamental_quality import build_research_queue
+from quant_a_stock.research.fundamental_quality import load_close_from_cache
 from quant_a_stock.research.fundamental_verdict import load_fundamental_verdicts
 from quant_a_stock.research.fundamental_verdict import merge_fundamental_verdicts
 from quant_a_stock.research.factor_evidence import analyze_factor_evidence
@@ -2122,6 +2126,105 @@ def fundamental_watchlist(args: argparse.Namespace) -> None:
     print(f"ai-berkshire 交接 JSON: {context.path}")
 
 
+def fundamental_quality_screen(args: argparse.Namespace) -> None:
+    resolved_target = _resolve_trading_date(args.target_date)
+    _announce_trading_date_resolution(args.target_date, resolved_target)
+    target_date = resolved_target.date().isoformat()
+    watchlist_path = (
+        Path(args.watchlist_report)
+        if args.watchlist_report
+        else _latest_report_for_exact_target("fundamental_watchlist", target_date)
+    )
+    if watchlist_path is None:
+        raise SystemExit(f"没有找到 {target_date} 的 fundamental_watchlist 报告。")
+    watchlist = pd.read_csv(watchlist_path, dtype={"symbol": str})
+    if args.top > 0:
+        watchlist = watchlist.head(args.top)
+    if watchlist.empty:
+        raise SystemExit("基本面交接清单为空。")
+
+    rows: list[dict] = []
+
+    def fetch_row(item: pd.Series) -> dict:
+        symbol = str(item.get("symbol", "")).zfill(6)
+        result = fetch_financial_indicators(
+            symbol,
+            refresh=args.refresh,
+            retries=args.retries,
+            retry_wait=args.retry_wait,
+        )
+        return build_fundamental_quality_row(
+            result.frame,
+            symbol=symbol,
+            name=str(item.get("name", "") or ""),
+            target_date=target_date,
+            close=load_close_from_cache(symbol, target_date=target_date),
+            source=result.source,
+            error=result.error,
+        )
+
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+        futures = {executor.submit(fetch_row, item): str(item.get("symbol", "")).zfill(6) for _, item in watchlist.iterrows()}
+        for future in as_completed(futures):
+            symbol = futures[future]
+            try:
+                rows.append(future.result())
+            except Exception as exc:
+                rows.append(
+                    build_fundamental_quality_row(
+                        pd.DataFrame(),
+                        symbol=symbol,
+                        name="",
+                        target_date=target_date,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                )
+
+    quality = pd.DataFrame(rows)
+    order = {symbol: index for index, symbol in enumerate(watchlist["symbol"].astype(str).str.zfill(6))}
+    quality["_order"] = quality["symbol"].map(order).fillna(len(order))
+    quality = quality.sort_values("_order").drop(columns="_order").reset_index(drop=True)
+    quality_path = save_report(
+        quality.to_dict("records"),
+        report_type="fundamental_quality_screen",
+        date_prefix=target_date,
+    )
+    queue = build_research_queue(watchlist, quality, top=args.research_top)
+    queue_path = save_report(
+        queue.to_dict("records"),
+        report_type="fundamental_research_queue",
+        date_prefix=target_date,
+    )
+    plan_date = _first_nonempty(watchlist, "plan_date") or target_date
+    context = save_fundamental_watchlist_context(
+        queue,
+        target_date=target_date,
+        plan_date=plan_date,
+        output_root=Path(args.output_root) if args.output_root else None,
+    )
+
+    display = quality.rename(
+        columns={
+            "symbol": "代码",
+            "name": "名称",
+            "quality_verdict": "结论",
+            "quality_score": "质量分",
+            "hard_reject_reasons": "硬否决",
+            "roe_3y_avg": "三年ROE",
+            "cfo_net_profit_3y_avg": "现金利润比",
+            "debt_ratio_latest": "负债率",
+            "pe": "PE",
+            "pb": "PB",
+            "risk_tags": "风险",
+        }
+    )
+    columns = ["代码", "名称", "结论", "质量分", "硬否决", "三年ROE", "现金利润比", "负债率", "PE", "PB", "风险"]
+    print(display[[column for column in columns if column in display.columns]].to_string(index=False))
+    print(f"财务质量筛选: {quality_path}")
+    print(f"AI Berkshire 深研队列: {queue_path}")
+    print(f"AI Berkshire 交接 JSON: {context.path}")
+
+
 def import_fundamental_verdicts(args: argparse.Namespace) -> None:
     source_path = Path(args.input)
     verdicts = load_fundamental_verdicts(
@@ -3027,6 +3130,18 @@ def build_parser() -> argparse.ArgumentParser:
     fundamental.add_argument("--display-top", type=int, default=20)
     fundamental.add_argument("--output-root", default=None)
     fundamental.set_defaults(func=fundamental_watchlist)
+
+    quality = subparsers.add_parser("fundamental-quality-screen", help="用财务硬指标去劣并生成 AI Berkshire 深研队列")
+    quality.add_argument("--target-date", default=None)
+    quality.add_argument("--watchlist-report", default=None)
+    quality.add_argument("--top", type=int, default=20)
+    quality.add_argument("--research-top", type=int, default=5)
+    quality.add_argument("--workers", type=int, default=4)
+    quality.add_argument("--retries", type=int, default=2)
+    quality.add_argument("--retry-wait", type=float, default=1.5)
+    quality.add_argument("--refresh", action=argparse.BooleanOptionalAction, default=True)
+    quality.add_argument("--output-root", default=None)
+    quality.set_defaults(func=fundamental_quality_screen)
 
     verdict = subparsers.add_parser("import-fundamental-verdicts", help="导入 ai-berkshire 返回的结构化基本面结论")
     verdict.add_argument("--input", required=True)

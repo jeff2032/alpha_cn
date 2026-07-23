@@ -107,6 +107,20 @@ python -m quant_a_stock.cli fundamental-watchlist --target-date 2026-06-12 --pla
 
 这里的 `investment-checklist`、`investment-research`、`thesis-tracker` 等技能只是结构化交接建议，不会在夜间量化任务中自动执行，也不会直接改变技术分数。Codex/AI Berkshire 只对少量候选调用这些技能，核验商业质量、财务风险、估值和投资论文，再把 `pass/watch/reject` 结论回流给 AlphaCN。
 
+交接给 AI Berkshire 前先运行财务硬指标去劣：
+
+```powershell
+python -m quant_a_stock.cli fundamental-quality-screen --target-date 2026-07-23 --top 20 --research-top 5 --workers 4 --refresh
+```
+
+命令只对最多 20 只候选抓取公开财务指标，并缓存到 `data/cache/akshare/fundamentals/`。计算时按公告日期截断到 `target-date`，历史回跑不会读取当时尚未披露的财报。输出包括：
+
+- `fundamental_quality_screen_*.csv`：全部候选的 ROE、现金利润匹配、负债、增长、PE/PB、质量分和扣分原因。
+- `fundamental_research_queue_*.csv`：去掉 `reject` 后最多 5 只正式深研队列。
+- `specialized_review`：银行、券商、保险和信托不套用通用企业规则，留给专用模型。
+
+质量筛选的职责是排除明显低质量或数据不足样本。深研队列以财务质量为主体，叠加量化研究优先级，并对明显偏高的 PE/PB 做排序降权；估值偏高不会直接否决，低 PE 也不会自动选入。最终仍由 AI Berkshire 判断商业模式、护城河、管理层和安全边际。
+
 `ai-berkshire` 完成深研后，只需按 `config/fundamental_verdicts.example.csv` 返回结构化结论。AlphaCN 不复制财务分析过程，只接收结论：
 
 ```powershell

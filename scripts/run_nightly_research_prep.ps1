@@ -609,6 +609,24 @@ try {
         "--target-date", $script:ResolvedTargetDate,
         "--top", "30"
     )
+    Invoke-QuantStep -Name "生成结构化决策信号" -Arguments @(
+        "decision-signals",
+        "--target-date", $script:ResolvedTargetDate,
+        "--top", "80"
+    )
+    Invoke-QuantStep -Name "生成基本面深研初选" -Arguments @(
+        "fundamental-watchlist",
+        "--target-date", $script:ResolvedTargetDate,
+        "--top", "20"
+    )
+    Invoke-QuantStep -Name "财务质量硬筛" -Arguments @(
+        "fundamental-quality-screen",
+        "--target-date", $script:ResolvedTargetDate,
+        "--top", "20",
+        "--research-top", "5",
+        "--workers", "4",
+        "--refresh"
+    )
     $reviewSince = ([datetime]::Parse($script:ResolvedTargetDate)).AddDays(-45).ToString("yyyy-MM-dd")
     Invoke-QuantStep -Name "生成策略滚动复盘" -Arguments @(
         "research-review",
@@ -686,6 +704,7 @@ try {
         lookback_days = $LookbackDays
         sentiment_top = $SentimentTop
         risk_days = $RiskDays
+        fundamental_quality = "top=20,research_top=5,workers=4,point_in_time=true"
         base_scan = "top=120,min_score=50,max_close_vs_trend=0.25,max_ret20=0.25"
         accumulation_scan = "top=120,min_score=50,base_window=250,max_ret20=0.15,max_ret60=0.30,max_position=0.82"
         trend_scan = "top=120,min_score=50,min_ret60=0.18,max_ret20=0.18,max_drawdown=0.32"

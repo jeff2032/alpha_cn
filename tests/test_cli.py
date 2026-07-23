@@ -703,6 +703,34 @@ def test_fundamental_watchlist_command_parses_arguments() -> None:
     assert args.display_top == 8
 
 
+def test_fundamental_quality_screen_command_parses_arguments() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "fundamental-quality-screen",
+            "--target-date",
+            "2026-07-23",
+            "--watchlist-report",
+            "reports/fundamental_watchlist.csv",
+            "--top",
+            "20",
+            "--research-top",
+            "5",
+            "--workers",
+            "4",
+            "--no-refresh",
+        ]
+    )
+
+    assert args.command == "fundamental-quality-screen"
+    assert args.target_date == "2026-07-23"
+    assert args.watchlist_report == "reports/fundamental_watchlist.csv"
+    assert args.research_top == 5
+    assert args.workers == 4
+    assert args.refresh is False
+
+
 def test_research_pipeline_command_parses_arguments() -> None:
     parser = build_parser()
 
