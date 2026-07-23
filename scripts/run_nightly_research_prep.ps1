@@ -536,6 +536,14 @@ try {
         "--max-close-vs-trend", "0.65",
         "--max-drawdown-from-high", "0.32"
     )
+    Invoke-QuantStep -Name "扫描静默反转观察池" -Arguments @(
+        "scan-pattern",
+        "--pattern", "quiet_reversal_setup",
+        "--target-date", $script:ResolvedTargetDate,
+        "--top", "80",
+        "--min-score", "55",
+        "--min-amount-ma20", "100000000"
+    )
     Invoke-QuantStep -Name "情绪面缓存" -Arguments @(
         "sentiment-score",
         "--latest-scan",

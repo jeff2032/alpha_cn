@@ -55,6 +55,19 @@ class TrendPullbackSetupConfig:
     min_amount_ma20: float = 100_000_000
 
 
+@dataclass(frozen=True)
+class QuietReversalSetupConfig:
+    base_window: int = 120
+    volume_window: int = 20
+    stabilization_window: int = 5
+    min_ret_20: float = -0.25
+    max_ret_20: float = -0.10
+    max_price_position: float = 0.25
+    min_volume_ratio: float = 0.70
+    max_volume_ratio: float = 1.10
+    min_amount_ma20: float = 100_000_000
+
+
 def _clip_score(value: float, low: float = 0.0, high: float = 100.0) -> float:
     if np.isnan(value):
         return 0.0
@@ -192,6 +205,95 @@ def scan_base_breakout_setups(
     return result.sort_values(["score", "volume_ratio"], ascending=[False, False]).reset_index(
         drop=True
     )
+
+
+def score_quiet_reversal_setup(
+    candles: pd.DataFrame,
+    *,
+    symbol: str,
+    config: QuietReversalSetupConfig = QuietReversalSetupConfig(),
+) -> dict[str, float | str] | None:
+    frame = candles.copy()
+    if frame.empty:
+        return None
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"])
+    frame = frame.sort_values("timestamp").reset_index(drop=True)
+    required_bars = max(config.base_window, config.volume_window, 60) + 21
+    if len(frame) < required_bars:
+        return None
+
+    close = frame["close"]
+    volume = frame["volume"]
+    amount = frame["amount"] if "amount" in frame.columns else close * volume
+    prior_high = close.shift(1).rolling(config.base_window, min_periods=config.base_window).max()
+    prior_low = close.shift(1).rolling(config.base_window, min_periods=config.base_window).min()
+    span = (prior_high - prior_low).replace(0, np.nan)
+    price_position = (close - prior_low) / span
+    ret_5 = close / close.shift(config.stabilization_window) - 1
+    ret_20 = close / close.shift(20) - 1
+    ret_60 = close / close.shift(60) - 1
+    ma5 = close.rolling(config.stabilization_window).mean()
+    volume_ratio = volume / volume.rolling(config.volume_window).mean()
+    amount_ma20 = amount.rolling(config.volume_window).mean()
+    idx = frame.index[-1]
+
+    low_position_score = _clip_score((config.max_price_position - price_position.loc[idx]) / 0.45 * 30, high=30)
+    decline_score = _clip_score((-ret_20.loc[idx]) / 0.25 * 20, high=20)
+    quiet_volume_score = _clip_score((config.max_volume_ratio - abs(volume_ratio.loc[idx] - 0.9)) / 1.25 * 20, high=20)
+    stabilization_score = 0.0
+    if close.loc[idx] >= ma5.loc[idx]:
+        stabilization_score += 15.0
+    stabilization_score += _clip_score((ret_5.loc[idx] + 0.06) / 0.09 * 15, high=15)
+    score = _clip_score(low_position_score + decline_score + quiet_volume_score + stabilization_score)
+
+    return {
+        "symbol": symbol,
+        "timestamp": str(pd.Timestamp(frame.loc[idx, "timestamp"]).date()),
+        "stage": "quiet_reversal_watch",
+        "setup_phase": "静默反转观察",
+        "score": round(score, 2),
+        "close": round(float(close.loc[idx]), 4),
+        "price_position_pct": round(float(price_position.loc[idx]), 4),
+        "volume_ratio": round(float(volume_ratio.loc[idx]), 4),
+        "amount_ma20": round(float(amount_ma20.loc[idx]), 2),
+        "ret_5_pct": round(float(ret_5.loc[idx]), 4),
+        "ret_20_pct": round(float(ret_20.loc[idx]), 4),
+        "ret_60_pct": round(float(ret_60.loc[idx]), 4),
+        "close_vs_ma5_pct": round(float(close.loc[idx] / ma5.loc[idx] - 1), 4),
+    }
+
+
+def scan_quiet_reversal_setups(
+    candles_by_symbol: dict[str, pd.DataFrame],
+    *,
+    config: QuietReversalSetupConfig = QuietReversalSetupConfig(),
+    min_score: float = 55.0,
+    min_amount_ma20: float | None = None,
+) -> pd.DataFrame:
+    rows = []
+    for symbol, candles in candles_by_symbol.items():
+        row = score_quiet_reversal_setup(candles, symbol=symbol, config=config)
+        if row is None:
+            continue
+        if not (config.min_ret_20 <= float(row["ret_20_pct"]) <= config.max_ret_20):
+            continue
+        if float(row["price_position_pct"]) > config.max_price_position:
+            continue
+        if not (config.min_volume_ratio <= float(row["volume_ratio"]) <= config.max_volume_ratio):
+            continue
+        amount_floor = min_amount_ma20 if min_amount_ma20 is not None else config.min_amount_ma20
+        if float(row["amount_ma20"]) < amount_floor:
+            continue
+        if not (-0.02 <= float(row["ret_5_pct"]) <= 0.05):
+            continue
+        if float(row["close_vs_ma5_pct"]) < -0.01:
+            continue
+        if float(row["score"]) >= min_score:
+            rows.append(row)
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+    return result.sort_values(["score", "price_position_pct"], ascending=[False, True]).reset_index(drop=True)
 
 
 def score_accumulation_setup(

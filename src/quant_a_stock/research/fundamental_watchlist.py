@@ -257,7 +257,7 @@ def _suggested_skill(row: pd.Series, *, priority: str) -> str:
         return "thesis-tracker"
     if signal_type == "buy_watch" and priority == "high":
         return "investment-checklist"
-    if "A1" in action_bucket or horizon == "10-30d":
+    if "A1" in action_bucket or horizon in {"10-20d", "10-30d"}:
         return "investment-research"
     if signal_type in {"upgrade_watch", "hold_watch"}:
         return "quality-screen"

@@ -5,6 +5,7 @@ import pandas as pd
 
 from quant_a_stock.screening.patterns import scan_accumulation_setups
 from quant_a_stock.screening.patterns import scan_base_breakout_setups
+from quant_a_stock.screening.patterns import scan_quiet_reversal_setups
 from quant_a_stock.screening.patterns import scan_trend_pullback_setups
 
 
@@ -173,3 +174,32 @@ def test_trend_pullback_scanner_finds_strong_trend_resume() -> None:
     assert result.loc[0, "ret_60_pct"] >= 0.18
     assert result.loc[0, "ret_20_pct"] <= 0.18
     assert result.loc[0, "drawdown_from_high_pct"] >= -0.32
+
+
+def test_quiet_reversal_scanner_keeps_depressed_low_volume_setup_observational() -> None:
+    decline = np.linspace(20, 14, 170)
+    base = np.linspace(14, 11.35, 20)
+    stabilize = np.array([11.35, 11.38, 11.42, 11.48, 11.55])
+    close = pd.Series(np.concatenate([decline, base, stabilize]))
+    volume = pd.Series(np.full(len(close), 1_000_000.0))
+    volume.iloc[-1] = 900_000
+    candles = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2025-01-01", periods=len(close), freq="B"),
+            "open": close,
+            "high": close * 1.01,
+            "low": close * 0.99,
+            "close": close,
+            "volume": volume,
+            "amount": close * volume * 100,
+            "symbol": "000001",
+        }
+    )
+
+    result = scan_quiet_reversal_setups({"000001": candles}, min_score=40)
+
+    assert not result.empty
+    assert result.loc[0, "stage"] == "quiet_reversal_watch"
+    assert result.loc[0, "setup_phase"] == "静默反转观察"
+    assert -0.25 <= result.loc[0, "ret_20_pct"] <= -0.10
+    assert result.loc[0, "volume_ratio"] <= 1.10

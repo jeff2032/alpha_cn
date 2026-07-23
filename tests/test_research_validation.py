@@ -110,16 +110,21 @@ def test_shadow_plan_freezes_caps_and_replays_open_fills(tmp_path: Path) -> None
     signals = pd.DataFrame(
         [
             {
-                "symbol": f"00000{index}",
-                "name": f"样本{index}",
-                "signal_type": "buy_watch",
-                "action_bucket": "主攻-A2启动确认",
-                "expected_horizon": "3-15d",
+                "symbol": f"00000{index + 1}",
+                "name": f"样本{index + 1}",
+                "signal_type": "watch" if tier == "A1" else "buy_watch",
+                "action_bucket": {
+                    "A1": "观察-A1低位潜伏",
+                    "A2": "主攻-A2启动确认",
+                    "A3": "短线-A3一三日确认",
+                }[tier],
+                "research_tier": tier,
+                "expected_horizon": {"A1": "10-20d", "A2": "3-5d", "A3": "1-3d"}[tier],
                 "research_score": 80 - index,
                 "risk_level": "低",
-                "theme_cluster": "电子" if index <= 3 else "化工",
+                "theme_cluster": f"主题{index}",
             }
-            for index in range(1, 6)
+            for index, tier in enumerate(["A2", "A2", "A1", "A1", "A3"])
         ]
     )
     plan = freeze_shadow_plan(signals, target_date="2026-01-05", plan_date="2026-01-06", top=5)
@@ -138,6 +143,7 @@ def test_shadow_plan_freezes_caps_and_replays_open_fills(tmp_path: Path) -> None
 
     assert plan["target_weight"].sum() <= 0.80 + 1e-9
     assert plan.groupby("industry")["target_weight"].sum().max() <= 0.30 + 1e-9
+    assert plan["research_tier"].value_counts().to_dict() == {"A2": 2, "A1": 2, "A3": 1}
     assert not result.equity.empty
     assert (result.trades["quantity"] > 0).any()
     assert result.positions["shares"].mod(100).eq(0).all()
@@ -160,6 +166,8 @@ def test_shadow_plan_applies_market_position_gate() -> None:
                 "symbol": f"0000{index}",
                 "name": f"样本{index}",
                 "signal_type": "buy_watch",
+                "action_bucket": "主攻-A2启动确认",
+                "research_tier": "A2",
                 "research_score": 80 - index,
                 "risk_level": "低",
                 "theme_cluster": f"主题{index}",
@@ -177,10 +185,11 @@ def test_shadow_plan_applies_market_position_gate() -> None:
         market_score=30,
     )
 
-    assert len(plan) == 5
-    assert plan["target_weight"].sum() == pytest.approx(0.20)
-    assert set(plan["market_total_cap"]) == {0.20}
-    assert market_position_cap("震荡偏强") == 0.60
+    assert len(plan) == 2
+    assert plan["target_weight"].sum() == pytest.approx(0.04)
+    assert set(plan["market_total_cap"]) == {0.10}
+    assert market_position_cap("震荡偏强") == 0.40
+    assert market_position_cap("防守", market_score=20) == 0.0
 
 
 def test_fundamental_verdict_normalizes_and_filters_shadow_plan() -> None:
@@ -193,9 +202,9 @@ def test_fundamental_verdict_normalizes_and_filters_shadow_plan() -> None:
     verdicts = normalize_fundamental_verdicts(raw, target_date="2026-07-10")
     signals = pd.DataFrame(
         [
-            {"symbol": "000003", "name": "未深研", "signal_type": "buy_watch", "research_score": 99, "risk_level": "低"},
-            {"symbol": "000001", "name": "已通过", "signal_type": "buy_watch", "research_score": 80, "risk_level": "低"},
-            {"symbol": "000002", "name": "已否决", "signal_type": "buy_watch", "research_score": 90, "risk_level": "低"},
+            {"symbol": "000003", "name": "未深研", "signal_type": "buy_watch", "action_bucket": "主攻-A2启动确认", "research_tier": "A2", "research_score": 99, "risk_level": "低"},
+            {"symbol": "000001", "name": "已通过", "signal_type": "buy_watch", "action_bucket": "主攻-A2启动确认", "research_tier": "A2", "research_score": 80, "risk_level": "低"},
+            {"symbol": "000002", "name": "已否决", "signal_type": "buy_watch", "action_bucket": "主攻-A2启动确认", "research_tier": "A2", "research_score": 90, "risk_level": "低"},
         ]
     )
 

@@ -930,6 +930,8 @@ def _action_bucket(row: pd.Series) -> str:
     total_penalty = _safe_number(row.get("total_penalty", 0.0))
     if risk_level == "高" or total_penalty >= 18:
         return "回避-风险优先"
+    if risk_level == "中高":
+        return "观察-风险待核"
     if tier == "B1":
         return "移出-B1无持续性"
     if tier == "A2" and _is_risk_clean(row):
@@ -970,6 +972,7 @@ def _action_rank(bucket: str) -> int:
         "移出-B1无持续性": 9,
         "观察-低优先级": 9,
         "回避-风险优先": 9,
+        "观察-风险待核": 9,
     }.get(str(bucket), 9)
 
 
@@ -996,6 +999,8 @@ def _upgrade_hint(row: pd.Series) -> str:
         return "趋势高波动观察：先处理过热/高位风险，再考虑低吸。"
     if bucket == "回避-风险优先":
         return f"风险优先回避：{risk_tags}。"
+    if bucket == "观察-风险待核":
+        return f"中高风险观察：{risk_tags}；风险解除前不进入主攻或影子组合。"
     if bucket == "移出-B1无持续性":
         return "B1 已移出推荐层，仅保留为内部对照样本。"
     return "观察为主：等待主线、量能或情绪进一步确认。"

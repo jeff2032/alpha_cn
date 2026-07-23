@@ -20,6 +20,7 @@ SHADOW_PLAN_COLUMNS = [
     "target_weight",
     "signal_type",
     "action_bucket",
+    "research_tier",
     "expected_horizon",
     "max_hold_days",
     "industry",
@@ -100,18 +101,23 @@ def freeze_shadow_plan(
     max_industry_weight: float = 0.30,
     market_regime: str = "",
     market_score: float = 0.0,
+    max_a1: int = 2,
+    max_a2: int = 2,
+    max_a3: int = 1,
 ) -> pd.DataFrame:
     if signals.empty:
         return pd.DataFrame(columns=SHADOW_PLAN_COLUMNS)
     frame = signals.copy()
     frame["symbol"] = frame["symbol"].astype(str).str.zfill(6)
-    frame = frame[frame["risk_level"].isin(["低", "中", "未标注"])]
+    frame = frame[frame["risk_level"].eq("低")]
     if "fundamental_verdict" not in frame.columns:
         frame["fundamental_verdict"] = ""
     frame["fundamental_verdict"] = frame["fundamental_verdict"].fillna("").astype(str).str.lower()
     frame = frame[frame["fundamental_verdict"] != "reject"]
-    priority = {"buy_watch": 1, "upgrade_watch": 2}
-    frame["_priority"] = frame["signal_type"].map(priority).fillna(9)
+    frame["_shadow_tier"] = frame.apply(_shadow_tier, axis=1)
+    tier_limits = {"A1": max(0, int(max_a1)), "A2": max(0, int(max_a2)), "A3": max(0, int(max_a3))}
+    frame = frame[frame["_shadow_tier"].isin(tier_limits)]
+    frame["_priority"] = frame["_shadow_tier"].map({"A2": 1, "A1": 2, "A3": 3}).fillna(9)
     verdict_priority = {"pass": 1, "watch": 2, "": 3}
     frame["_fundamental_priority"] = frame["fundamental_verdict"].map(verdict_priority).fillna(3)
     frame = frame[frame["_priority"] < 9].sort_values(
@@ -119,15 +125,20 @@ def freeze_shadow_plan(
         ascending=[True, True, False],
     )
 
-    market_cap = market_position_cap(market_regime) if market_regime else max_total_weight
+    market_cap = market_position_cap(market_regime, market_score=market_score) if market_regime else max_total_weight
     effective_total_weight = min(max_total_weight, market_cap)
     rows = []
     total_weight = 0.0
     industry_weights: dict[str, float] = {}
-    base_weight = min(max_single_weight, effective_total_weight / max(1, top))
+    tier_counts = {tier: 0 for tier in tier_limits}
+    max_names = min(max(0, int(top)), sum(tier_limits.values()), 5)
+    base_weight = min(max_single_weight, effective_total_weight / max(1, max_names))
     for _, row in frame.iterrows():
-        if len(rows) >= top or total_weight >= effective_total_weight - 1e-9:
+        if len(rows) >= max_names or total_weight >= effective_total_weight - 1e-9:
             break
+        shadow_tier = str(row["_shadow_tier"])
+        if tier_counts[shadow_tier] >= tier_limits[shadow_tier]:
+            continue
         industry = str(row.get("theme_cluster", "") or row.get("matched_theme", "") or "")
         weight = min(base_weight, effective_total_weight - total_weight)
         if industry:
@@ -144,6 +155,7 @@ def freeze_shadow_plan(
                 "target_weight": round(weight, 6),
                 "signal_type": row.get("signal_type", ""),
                 "action_bucket": row.get("action_bucket", ""),
+                "research_tier": shadow_tier,
                 "expected_horizon": row.get("expected_horizon", ""),
                 "max_hold_days": _max_hold_days(row.get("expected_horizon", "")),
                 "industry": industry,
@@ -164,19 +176,33 @@ def freeze_shadow_plan(
             }
         )
         total_weight += weight
+        tier_counts[shadow_tier] += 1
         if industry:
             industry_weights[industry] = industry_weights.get(industry, 0.0) + weight
     return pd.DataFrame(rows, columns=SHADOW_PLAN_COLUMNS)
 
 
-def market_position_cap(regime: str) -> float:
+def market_position_cap(regime: str, *, market_score: float | None = None) -> float:
+    if market_score is not None and float(market_score) <= 25:
+        return 0.0
     return {
-        "强势": 0.80,
-        "震荡偏强": 0.60,
-        "震荡": 0.40,
-        "防守": 0.20,
-        "未知": 0.20,
-    }.get(str(regime or ""), 0.20)
+        "强势": 0.60,
+        "震荡偏强": 0.40,
+        "震荡": 0.20,
+        "防守": 0.10,
+        "未知": 0.0,
+    }.get(str(regime or ""), 0.0)
+
+
+def _shadow_tier(row: pd.Series) -> str:
+    tier = str(row.get("research_tier", "") or "")
+    if tier in {"A1", "A2", "A3"}:
+        return tier
+    action = str(row.get("action_bucket", "") or "")
+    for candidate in ("A2", "A1", "A3"):
+        if candidate in action:
+            return candidate
+    return ""
 
 
 def backfill_shadow_plans(
@@ -250,7 +276,10 @@ def backfill_shadow_plans(
                 ).sum(),
                 "market_regime": market.get("regime", "未知"),
                 "market_score": market.get("score", 0.0),
-                "market_total_cap": market_position_cap(str(market.get("regime", "未知"))),
+                "market_total_cap": market_position_cap(
+                    str(market.get("regime", "未知")),
+                    market_score=float(market.get("score", 0.0)),
+                ),
                 "underfilled": len(plan) < 5,
             }
         )

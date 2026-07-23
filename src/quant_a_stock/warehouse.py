@@ -42,6 +42,7 @@ SNAPSHOT_CSV_SPECS = {
     "snapshot_scan_base_breakout_setups": "scan_base_breakout_setup.csv",
     "snapshot_scan_accumulation_setups": "scan_accumulation_setup.csv",
     "snapshot_scan_trend_pullback_setups": "scan_trend_pullback_setup.csv",
+    "snapshot_scan_quiet_reversal_setups": "scan_quiet_reversal_setup.csv",
 }
 
 MARKDOWN_REPORT_SPECS = {
@@ -1987,11 +1988,11 @@ def _expected_horizon(tier: object, action_bucket: object) -> str:
     tier_text = str(tier or "")
     bucket_text = str(action_bucket or "")
     if tier_text == "A1" or "A1" in bucket_text:
-        return "10-30d"
+        return "10-20d"
     if tier_text == "A2" or "A2" in bucket_text:
-        return "3-15d"
+        return "3-5d"
     if tier_text == "A3" or "A3" in bucket_text:
-        return "1-10d"
+        return "1-3d"
     if "B2a" in bucket_text:
         return "3-10d"
     if "主线突发" in bucket_text:
@@ -1999,7 +2000,7 @@ def _expected_horizon(tier: object, action_bucket: object) -> str:
     if "B2b" in bucket_text:
         return "1-5d"
     if tier_text.startswith("B"):
-        return "1-10d"
+        return "3-5d"
     return "observe"
 
 

@@ -74,9 +74,11 @@ from quant_a_stock.research.summary import build_market_temperature
 from quant_a_stock.research.summary import save_daily_research_summary_markdown
 from quant_a_stock.screening.patterns import AccumulationSetupConfig
 from quant_a_stock.screening.patterns import BaseBreakoutSetupConfig
+from quant_a_stock.screening.patterns import QuietReversalSetupConfig
 from quant_a_stock.screening.patterns import TrendPullbackSetupConfig
 from quant_a_stock.screening.patterns import scan_accumulation_setups
 from quant_a_stock.screening.patterns import scan_base_breakout_setups
+from quant_a_stock.screening.patterns import scan_quiet_reversal_setups
 from quant_a_stock.screening.patterns import scan_trend_pullback_setups
 from quant_a_stock.sentiment.report import save_market_theme_markdown
 from quant_a_stock.sentiment.report import save_sentiment_markdown
@@ -1137,9 +1139,15 @@ def compare(args: argparse.Namespace) -> None:
 
 
 def scan_pattern(args: argparse.Namespace) -> None:
-    if args.pattern not in {"base_breakout_setup", "accumulation_setup", "trend_pullback_setup"}:
+    supported_patterns = {
+        "base_breakout_setup",
+        "accumulation_setup",
+        "trend_pullback_setup",
+        "quiet_reversal_setup",
+    }
+    if args.pattern not in supported_patterns:
         raise SystemExit(
-            "不支持的形态。目前可用: base_breakout_setup, accumulation_setup, trend_pullback_setup"
+            "不支持的形态。目前可用: " + ", ".join(sorted(supported_patterns))
         )
 
     target_date = None
@@ -1186,6 +1194,15 @@ def scan_pattern(args: argparse.Namespace) -> None:
             require_positive_trend_slope=args.require_positive_trend_slope,
         )
         report_type = "scan_base_breakout_setup"
+    elif args.pattern == "quiet_reversal_setup":
+        config = QuietReversalSetupConfig()
+        result = scan_quiet_reversal_setups(
+            candles_by_symbol,
+            config=config,
+            min_score=args.min_score,
+            min_amount_ma20=args.min_amount_ma20,
+        )
+        report_type = "scan_quiet_reversal_setup"
     elif args.pattern == "accumulation_setup":
         accumulation_min_volume_ratio = (
             args.min_volume_ratio if args.min_volume_ratio is not None else 1.05
@@ -1955,6 +1972,7 @@ def snapshot_research(args: argparse.Namespace) -> None:
         else _latest_report_for_target("scan_base_breakout_setup", target_date),
         "scan_accumulation_setup": _latest_report_for_target("scan_accumulation_setup", target_date),
         "scan_trend_pullback_setup": _latest_report_for_target("scan_trend_pullback_setup", target_date),
+        "scan_quiet_reversal_setup": _latest_report_for_target("scan_quiet_reversal_setup", target_date),
         "sentiment_watchlist": Path(args.sentiment_report)
         if args.sentiment_report
         else _latest_report_for_target("sentiment_watchlist", target_date),

@@ -377,7 +377,7 @@ def test_backfill_snapshots_syncs_research_snapshot_tables(tmp_path: Path) -> No
     candidate_daily_rows = status.loc[status["table"] == "research_candidate_daily", "rows"].iloc[0]
     attitude_rows = status.loc[status["table"] == "stock_market_attitude_daily", "rows"].iloc[0]
     assert snapshot_rows == 1
-    assert index_rows == 8
+    assert index_rows == 9
     assert candidate_daily_rows == 1
     assert attitude_rows == 1
     empty_row = result.ingested[result.ingested["report_type"] == "snapshot_scan_trend_pullback_setups"].iloc[0]

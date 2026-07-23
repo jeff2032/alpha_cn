@@ -50,7 +50,15 @@ python -m quant_a_stock.cli scan-pattern --pattern trend_pullback_setup --top 16
 
 趋势回踩池对应日报里的 A3：它用于捕捉已经有 60 日趋势、近 20 日不过热、回撤后重新企稳的候选。A3 只有在主线仍强、风险干净、位置不拥挤时才进入主攻，否则只放在高波动观察池。
 
-日常入口会把 base/trend 两类扫描放宽到 45 分，但低分样本只进入 B2 观察池；A2 是 3-5 日主攻，A3 只做 1-3 日短线确认，B2 必须在 3-5 日内升级，B1 不再进入推荐层。
+扫描静默反转观察池：
+
+```powershell
+python -m quant_a_stock.cli scan-pattern --pattern quiet_reversal_setup --top 80 --min-score 55 --min-amount-ma20 100000000
+```
+
+静默反转只观察“前 20 日偏弱、120 日位置较低、量能收缩、最近 5 日开始企稳”的样本。报告会归档为 `scan_quiet_reversal_setup_*.csv`，但不会合并进主候选池；先累计 1/3/5 日证据，避免用次日涨停样本反向放宽主模型。
+
+日常入口会把 base/trend 两类扫描放宽到 45 分，但低分样本只进入 B2 观察池；A1 按 10-20 日潜伏观察，A2 是 3-5 日主攻，A3 只做 1-3 日短线确认，B2 必须在 3-5 日内升级，B1 不再进入推荐层。高风险直接回避，中高风险只保留为风险待核，不进入主攻或影子组合。
 
 给形态候选池做情绪评分：
 
@@ -96,6 +104,8 @@ python -m quant_a_stock.cli fundamental-watchlist --target-date 2026-06-12 --pla
 ```
 
 `fundamental_watchlist_*.csv` 不是新的选股模型，也不是用户直接看的荐股页。它从 `decision_signals` 中挑少量更值得验证基本面的标的，写入优先级、建议使用的 `ai-berkshire` 研究技能、交接原因和需要回答的问题。对应 JSON 会写到 `data/context/fundamental/数据截至日/ai_berkshire_plan_计划日期.json`。
+
+这里的 `investment-checklist`、`investment-research`、`thesis-tracker` 等技能只是结构化交接建议，不会在夜间量化任务中自动执行，也不会直接改变技术分数。Codex/AI Berkshire 只对少量候选调用这些技能，核验商业质量、财务风险、估值和投资论文，再把 `pass/watch/reject` 结论回流给 AlphaCN。
 
 `ai-berkshire` 完成深研后，只需按 `config/fundamental_verdicts.example.csv` 返回结构化结论。AlphaCN 不复制财务分析过程，只接收结论：
 

@@ -42,16 +42,25 @@ def test_build_decision_signals_maps_core_and_watch_buckets() -> None:
                 "risk_level": "高",
                 "risk_tags": "公告风险",
             },
+            {
+                "symbol": "600000",
+                "name": "低位潜伏",
+                "research_tier": "A1",
+                "action_bucket": "观察-A1低位潜伏",
+                "research_score": 65.0,
+                "risk_level": "低",
+            },
         ]
     )
 
     signals = build_decision_signals(candidates, target_date="2026-07-08", plan_date="2026-07-09")
 
-    assert signals.loc[0, "symbol"] == "002137"
-    assert signals.loc[0, "signal_type"] == "buy_watch"
-    assert signals.loc[0, "confidence"] == "high"
-    assert signals.loc[0, "expected_horizon"] == "3-5d"
-    assert signals.loc[1, "signal_type"] == "upgrade_watch"
-    assert signals.loc[1, "expected_horizon"] == "3-5d"
-    assert signals.loc[2, "signal_type"] == "avoid"
-    assert signals.loc[2, "decision_signal_version"] == DECISION_SIGNAL_VERSION
+    indexed = signals.set_index("symbol")
+    assert indexed.loc["002137", "signal_type"] == "buy_watch"
+    assert indexed.loc["002137", "confidence"] == "high"
+    assert indexed.loc["002137", "expected_horizon"] == "3-5d"
+    assert indexed.loc["600999", "signal_type"] == "upgrade_watch"
+    assert indexed.loc["600999", "expected_horizon"] == "3-5d"
+    assert indexed.loc["300000", "signal_type"] == "avoid"
+    assert indexed.loc["300000", "decision_signal_version"] == DECISION_SIGNAL_VERSION
+    assert indexed.loc["600000", "expected_horizon"] == "10-20d"

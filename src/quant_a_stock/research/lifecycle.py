@@ -53,8 +53,8 @@ TIER_STAGE_RANK = {
 }
 
 PRIMARY_HORIZON_BY_BUCKET = {
-    "观察-A1低位潜伏": 30,
-    "A1": 30,
+    "观察-A1低位潜伏": 20,
+    "A1": 20,
     "主攻-A2启动确认": 5,
     "A2": 5,
     "短线-A3一三日确认": 3,
@@ -71,8 +71,8 @@ PRIMARY_HORIZON_BY_BUCKET = {
 }
 
 TRACKING_WINDOW_BY_BUCKET = {
-    "观察-A1低位潜伏": 30,
-    "A1": 30,
+    "观察-A1低位潜伏": 20,
+    "A1": 20,
     "主攻-A2启动确认": 5,
     "A2": 5,
     "短线-A3一三日确认": 3,
@@ -1168,7 +1168,7 @@ def _bucket_code(bucket_or_tier: str, tier: str) -> str:
 def _expected_horizon(action_bucket: str, tier: str) -> str:
     bucket = action_bucket or tier
     if "A1" in bucket or tier == "A1":
-        return "10-30d"
+        return "10-20d"
     if "A2" in bucket or tier == "A2":
         return "3-5d"
     if "A3" in bucket or tier == "A3":

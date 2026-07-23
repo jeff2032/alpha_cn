@@ -144,7 +144,7 @@ def _signal_type_and_bucket(action_bucket: str, tier: str, risk_level: str) -> t
 
 def _expected_horizon(action_bucket: str, tier: str) -> str:
     if tier == "A1" or "A1" in action_bucket:
-        return "10-30d"
+        return "10-20d"
     if tier == "A2" or "A2" in action_bucket:
         return "3-5d"
     if tier == "A3" or "A3" in action_bucket:
