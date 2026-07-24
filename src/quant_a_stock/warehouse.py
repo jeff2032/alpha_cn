@@ -24,6 +24,9 @@ CSV_REPORT_SPECS = {
     "decision_signals": "decision_signals_*.csv",
     "fundamental_watchlist": "fundamental_watchlist_*.csv",
     "fundamental_quality_screen": "fundamental_quality_screen_*.csv",
+    "fundamental_quality_history": "fundamental_quality_history_*.csv",
+    "fundamental_quality_review_details": "fundamental_quality_review_details_*.csv",
+    "fundamental_quality_review_summary": "fundamental_quality_review_summary_*.csv",
     "fundamental_research_queue": "fundamental_research_queue_*.csv",
     "fundamental_verdicts": "fundamental_verdicts_*.csv",
     "daily_research_candidates": "daily_research_candidates_*.csv",
@@ -63,6 +66,7 @@ MIDDLE_LAYER_TABLES = [
     "decision_signal_daily",
     "fundamental_watchlist_daily",
     "fundamental_quality_daily",
+    "fundamental_quality_outcome_daily",
     "fundamental_research_queue_daily",
     "fundamental_verdict_daily",
     "stock_market_attitude_daily",
@@ -105,6 +109,9 @@ ENHANCEMENT_QUALITY_REPORTS = {
     "decision_signals",
     "fundamental_watchlist",
     "fundamental_quality_screen",
+    "fundamental_quality_history",
+    "fundamental_quality_review_details",
+    "fundamental_quality_review_summary",
     "fundamental_research_queue",
     "fundamental_verdicts",
     "risk_events",
@@ -1219,6 +1226,20 @@ def _write_middle_layer_from_reports(
             )
         )
 
+    fundamental_quality_outcomes = frames.get("fundamental_quality_review_details")
+    if fundamental_quality_outcomes is not None and not fundamental_quality_outcomes.empty:
+        rows.append(
+            _write_middle_frame(
+                fundamental_quality_outcomes,
+                "fundamental_quality_outcome_daily",
+                target_date=target_date,
+                run_id=run_id,
+                source_path="derived:fundamental_quality_review_details",
+                ingested_at=ingested_at,
+                warehouse_dir=warehouse_dir,
+            )
+        )
+
     fundamental_queue = frames.get("fundamental_research_queue")
     if fundamental_queue is not None and not fundamental_queue.empty:
         rows.append(
@@ -1818,6 +1839,7 @@ def _build_decision_signal_daily(frame: pd.DataFrame, *, target_date: str) -> pd
     output["position_hint"] = _column(frame, "position_hint", default="")
     output["matched_theme"] = _column(frame, "matched_theme", default="")
     output["theme_cluster"] = _column(frame, "theme_cluster", default="")
+    output["top_keywords"] = _column(frame, "top_keywords", default="")
     output["stage"] = _column(frame, "stage", default="")
     output["setup_phase"] = _column(frame, "setup_phase", default="")
     output["candidate_model_version"] = _column(frame, "candidate_model_version", default="")
@@ -1845,6 +1867,7 @@ def _build_fundamental_watchlist_daily(frame: pd.DataFrame, *, target_date: str)
     output["risk_level"] = _column(frame, "risk_level", default="")
     output["reason_tags"] = _column(frame, "reason_tags", default="")
     output["risk_tags"] = _column(frame, "risk_tags", default="")
+    output["industry"] = _column(frame, "industry", default="")
     output["matched_theme"] = _column(frame, "matched_theme", default="")
     output["theme_cluster"] = _column(frame, "theme_cluster", default="")
     output["stage"] = _column(frame, "stage", default="")

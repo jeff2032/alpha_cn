@@ -18,6 +18,8 @@ def test_build_decision_signals_maps_core_and_watch_buckets() -> None:
                 "risk_level": "低",
                 "total_penalty": 0,
                 "matched_theme": "半导体",
+                "top_keywords": "半导体概念、存储芯片",
+                "industry": "计算机、通信和其他电子设备制造业",
                 "stage": "near_breakout",
                 "setup_phase": "接近突破确认",
                 "core_news_count": 1,
@@ -59,6 +61,8 @@ def test_build_decision_signals_maps_core_and_watch_buckets() -> None:
     assert indexed.loc["002137", "signal_type"] == "buy_watch"
     assert indexed.loc["002137", "confidence"] == "high"
     assert indexed.loc["002137", "expected_horizon"] == "3-5d"
+    assert indexed.loc["002137", "industry"] == "计算机、通信和其他电子设备制造业"
+    assert indexed.loc["002137", "top_keywords"] == "半导体概念、存储芯片"
     assert indexed.loc["600999", "signal_type"] == "upgrade_watch"
     assert indexed.loc["600999", "expected_horizon"] == "3-5d"
     assert indexed.loc["300000", "signal_type"] == "avoid"

@@ -118,11 +118,9 @@ def freeze_shadow_plan(
     tier_limits = {"A1": max(0, int(max_a1)), "A2": max(0, int(max_a2)), "A3": max(0, int(max_a3))}
     frame = frame[frame["_shadow_tier"].isin(tier_limits)]
     frame["_priority"] = frame["_shadow_tier"].map({"A2": 1, "A1": 2, "A3": 3}).fillna(9)
-    verdict_priority = {"pass": 1, "watch": 2, "": 3}
-    frame["_fundamental_priority"] = frame["fundamental_verdict"].map(verdict_priority).fillna(3)
     frame = frame[frame["_priority"] < 9].sort_values(
-        ["_priority", "_fundamental_priority", "research_score"],
-        ascending=[True, True, False],
+        ["_priority", "research_score"],
+        ascending=[True, False],
     )
 
     market_cap = market_position_cap(market_regime, market_score=market_score) if market_regime else max_total_weight

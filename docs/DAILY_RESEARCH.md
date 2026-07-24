@@ -116,6 +116,23 @@ python -m quant_a_stock.cli fundamental-quality-screen --target-date 2026-07-23 
 命令只对最多 20 只候选抓取公开财务指标，并缓存到 `data/cache/akshare/fundamentals/`。计算时按公告日期截断到 `target-date`，历史回跑不会读取当时尚未披露的财报。输出包括：
 
 - `fundamental_quality_screen_*.csv`：全部候选的 ROE、现金利润匹配、负债、增长、PE/PB、质量分和扣分原因。
+- `fundamental_quality_review_details_*.csv`：历史时点财务质量结论及下一交易日开盘后的 3/5/10/20 日收益。
+- `fundamental_quality_review_summary_*.csv`：按通过、观察、否决、专用模型汇总的收益和超额收益证据。
+
+历史检验命令：
+
+```powershell
+python -m quant_a_stock.cli fundamental-quality-backfill --since 2026-06-15 --until 2026-07-23 --top 20 --signal-top 80 --workers 6 --no-refresh --benchmark-symbol 510300
+```
+
+财务质量层的职责是分配深研资源和执行明确风险否决，不参与 A2/A3 短周期候选的重新排序。只有深研结论为 `reject` 时才从影子组合和用户主攻区移除；`pass/watch` 不代表未来 3 至 20 日收益更高。
+
+行业模型按候选层的 point-in-time 行业字段路由：
+
+- 银行：重点看 ROE、不良率、拨备覆盖率和核心一级资本充足率，不用普通企业资产负债率硬判。
+- 券商：重点看 ROE、杠杆、收入和利润周期，显式保留市场周期风险。
+- 煤炭：保留通用质量判断，同时强制标记煤价、产量和资本开支周期复核。
+- 半导体及电子设备：提高对成长与毛利的权重，现金转化弱只作成长阶段警示，但低 ROE 且缺少收入成长仍可否决。
 - `fundamental_research_queue_*.csv`：去掉 `reject` 后最多 5 只正式深研队列。
 - `specialized_review`：银行、券商、保险和信托不套用通用企业规则，留给专用模型。
 

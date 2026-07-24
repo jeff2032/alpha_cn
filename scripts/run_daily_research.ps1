@@ -464,6 +464,13 @@ function Format-CandidateDecisionCards {
         $lines += "- 观察：$observe"
         $lines += "- 失效：$invalid"
         $lines += "- 风险：$risk"
+        $qualityVerdict = if ($row.fundamental_quality_verdict) { $row.fundamental_quality_verdict } else { "未初筛" }
+        $deepVerdict = if ($row.fundamental_verdict) { $row.fundamental_verdict } else { "未深研" }
+        $fundamentalRisk = if ($row.fundamental_risk_tags) { $row.fundamental_risk_tags } else { "暂无额外财务风险标签" }
+        $lines += "- 基本面：财务初筛 $qualityVerdict，深研 $deepVerdict；$fundamentalRisk。"
+        if ($row.fundamental_reason_summary) {
+            $lines += "- 深研要点：$($row.fundamental_reason_summary)"
+        }
         $lines += ""
     }
     return ($lines -join "`r`n")
@@ -513,6 +520,8 @@ function New-PreMarketPlanReport {
     $themeCsv = Get-LatestReportFile -Pattern "market_theme_${dateStamp}_*.csv"
     $lifecycleCsv = Get-LatestReportFile -Pattern "candidate_lifecycles_${dateStamp}_*.csv"
     $lifecycleDailyCsv = Get-LatestReportFile -Pattern "candidate_lifecycle_daily_${dateStamp}_*.csv"
+    $qualityCsv = Get-LatestReportFile -Pattern "fundamental_quality_screen_${dateStamp}_*.csv"
+    $verdictCsv = Get-LatestReportFile -Pattern "fundamental_verdicts_${dateStamp}_*.csv"
 
     $marketLine = "- 市场温度：待查看当天复盘"
     $actionLine = "- 操作口径：先看候选分层，再结合开盘强弱确认"
@@ -533,14 +542,43 @@ function New-PreMarketPlanReport {
     if ($candidateCsv) {
         $candidates = @(Import-Csv -LiteralPath $candidateCsv.FullName -Encoding UTF8)
     }
+    $qualityBySymbol = @{}
+    if ($qualityCsv) {
+        foreach ($row in @(Import-Csv -LiteralPath $qualityCsv.FullName -Encoding UTF8)) {
+            $qualityBySymbol[[string]$row.symbol] = $row
+        }
+    }
+    $verdictBySymbol = @{}
+    if ($verdictCsv) {
+        foreach ($row in @(Import-Csv -LiteralPath $verdictCsv.FullName -Encoding UTF8)) {
+            $verdictBySymbol[[string]$row.symbol] = $row
+        }
+    }
+    foreach ($candidate in $candidates) {
+        $symbol = [string]$candidate.symbol
+        $quality = $qualityBySymbol[$symbol]
+        $verdict = $verdictBySymbol[$symbol]
+        $candidate | Add-Member -NotePropertyName fundamental_quality_verdict -NotePropertyValue $(if ($quality) { $quality.quality_verdict } else { "" }) -Force
+        $candidate | Add-Member -NotePropertyName fundamental_risk_tags -NotePropertyValue $(if ($quality) { $quality.risk_tags } else { "" }) -Force
+        $candidate | Add-Member -NotePropertyName fundamental_verdict -NotePropertyValue $(if ($verdict) { $verdict.fundamental_verdict } else { "" }) -Force
+        $candidate | Add-Member -NotePropertyName fundamental_reason_summary -NotePropertyValue $(if ($verdict) { $verdict.reason_summary } else { "" }) -Force
+    }
     $mainBuckets = @("主攻-A2启动确认", "主攻-A3趋势延续")
     $mainAttack = @(
         $candidates |
-            Where-Object { $_.action_bucket -in $mainBuckets -and $_.risk_level -in @("低", "中") } |
+            Where-Object {
+                $_.action_bucket -in $mainBuckets -and
+                $_.risk_level -in @("低", "中") -and
+                $_.fundamental_verdict -ne "reject"
+            } |
             Select-Object -First 5
     )
     if ($mainAttack.Count -eq 0) {
-        $mainAttack = @($candidates | Where-Object { $_.research_tier -in @("A2", "A3") } | Select-Object -First 5)
+        $mainAttack = @(
+            $candidates |
+                Where-Object { $_.research_tier -in @("A2", "A3") -and $_.fundamental_verdict -ne "reject" } |
+                Select-Object -First 5
+        )
     }
 
     $surgeWatchBuckets = @(
@@ -549,7 +587,11 @@ function New-PreMarketPlanReport {
     )
     $surgeWatch = @(
         $candidates |
-            Where-Object { $_.action_bucket -in $surgeWatchBuckets -and $_.risk_level -ne "高" } |
+            Where-Object {
+                $_.action_bucket -in $surgeWatchBuckets -and
+                $_.risk_level -ne "高" -and
+                $_.fundamental_verdict -ne "reject"
+            } |
             Select-Object -First 8
     )
 
@@ -563,7 +605,11 @@ function New-PreMarketPlanReport {
     )
     $upgradeWatch = @(
         $candidates |
-            Where-Object { $_.action_bucket -in $upgradeBuckets -and $_.risk_level -ne "高" } |
+            Where-Object {
+                $_.action_bucket -in $upgradeBuckets -and
+                $_.risk_level -ne "高" -and
+                $_.fundamental_verdict -ne "reject"
+            } |
             Select-Object -First 10
     )
 
@@ -791,6 +837,8 @@ function New-HoldingObservationReport {
         $candidateCsv = Get-LatestReportFile -Pattern "research_candidates_${dateStamp}_*.csv"
     }
     $lifecycleCsv = Get-LatestReportFile -Pattern "candidate_lifecycles_${dateStamp}_*.csv"
+    $qualityCsv = Get-LatestReportFile -Pattern "fundamental_quality_screen_${dateStamp}_*.csv"
+    $verdictCsv = Get-LatestReportFile -Pattern "fundamental_verdicts_${dateStamp}_*.csv"
     $holdingsPath = Join-Path $ProjectRoot "data/manual/holdings.csv"
 
     $candidates = @()
@@ -800,6 +848,18 @@ function New-HoldingObservationReport {
     $lifecycles = @()
     if ($lifecycleCsv) {
         $lifecycles = @(Import-Csv -LiteralPath $lifecycleCsv.FullName -Encoding UTF8)
+    }
+    $qualityBySymbol = @{}
+    if ($qualityCsv) {
+        foreach ($row in @(Import-Csv -LiteralPath $qualityCsv.FullName -Encoding UTF8)) {
+            $qualityBySymbol[[string]$row.symbol] = $row
+        }
+    }
+    $verdictBySymbol = @{}
+    if ($verdictCsv) {
+        foreach ($row in @(Import-Csv -LiteralPath $verdictCsv.FullName -Encoding UTF8)) {
+            $verdictBySymbol[[string]$row.symbol] = $row
+        }
     }
 
     $holdingLines = @()
@@ -819,6 +879,17 @@ function New-HoldingObservationReport {
             $bucket = if ($candidate) { $candidate.action_bucket } elseif ($life) { $life.current_action_bucket } else { "未进入候选/生命周期" }
             $risk = if ($candidate) { $candidate.risk_level } elseif ($life) { $life.risk_level } else { "未标注" }
             $tags = if ($candidate -and $candidate.risk_tags) { $candidate.risk_tags } else { "无明显风险标签" }
+            $quality = $qualityBySymbol[$symbol]
+            $verdict = $verdictBySymbol[$symbol]
+            $qualityText = if ($quality) { $quality.quality_verdict } else { "未初筛" }
+            $deepText = if ($verdict) { $verdict.fundamental_verdict } else { "未深研" }
+            $fundamentalRisk = if ($verdict -and $verdict.financial_risk_tags) {
+                $verdict.financial_risk_tags
+            } elseif ($quality -and $quality.risk_tags) {
+                $quality.risk_tags
+            } else {
+                "暂无额外财务风险标签"
+            }
             $stance = "等反抽处理"
             if ($bucket -in @("主攻-A2启动确认", "主攻-A3趋势延续") -and $risk -in @("低", "中")) {
                 $stance = "继续观察"
@@ -826,6 +897,9 @@ function New-HoldingObservationReport {
                 $stance = "风险退出观察"
             } elseif ($bucket -like "观察-B2*" -or $bucket -eq "观察-A1低位潜伏") {
                 $stance = "减仓观察"
+            }
+            if ($deepText -eq "reject") {
+                $stance = "基本面风险退出观察"
             }
 
             $costText = if ($holding.cost) { "，成本 $($holding.cost)" } else { "" }
@@ -836,6 +910,7 @@ function New-HoldingObservationReport {
             $holdingLines += "- 改善：重新进入主攻、放量承接、风险标签不加重。"
             $holdingLines += "- 失效：继续破位、反抽无量、主线转弱或公告风险加重。"
             $holdingLines += "- 风险：$tags"
+            $holdingLines += "- 基本面：财务初筛 $qualityText，深研 $deepText；$fundamentalRisk。"
             $holdingLines += ""
         }
     }
@@ -1006,19 +1081,6 @@ try {
 
     if ($ExportOnly) {
         Write-Step "ExportOnly enabled; skip data sync and research generation."
-        $pipelineArgs = @(
-            "research-pipeline",
-            "--target-date", $targetDate,
-            "--plan-date", $planDate,
-            "--top", "30",
-            "--signal-top", "80",
-            "--fundamental-top", "20",
-            "--no-write-warehouse"
-        )
-        if (-not [string]::IsNullOrWhiteSpace($RebuildRunId)) {
-            $pipelineArgs += @("--rebuild-run-id", $RebuildRunId)
-        }
-        Invoke-Quant $pipelineArgs
         Export-DailyReportsToObsidian -ReportDate $planDate -DataDate $targetDate
         Assert-ObsidianDailyOutputs -ReportDate $planDate -DataDate $targetDate
         Write-Step "ExportOnly completed. Log: $logPath"

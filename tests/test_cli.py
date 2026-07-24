@@ -731,6 +731,37 @@ def test_fundamental_quality_screen_command_parses_arguments() -> None:
     assert args.refresh is False
 
 
+def test_fundamental_quality_backfill_command_parses_arguments() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "fundamental-quality-backfill",
+            "--since",
+            "2026-06-15",
+            "--until",
+            "2026-07-23",
+            "--top",
+            "20",
+            "--signal-top",
+            "80",
+            "--workers",
+            "6",
+            "--no-refresh",
+            "--benchmark-symbol",
+            "510300",
+        ]
+    )
+
+    assert args.command == "fundamental-quality-backfill"
+    assert args.since == "2026-06-15"
+    assert args.until == "2026-07-23"
+    assert args.signal_top == 80
+    assert args.workers == 6
+    assert args.refresh is False
+    assert args.benchmark_symbol == "510300"
+
+
 def test_research_pipeline_command_parses_arguments() -> None:
     parser = build_parser()
 

@@ -80,17 +80,66 @@ def test_quality_screen_rejects_weak_profit_cash_and_balance_sheet() -> None:
     assert "现金利润严重偏弱" in result["risk_tags"]
 
 
-def test_financial_company_routes_to_specialized_review() -> None:
+def test_bank_uses_specialized_financial_metrics() -> None:
+    indicators = _indicator_rows()
+    indicators.loc[indicators.index[-2], "NONPERLOAN"] = 0.9
+    indicators.loc[indicators.index[-2], "BLDKBBL"] = 300.0
+    indicators.loc[indicators.index[-2], "NEWCAPITALADER"] = 12.0
     result = build_fundamental_quality_row(
-        _indicator_rows(),
+        indicators,
         symbol="600919",
         name="江苏银行",
         target_date="2026-07-23",
+        industry="货币金融服务",
         close=12.0,
     )
 
-    assert result["quality_verdict"] == "specialized_review"
-    assert bool(result["specialized_model"]) is True
+    assert result["quality_model"] == "bank"
+    assert result["quality_verdict"] == "pass"
+    assert bool(result["specialized_model"]) is False
+
+
+def test_semiconductor_model_does_not_hard_reject_growth_cash_lag_alone() -> None:
+    indicators = _indicator_rows()
+    annual_mask = indicators["REPORT_TYPE"].eq("年报")
+    indicators.loc[annual_mask, "NCO_NETPROFIT"] = 0.2
+    indicators.loc[annual_mask, "ROEJQ"] = 18.0
+    indicators.loc[annual_mask, "XSMLL"] = 50.0
+    indicators.loc[annual_mask, "TOTALOPERATEREVETZ"] = 30.0
+    result = build_fundamental_quality_row(
+        indicators,
+        symbol="002371",
+        name="半导体样本",
+        target_date="2026-07-23",
+        industry="半导体制造",
+        close=100.0,
+    )
+
+    assert result["quality_model"] == "semiconductor"
+    assert result["quality_verdict"] in {"pass", "watch"}
+    assert bool(result["hard_reject"]) is False
+
+
+def test_semiconductor_model_uses_theme_without_misclassifying_all_equipment() -> None:
+    indicators = _indicator_rows()
+    themed = build_fundamental_quality_row(
+        indicators,
+        symbol="002371",
+        name="北方华创",
+        target_date="2026-07-23",
+        industry="专用设备制造业",
+        theme_hint="半导体链",
+    )
+    generic = build_fundamental_quality_row(
+        indicators,
+        symbol="000001",
+        name="普通设备",
+        target_date="2026-07-23",
+        industry="专用设备制造业",
+    )
+
+    assert themed["quality_model"] == "semiconductor"
+    assert generic["quality_model"] == "generic"
 
 
 def test_research_queue_excludes_rejects_and_prefers_pass() -> None:

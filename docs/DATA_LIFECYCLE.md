@@ -72,6 +72,7 @@
 | `decision_signal_daily` | 每天每只决策信号一行 | 保存 `buy_watch/upgrade_watch/hold_watch/watch/avoid` 等处理口径、置信度、观察周期、观察条件和失效条件 |
 | `fundamental_watchlist_daily` | 每天每只基本面深研交接标的一行 | 保存交给 `ai-berkshire` 的优先级、建议研究技能、交接原因、核心问题、来源信号和风险标签 |
 | `fundamental_quality_daily` | 每天每只交接候选的财务硬指标一行 | 按公告日做 point-in-time 截断，保存 ROE、现金利润比、负债、增长、估值、质量结论和原因标签 |
+| `fundamental_quality_outcome_daily` | 历史财务质量结论及其后续收益一行 | 使用下一交易日开盘成交口径，保存 3/5/10/20 日收益、基准收益与超额收益 |
 | `fundamental_research_queue_daily` | 每天正式交给深研的少量公司一行 | 从质量筛选结果中剔除 reject，控制在 5 只以内，保留量化来源和财务筛选证据 |
 | `fundamental_verdict_daily` | 每次基本面深研返回的每只标的一行 | 保存 `pass/watch/reject`、质量分、估值风险、行业展望、催化周期和财务风险标签，供冻结计划读取 |
 | `stock_market_attitude_daily` | 每天每只候选一行 | 保存热度、资金承接、主题共振、盘面态度、事件、风险和拥挤度，输出强确认/温和确认/冷启动/虚热/过热分歧/风险压制 |

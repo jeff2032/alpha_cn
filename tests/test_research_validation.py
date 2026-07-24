@@ -215,8 +215,8 @@ def test_fundamental_verdict_normalizes_and_filters_shadow_plan() -> None:
         top=1,
     )
 
-    assert plan.iloc[0]["symbol"] == "000001"
-    assert plan.iloc[0]["fundamental_verdict"] == "pass"
+    assert plan.iloc[0]["symbol"] == "000003"
+    assert plan.iloc[0]["fundamental_verdict"] == ""
     assert "000002" not in set(plan["symbol"])
 
 

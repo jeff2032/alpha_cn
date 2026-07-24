@@ -16,8 +16,10 @@ FUNDAMENTAL_QUALITY_COLUMNS = [
     "target_date",
     "symbol",
     "name",
+    "industry",
     "quality_verdict",
     "quality_score",
+    "quality_model",
     "hard_reject",
     "hard_reject_reasons",
     "data_quality",
@@ -34,6 +36,9 @@ FUNDAMENTAL_QUALITY_COLUMNS = [
     "profit_growth_3y_avg",
     "recent_revenue_growth",
     "recent_profit_growth",
+    "npl_ratio_latest",
+    "provision_coverage_latest",
+    "core_tier1_capital_ratio_latest",
     "eps_latest_annual",
     "bps_latest_annual",
     "close",
@@ -61,6 +66,8 @@ def build_fundamental_quality_row(
     symbol: str,
     name: str,
     target_date: str,
+    industry: str = "",
+    theme_hint: str = "",
     close: float | None = None,
     source: str = "eastmoney",
     error: str = "",
@@ -69,7 +76,7 @@ def build_fundamental_quality_row(
     cfg = config or FundamentalQualityConfig()
     code = normalize_symbol(symbol)
     if indicators.empty:
-        return _empty_row(code, name, target_date, source=source, error=error or "empty")
+        return _empty_row(code, name, target_date, industry=industry, source=source, error=error or "empty")
 
     frame = indicators.copy()
     frame["REPORT_DATE"] = pd.to_datetime(frame.get("REPORT_DATE"), errors="coerce")
@@ -82,7 +89,14 @@ def build_fundamental_quality_row(
         & (frame["NOTICE_DATE"] <= cutoff)
     ].copy()
     if frame.empty:
-        return _empty_row(code, name, target_date, source=source, error="no_point_in_time_records")
+        return _empty_row(
+            code,
+            name,
+            target_date,
+            industry=industry,
+            source=source,
+            error="no_point_in_time_records",
+        )
 
     frame = frame.sort_values(["REPORT_DATE", "NOTICE_DATE"], ascending=False)
     latest = frame.iloc[0]
@@ -90,7 +104,8 @@ def build_fundamental_quality_row(
         frame.get("REPORT_TYPE", pd.Series("", index=frame.index)).fillna("").astype(str).str.contains("年报")
     ].drop_duplicates(subset=["REPORT_DATE"], keep="first")
     annual = annual.sort_values("REPORT_DATE", ascending=False).head(3)
-    specialized = bool(re.search(r"银行|证券|保险|信托", str(name)))
+    quality_model = _quality_model(name=name, industry=industry, theme_hint=theme_hint)
+    specialized = quality_model == "specialized"
     metrics = _metrics(annual, latest=latest, close=close)
 
     if specialized:
@@ -98,7 +113,7 @@ def build_fundamental_quality_row(
         score = np.nan
         hard_reject_reasons: list[str] = []
         quality_tags = "通用财务去劣规则不适用"
-        risk_tags = "需银行/券商/保险专用模型"
+        risk_tags = "需保险/信托专用模型"
     elif len(annual) < cfg.minimum_annual_reports:
         verdict = "data_insufficient"
         score = np.nan
@@ -106,7 +121,7 @@ def build_fundamental_quality_row(
         quality_tags = ""
         risk_tags = f"仅有{len(annual)}期可用年报"
     else:
-        score, quality, risks, hard_reject_reasons = _score_quality(metrics)
+        score, quality, risks, hard_reject_reasons = _score_by_model(metrics, quality_model=quality_model)
         if hard_reject_reasons or score < cfg.watch_score:
             verdict = "reject"
         elif score >= cfg.pass_score:
@@ -120,8 +135,10 @@ def build_fundamental_quality_row(
         "target_date": target_date,
         "symbol": code,
         "name": str(name or ""),
+        "industry": str(industry or ""),
         "quality_verdict": verdict,
         "quality_score": _round(score),
+        "quality_model": quality_model,
         "hard_reject": bool(hard_reject_reasons),
         "hard_reject_reasons": "；".join(hard_reject_reasons),
         "data_quality": "OK" if len(annual) >= cfg.minimum_annual_reports else "WARN",
@@ -217,6 +234,9 @@ def _metrics(annual: pd.DataFrame, *, latest: pd.Series, close: float | None) ->
         "profit_growth_3y_avg": _mean(profit_growth),
         "recent_revenue_growth": _number(latest.get("TOTALOPERATEREVETZ")),
         "recent_profit_growth": _number(latest.get("PARENTNETPROFITTZ")),
+        "npl_ratio_latest": _number(latest.get("NONPERLOAN")),
+        "provision_coverage_latest": _number(latest.get("BLDKBBL")),
+        "core_tier1_capital_ratio_latest": _number(latest.get("NEWCAPITALADER")),
         "eps_latest_annual": _round(eps),
         "bps_latest_annual": _round(bps),
         "close": _round(resolved_close),
@@ -225,7 +245,20 @@ def _metrics(annual: pd.DataFrame, *, latest: pd.Series, close: float | None) ->
     }
 
 
-def _score_quality(metrics: dict) -> tuple[float, list[str], list[str], list[str]]:
+def _score_by_model(metrics: dict, *, quality_model: str) -> tuple[float, list[str], list[str], list[str]]:
+    if quality_model == "bank":
+        return _score_bank(metrics)
+    if quality_model == "securities":
+        return _score_securities(metrics)
+    if quality_model == "semiconductor":
+        return _score_semiconductor(metrics)
+    score, quality, risks, hard_reject_reasons = _score_generic(metrics)
+    if quality_model == "coal":
+        risks.append("煤价和产量周期需单独验证")
+    return score, quality, risks, hard_reject_reasons
+
+
+def _score_generic(metrics: dict) -> tuple[float, list[str], list[str], list[str]]:
     score = 10.0
     quality: list[str] = []
     risks: list[str] = []
@@ -312,14 +345,180 @@ def _score_quality(metrics: dict) -> tuple[float, list[str], list[str], list[str
     return round(max(0.0, min(100.0, score)), 2), quality, risks, hard_reject_reasons
 
 
-def _empty_row(symbol: str, name: str, target_date: str, *, source: str, error: str) -> dict:
+def _score_bank(metrics: dict) -> tuple[float, list[str], list[str], list[str]]:
+    score = 10.0
+    quality: list[str] = []
+    risks: list[str] = []
+    hard: list[str] = []
+    roe = _number(metrics["roe_3y_avg"])
+    if roe >= 15:
+        score += 30
+        quality.append("银行ROE优秀")
+    elif roe >= 12:
+        score += 25
+        quality.append("银行ROE良好")
+    elif roe >= 9:
+        score += 18
+    else:
+        score += 8
+        risks.append("银行ROE偏低")
+
+    npl = _number(metrics["npl_ratio_latest"])
+    if npl <= 1.0:
+        score += 25
+        quality.append("不良率较低")
+    elif npl <= 1.5:
+        score += 18
+    elif npl <= 2.0:
+        score += 10
+        risks.append("不良率偏高")
+    else:
+        risks.append("不良率过高")
+        hard.append("不良贷款率高于2%")
+
+    coverage = _number(metrics["provision_coverage_latest"])
+    if coverage >= 250:
+        score += 20
+        quality.append("拨备覆盖充足")
+    elif coverage >= 180:
+        score += 15
+    elif coverage >= 120:
+        score += 8
+        risks.append("拨备覆盖一般")
+    else:
+        risks.append("拨备覆盖不足")
+        hard.append("拨备覆盖率低于120%")
+
+    capital = _number(metrics["core_tier1_capital_ratio_latest"])
+    if capital >= 11:
+        score += 10
+        quality.append("核心资本充足")
+    elif capital >= 9:
+        score += 6
+    else:
+        risks.append("核心一级资本偏低")
+    if _number(metrics["recent_profit_growth"]) > 0:
+        score += 5
+    else:
+        risks.append("最近利润增长偏弱")
+    return round(min(100.0, score), 2), quality, risks, hard
+
+
+def _score_securities(metrics: dict) -> tuple[float, list[str], list[str], list[str]]:
+    score = 15.0
+    quality: list[str] = []
+    risks: list[str] = ["券商业绩受市场周期影响"]
+    hard: list[str] = []
+    roe = _number(metrics["roe_3y_avg"])
+    if roe >= 12:
+        score += 35
+        quality.append("券商ROE优秀")
+    elif roe >= 8:
+        score += 28
+    elif roe >= 5:
+        score += 18
+        risks.append("券商ROE一般")
+    else:
+        score += 6
+        risks.append("券商ROE偏低")
+    debt = _number(metrics["debt_ratio_latest"])
+    if debt <= 70:
+        score += 20
+    elif debt <= 80:
+        score += 12
+        risks.append("券商杠杆偏高")
+    else:
+        risks.append("券商杠杆过高")
+        hard.append("券商资产负债率高于80%")
+    revenue_growth = _number(metrics["revenue_growth_3y_avg"])
+    profit_growth = _number(metrics["profit_growth_3y_avg"])
+    if revenue_growth > 0:
+        score += 15
+        quality.append("三年收入保持增长")
+    else:
+        risks.append("三年收入增长偏弱")
+    if profit_growth > 0:
+        score += 15
+        quality.append("三年利润保持增长")
+    else:
+        risks.append("三年利润波动偏弱")
+    return round(min(100.0, score), 2), quality, risks, hard
+
+
+def _score_semiconductor(metrics: dict) -> tuple[float, list[str], list[str], list[str]]:
+    score = 10.0
+    quality: list[str] = []
+    risks: list[str] = ["半导体景气与估值周期需单独验证"]
+    hard: list[str] = []
+    roe = _number(metrics["roe_3y_avg"])
+    gross = _number(metrics["gross_margin_3y_avg"])
+    debt = _number(metrics["debt_ratio_latest"])
+    growth = _number(metrics["revenue_growth_3y_avg"])
+    cash = _number(metrics["cfo_net_profit_3y_avg"])
+    score += 30 if roe >= 18 else 24 if roe >= 12 else 15 if roe >= 8 else 5
+    if roe >= 12:
+        quality.append("半导体ROE良好")
+    else:
+        risks.append("半导体ROE偏低")
+    score += 20 if gross >= 45 else 15 if gross >= 30 else 8
+    if gross >= 45:
+        quality.append("毛利率具备竞争力")
+    score += 20 if growth >= 20 else 14 if growth >= 8 else 6
+    if growth >= 20:
+        quality.append("收入成长较快")
+    else:
+        risks.append("收入成长不足以覆盖高估值")
+    score += 15 if debt <= 40 else 10 if debt <= 60 else 4
+    if debt > 70:
+        hard.append("半导体公司资产负债率高于70%")
+    if cash >= 0.8:
+        score += 5
+    elif cash < 0.3:
+        risks.append("成长阶段现金转化偏弱")
+    pe = _number(metrics["pe"])
+    pb = _number(metrics["pb"])
+    if pe > 50:
+        risks.append("半导体估值对增长要求很高")
+    if pb > 10:
+        risks.append("半导体市净率偏高")
+    if roe < 5 and growth < 10:
+        hard.append("低ROE且缺少收入成长")
+    return round(min(100.0, score), 2), quality, risks, hard
+
+
+def _quality_model(*, name: str, industry: str, theme_hint: str = "") -> str:
+    text = f"{name} {industry} {theme_hint}"
+    if re.search(r"银行|货币金融", text):
+        return "bank"
+    if re.search(r"证券|资本市场服务", text):
+        return "securities"
+    if re.search(r"保险|信托", text):
+        return "specialized"
+    if re.search(r"煤炭开采|煤炭", text):
+        return "coal"
+    if re.search(r"半导体|集成电路|电子器件|通信设备|计算机、通信|其他电子设备制造|AI硬件", text):
+        return "semiconductor"
+    return "generic"
+
+
+def _empty_row(
+    symbol: str,
+    name: str,
+    target_date: str,
+    *,
+    industry: str = "",
+    source: str,
+    error: str,
+) -> dict:
     row = {column: "" for column in FUNDAMENTAL_QUALITY_COLUMNS}
     row.update(
         {
             "target_date": target_date,
             "symbol": symbol,
             "name": str(name or ""),
+            "industry": str(industry or ""),
             "quality_verdict": "data_insufficient",
+            "quality_model": "unknown",
             "hard_reject": False,
             "hard_reject_reasons": "",
             "data_quality": "ERROR",

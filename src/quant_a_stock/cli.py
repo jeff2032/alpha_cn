@@ -28,6 +28,7 @@ from quant_a_stock.cleaning.pipeline import clean_candles
 from quant_a_stock.config import BacktestConfig, DEFAULT_BACKTEST_CONFIG, DEFAULT_PATHS
 from quant_a_stock.data.akshare_client import fetch_daily
 from quant_a_stock.data.cache import daily_cache_path, load_daily_cache, save_daily_cache
+from quant_a_stock.data.calendar import cached_trading_dates
 from quant_a_stock.data.calendar import resolve_cached_trading_date
 from quant_a_stock.data.fundamentals import fetch_financial_indicators
 from quant_a_stock.data_lifecycle import build_data_loop_status
@@ -61,6 +62,7 @@ from quant_a_stock.research.fundamental_watchlist import save_fundamental_watchl
 from quant_a_stock.research.fundamental_quality import build_fundamental_quality_row
 from quant_a_stock.research.fundamental_quality import build_research_queue
 from quant_a_stock.research.fundamental_quality import load_close_from_cache
+from quant_a_stock.research.fundamental_quality_review import evaluate_fundamental_quality_history
 from quant_a_stock.research.fundamental_verdict import load_fundamental_verdicts
 from quant_a_stock.research.fundamental_verdict import merge_fundamental_verdicts
 from quant_a_stock.research.factor_evidence import analyze_factor_evidence
@@ -2157,8 +2159,18 @@ def fundamental_quality_screen(args: argparse.Namespace) -> None:
             result.frame,
             symbol=symbol,
             name=str(item.get("name", "") or ""),
-            target_date=target_date,
-            close=load_close_from_cache(symbol, target_date=target_date),
+                target_date=target_date,
+                industry=str(item.get("industry", "") or ""),
+                theme_hint="；".join(
+                    value
+                    for value in (
+                        str(item.get("matched_theme", "") or ""),
+                        str(item.get("theme_cluster", "") or ""),
+                        str(item.get("top_keywords", "") or ""),
+                    )
+                    if value
+                ),
+                close=load_close_from_cache(symbol, target_date=target_date),
             source=result.source,
             error=result.error,
         )
@@ -2223,6 +2235,129 @@ def fundamental_quality_screen(args: argparse.Namespace) -> None:
     print(f"财务质量筛选: {quality_path}")
     print(f"AI Berkshire 深研队列: {queue_path}")
     print(f"AI Berkshire 交接 JSON: {context.path}")
+
+
+def fundamental_quality_backfill(args: argparse.Namespace) -> None:
+    since = pd.Timestamp(args.since).normalize()
+    until = pd.Timestamp(args.until).normalize()
+    dates = [date for date in cached_trading_dates() if since <= date <= until]
+    historical_watchlists: list[pd.DataFrame] = []
+    skipped: list[str] = []
+    for date in dates:
+        target_date = date.date().isoformat()
+        try:
+            candidates = load_candidates_for_decision_signals(target_date=target_date)
+        except (FileNotFoundError, ValueError):
+            skipped.append(target_date)
+            continue
+        signals = build_decision_signals(
+            candidates,
+            target_date=target_date,
+            plan_date=target_date,
+            top=args.signal_top,
+        )
+        watchlist = build_fundamental_watchlist(
+            signals,
+            target_date=target_date,
+            plan_date=target_date,
+            top=args.top,
+            holdings=pd.DataFrame(),
+        )
+        if not watchlist.empty:
+            historical_watchlists.append(watchlist)
+    if not historical_watchlists:
+        raise SystemExit("指定区间没有可回填的研究快照。")
+
+    all_watchlists = pd.concat(historical_watchlists, ignore_index=True)
+    symbols = all_watchlists[["symbol", "name"]].drop_duplicates("symbol")
+    fetched: dict[str, object] = {}
+
+    def fetch_symbol(symbol: str):
+        return fetch_financial_indicators(
+            symbol,
+            refresh=args.refresh,
+            retries=args.retries,
+            retry_wait=args.retry_wait,
+        )
+
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+        futures = {
+            executor.submit(fetch_symbol, str(item["symbol"]).zfill(6)): str(item["symbol"]).zfill(6)
+            for _, item in symbols.iterrows()
+        }
+        for future in as_completed(futures):
+            symbol = futures[future]
+            try:
+                fetched[symbol] = future.result()
+            except Exception as exc:
+                fetched[symbol] = exc
+
+    rows: list[dict] = []
+    for _, item in all_watchlists.iterrows():
+        symbol = str(item["symbol"]).zfill(6)
+        result = fetched[symbol]
+        if isinstance(result, Exception):
+            quality_row = build_fundamental_quality_row(
+                pd.DataFrame(),
+                symbol=symbol,
+                name=str(item.get("name", "") or ""),
+                target_date=str(item["target_date"]),
+                error=f"{type(result).__name__}: {result}",
+            )
+        else:
+            quality_row = build_fundamental_quality_row(
+                result.frame,
+                symbol=symbol,
+                name=str(item.get("name", "") or ""),
+                target_date=str(item["target_date"]),
+                industry=str(item.get("industry", "") or ""),
+                theme_hint="；".join(
+                    value
+                    for value in (
+                        str(item.get("matched_theme", "") or ""),
+                        str(item.get("theme_cluster", "") or ""),
+                        str(item.get("top_keywords", "") or ""),
+                    )
+                    if value
+                ),
+                close=load_close_from_cache(symbol, target_date=str(item["target_date"])),
+                source=result.source,
+                error=result.error,
+            )
+        record = item.to_dict()
+        record["quant_reason_tags"] = record.pop("reason_tags", "")
+        record["quant_risk_tags"] = record.pop("risk_tags", "")
+        quality_row["fundamental_risk_tags"] = quality_row.pop("risk_tags", "")
+        record.update(quality_row)
+        rows.append(record)
+
+    history = pd.DataFrame(rows)
+    history_path = save_report(
+        history.to_dict("records"),
+        report_type="fundamental_quality_history",
+        date_prefix=until.date().isoformat(),
+    )
+    details, summary = evaluate_fundamental_quality_history(
+        history,
+        benchmark_symbol=args.benchmark_symbol,
+    )
+    details_path = save_report(
+        details.to_dict("records"),
+        report_type="fundamental_quality_review_details",
+        date_prefix=until.date().isoformat(),
+    )
+    summary_path = save_report(
+        summary.to_dict("records"),
+        report_type="fundamental_quality_review_summary",
+        date_prefix=until.date().isoformat(),
+    )
+    print(f"回填日期: {history['target_date'].nunique()}，候选记录: {len(history)}，公司: {history['symbol'].nunique()}")
+    if skipped:
+        print(f"缺少研究快照日期: {', '.join(skipped)}")
+    print(summary.to_string(index=False))
+    print(f"历史财务质量: {history_path}")
+    print(f"收益明细: {details_path}")
+    print(f"验证汇总: {summary_path}")
 
 
 def import_fundamental_verdicts(args: argparse.Namespace) -> None:
@@ -3142,6 +3277,21 @@ def build_parser() -> argparse.ArgumentParser:
     quality.add_argument("--refresh", action=argparse.BooleanOptionalAction, default=True)
     quality.add_argument("--output-root", default=None)
     quality.set_defaults(func=fundamental_quality_screen)
+
+    quality_backfill = subparsers.add_parser(
+        "fundamental-quality-backfill",
+        help="按历史公告时点回填财务质量并验证次日开盘后的分组表现",
+    )
+    quality_backfill.add_argument("--since", required=True)
+    quality_backfill.add_argument("--until", required=True)
+    quality_backfill.add_argument("--top", type=int, default=20)
+    quality_backfill.add_argument("--signal-top", type=int, default=80)
+    quality_backfill.add_argument("--workers", type=int, default=4)
+    quality_backfill.add_argument("--retries", type=int, default=2)
+    quality_backfill.add_argument("--retry-wait", type=float, default=1.5)
+    quality_backfill.add_argument("--refresh", action=argparse.BooleanOptionalAction, default=False)
+    quality_backfill.add_argument("--benchmark-symbol", default="510300")
+    quality_backfill.set_defaults(func=fundamental_quality_backfill)
 
     verdict = subparsers.add_parser("import-fundamental-verdicts", help="导入 ai-berkshire 返回的结构化基本面结论")
     verdict.add_argument("--input", required=True)
