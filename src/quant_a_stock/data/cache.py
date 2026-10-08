@@ -7,6 +7,7 @@ import pandas as pd
 from quant_a_stock.config import DEFAULT_PATHS
 from quant_a_stock.io_utils import atomic_write_csv
 from quant_a_stock.io_utils import exclusive_file_lock
+from quant_a_stock.data.normalization import normalize_a_share_volume
 
 
 STANDARD_COLUMNS = [
@@ -38,13 +39,15 @@ def save_daily_cache(
     *,
     source: str = "akshare",
     cache_dir: Path | None = None,
+    replace_existing: bool = False,
 ) -> Path:
     path = daily_cache_path(symbol, source=source, cache_dir=cache_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     output = candles.copy()
     lock_path = path.parent / ".locks" / f"{symbol}.lock"
     with exclusive_file_lock(lock_path, owner=f"daily-cache:{symbol}"):
-        output = _merge_newest_cache(path, output)
+        if not replace_existing:
+            output = _merge_newest_cache(path, output)
         if "timestamp" in output.columns:
             output["timestamp"] = pd.to_datetime(output["timestamp"]).dt.strftime("%Y-%m-%d")
         output = output.loc[:, [column for column in CACHE_COLUMNS if column in output.columns]]
@@ -82,6 +85,7 @@ def load_daily_cache(
             f"Missing cached data for {symbol}: {path}. Run sync-daily first."
         )
     frame = pd.read_csv(path)
+    frame = normalize_a_share_volume(frame)
     if "timestamp" in frame.columns:
         frame["timestamp"] = pd.to_datetime(frame["timestamp"])
     return frame

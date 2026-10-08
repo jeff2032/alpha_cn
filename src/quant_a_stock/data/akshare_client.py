@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from threading import local
 from time import sleep
 from typing import Literal
 
@@ -12,8 +13,32 @@ from quant_a_stock.cleaning.pipeline import clean_candles
 
 AssetType = Literal["auto", "etf", "stock"]
 ConcreteAssetType = Literal["etf", "stock"]
-EtfProvider = Literal["eastmoney", "sina"]
-StockProvider = Literal["eastmoney", "sina"]
+EtfProvider = Literal["eastmoney", "sina", "tencent"]
+StockProvider = Literal["eastmoney", "sina", "tencent"]
+
+
+_HTTP_STATE = local()
+
+
+def _http_session():
+    """Reuse HTTP connections inside each downloader worker thread."""
+
+    import requests
+
+    session = getattr(_HTTP_STATE, "session", None)
+    if session is None:
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=8, max_retries=0)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        session.headers.update(
+            {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AlphaCN/0.1",
+                "Connection": "keep-alive",
+            }
+        )
+        _HTTP_STATE.session = session
+    return session
 
 
 @dataclass(frozen=True)
@@ -128,6 +153,100 @@ def _fetch_etf_sina(
     return renamed[(renamed["timestamp"] >= start) & (renamed["timestamp"] <= end)]
 
 
+def _parse_tencent_etf_rows(rows: list[list[object]]) -> pd.DataFrame:
+    return _parse_tencent_rows(rows, volume_multiplier=100)
+
+
+def _parse_tencent_stock_rows(rows: list[list[object]]) -> pd.DataFrame:
+    return _parse_tencent_rows(rows, volume_multiplier=100)
+
+
+def _parse_tencent_rows(
+    rows: list[list[object]],
+    *,
+    volume_multiplier: int,
+) -> pd.DataFrame:
+    records: list[dict[str, object]] = []
+    for row in rows:
+        if len(row) < 9:
+            continue
+        records.append(
+            {
+                "timestamp": row[0],
+                "open": row[1],
+                "close": row[2],
+                "high": row[3],
+                "low": row[4],
+                "volume": pd.to_numeric(row[5], errors="coerce") * volume_multiplier,
+                # 腾讯 K 线的成交额单位为万元。
+                "amount": pd.to_numeric(row[8], errors="coerce") * 10_000,
+            }
+        )
+    return pd.DataFrame.from_records(records)
+
+
+def _fetch_tencent_rows(
+    market_symbol: str,
+    start_date: str,
+    end_date: str,
+    adjust: str,
+) -> list[list[object]]:
+    from akshare.utils import demjson
+
+    url = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
+    all_rows: list[list[object]] = []
+    for year in range(int(start_date[:4]), int(end_date[:4]) + 1):
+        params = {
+            "_var": f"kline_day{adjust}{year}",
+            "param": f"{market_symbol},day,{year}-01-01,{year}-12-31,640,{adjust}",
+            "r": "0.8205512681390605",
+        }
+        response = _http_session().get(url, params=params, timeout=(5, 15))
+        response.raise_for_status()
+        marker = response.text.find("={")
+        if marker < 0:
+            raise ValueError(f"Tencent returned an unexpected payload for {market_symbol}")
+        payload = demjson.decode(response.text[marker + 1 :])
+        symbol_data = payload.get("data", {}).get(market_symbol, {})
+        row_key = f"{adjust}day" if adjust else "day"
+        all_rows.extend(symbol_data.get(row_key, []))
+    return all_rows
+
+
+def _filter_tencent_frame(
+    frame: pd.DataFrame,
+    *,
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
+    start = pd.Timestamp(start_date)
+    end = pd.Timestamp(end_date)
+    return frame[
+        (frame["timestamp"] >= start) & (frame["timestamp"] <= end)
+    ].drop_duplicates(subset=["timestamp"], keep="last")
+
+
+def _fetch_etf_tencent(
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    adjust: str,
+) -> pd.DataFrame:
+    if adjust:
+        raise ValueError("Tencent ETF provider does not support adjusted data; use --adjust none")
+
+    rows = _fetch_tencent_rows(_sina_etf_symbol(symbol), start_date, end_date, adjust)
+    return _filter_tencent_frame(
+        _parse_tencent_etf_rows(rows),
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+
 def _fetch_etf(
     symbol: str,
     start_date: str,
@@ -139,6 +258,8 @@ def _fetch_etf(
         return _fetch_etf_eastmoney(symbol, start_date, end_date, adjust)
     if provider == "sina":
         return _fetch_etf_sina(symbol, start_date, end_date, adjust)
+    if provider == "tencent":
+        return _fetch_etf_tencent(symbol, start_date, end_date, adjust)
     raise ValueError(f"Unsupported ETF provider: {provider}")
 
 
@@ -184,6 +305,20 @@ def _fetch_stock_sina(
     return output
 
 
+def _fetch_stock_tencent(
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    adjust: str,
+) -> pd.DataFrame:
+    rows = _fetch_tencent_rows(_sina_stock_symbol(symbol), start_date, end_date, adjust)
+    return _filter_tencent_frame(
+        _parse_tencent_stock_rows(rows),
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+
 def _fetch_stock(
     symbol: str,
     start_date: str,
@@ -195,6 +330,8 @@ def _fetch_stock(
         return _fetch_stock_eastmoney(symbol, start_date, end_date, adjust)
     if provider == "sina":
         return _fetch_stock_sina(symbol, start_date, end_date, adjust)
+    if provider == "tencent":
+        return _fetch_stock_tencent(symbol, start_date, end_date, adjust)
     raise ValueError(f"Unsupported stock provider: {provider}")
 
 

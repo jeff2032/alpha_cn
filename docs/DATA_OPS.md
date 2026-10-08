@@ -93,7 +93,7 @@ python -m quant_a_stock.cli sync-stock-universe --universe-file data/universe/st
 
 日常推荐 `--lookback-days 60`：速度更快，适合每天收盘后补数据、出候选池。周末或月末想更稳地刷新 250 日平台指标和最近复权，可以临时改成 `--lookback-days 450`。需要更严格重算月线三年结构时，可以临时改成 `--lookback-days 1200`。
 
-`--workers` 控制并行下载线程数。日常默认入口可以给 `--workers 6`，但脚本会把 `sina` 自动保护到 2，避免 AKShare 依赖里的 `py_mini_racer` 在高并发下崩溃。现在 `run_data_sync.ps1` 会先用 `sina` 补数；如果主源进程崩溃或失败，会重新生成过期清单，再用 `eastmoney` 备用源继续补剩余标的。最后统一用覆盖率检查判断是否还需要重试。
+`--workers` 控制并行下载线程数。日常默认入口可以给 `--workers 6`，但脚本会把 `sina` 自动保护到 3、`tencent` 保护到 4，避免上游接口在高并发下断连。`run_data_sync.ps1` 默认依次使用 `sina -> tencent`，后一层只补上一层仍然过期的标的，不会重新下载全市场。东方财富当前经常出现 `RemoteDisconnected`，保留为手工备用，不再默认制造整批错误日志。最后统一用覆盖率检查判断是否还需要重试。
 
 也可以直接用数据补数脚本，它会自动生成过期清单、并行补数、最后再检查一次覆盖率：
 
@@ -104,7 +104,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_data_sync.
 明确指定目标日和备用源：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_data_sync.ps1 -TargetDate 2026-06-25 -StockProvider sina -FallbackStockProvider eastmoney -Workers 6 -FallbackWorkers 6
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_data_sync.ps1 -TargetDate 2026-06-25 -StockProvider sina -FallbackStockProvider tencent -Workers 6 -FallbackWorkers 4
 ```
 
 后台运行时使用：
@@ -163,10 +163,11 @@ python -m quant_a_stock.cli sync-daily --symbols 510300 510500 159915 --since 20
 python -m quant_a_stock.cli cache-date-status --symbols 510300 510500 159915 --target-date 2026-06-23 --exact-target-date --show-stale --top 10
 ```
 
-如果 Eastmoney ETF 源报 `RemoteDisconnected` 或日期没有补到目标日，用 Sina 备用源重试：
+ETF 默认先用 Sina；若目标日仍滞后，再用 Tencent 补齐。Eastmoney 报 `RemoteDisconnected` 时无需反复重试：
 
 ```powershell
 python -m quant_a_stock.cli sync-daily --symbols 510300 510500 159915 --since 2020-01-01 --asset-type etf --etf-provider sina --adjust none --incremental --lookback-days 60
+python -m quant_a_stock.cli sync-daily --symbols 510300 510500 159915 --since 2020-01-01 --asset-type etf --etf-provider tencent --adjust none --incremental --lookback-days 60
 ```
 
 ## 扫描潜伏池、突破确认池和趋势回踩池
@@ -207,6 +208,20 @@ python -m quant_a_stock.cli scan-pattern --pattern trend_pullback_setup --top 16
 - `ret_60_pct`：60 日趋势强度。
 - `drawdown_from_high_pct`：离近 60 日高点的回撤。
 - `trend_score`、`pullback_score`、`resume_score`：趋势、回踩和再启动拆分评分。
+
+扫描更宽的“低位待催化”内部观察池：
+
+```powershell
+python -m quant_a_stock.cli scan-pattern --pattern latent_catalyst_setup --top 200 --min-score 45 --min-amount-ma20 100000000
+```
+
+它不进入正式推荐和影子组合，只用于观察被严格形态门槛漏掉的低位样本。历史复盘必须从次日开盘算收益，并保留涨停、停牌等不可成交状态：
+
+```powershell
+python -m quant_a_stock.cli latent-catalyst-review --since 2026-06-01 --until 2026-07-31 --universe-file data/universe/a_stock.csv --benchmark-symbol 510300
+```
+
+只有样本数、5/10 日超额收益和超额胜率同时通过时，汇总字段 `eligible_for_promotion` 才会为真；否则继续保持零仓位观察。
 
 只扫描自选观察池：
 
@@ -314,6 +329,8 @@ python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --to
 - 资金流确认：东财个股资金流转成 `money_flow_score`，只做小幅确认加分；连续主力流出会进入风险标签。
 - 问财外部验证：人工导出的问财条件选股结果转成 `iwencai_hit/iwencai_score`，只做外部验证，不替代模型主信号。
 - 动作分组：`action_bucket` 会把候选拆成主攻、升级观察和风险回避。当前主攻只保留 A2 启动确认和主线仍强、风险干净、不拥挤的 A3 趋势延续；A1 先观察；B2 拆成 `观察-B2a主线扩散待升级`、`观察-B2s主线突发待确认` 和 `观察-B2b主题待确认`，不直接当买点。
+- 分层周期：A3 执行窗口为 1-3 日；A2 为 1-5 日；B2 只给 1-3 日升级认证；A1 执行窗口仍为 10-20 日，但研究跟踪延长到 60 个交易日，每 5 日重新认证。研究跟踪变长不等于强制持有变长。
+- 长周期深研：低风险 A1 连续认证至少 3 次、当前分不低于 58 且没有降级历史时，`berkshire-handoff` 才会导出最多 5 只，按 `quality-screen -> investment-research -> deep-company-series -> thesis-tracker` 交给伯克希尔技能链。
 - 风险标签：`risk_level` 和 `risk_tags` 要优先看，公告风险、次新样本不足、成交额偏低、涨幅/量能过热会明显降权。
 
 使用方式建议：
@@ -321,12 +338,42 @@ python -m quant_a_stock.cli daily-research-summary --target-date 2026-06-12 --to
 - 先用 `scan-pattern --pattern accumulation_setup` 找“长平台 + 低热度 + 温和放量”的潜伏池。
 - 再用 `scan-pattern --pattern base_breakout_setup` 保留“接近突破确认”的辅助池。
 - 再用 `scan-pattern --pattern trend_pullback_setup` 补充“强趋势回踩/再启动”的 A3 池。
+- `latent_catalyst_setup` 只做零仓位内部观察，通过 `latent-catalyst-review` 累积足够证据后再决定是否升级模型。
 - 再用 `sentiment-score` 看候选股有没有热度、新闻和概念承接。
 - 最后用 `market-theme` 看候选是否落在当日强主线里。
 - 夜间慢准备里用 `money-flow`、`risk-events` 和 `import-iwencai` 增强资金确认、公告风险和外部条件验证。
 - 用 `research-candidates` 汇总成最终观察池，优先复盘 `action_bucket` 里的主攻池、B2a 主线扩散升级观察池、B2s 低位主线突发待确认池和 B2b 主题待确认池。
 - 用 `daily-research-summary` 看当天主报告，它会合并市场温度、主题簇、候选持续性和风险提醒。
 - 如果形态很好但情绪极弱，先放观察池；如果情绪很热但形态已经大幅加速，避免追高。
+
+## 日线缓存质量审计
+
+检查当前股票池的日期、OHLC、成交量单位和前复权基准是否稳定：
+
+```powershell
+python -m quant_a_stock.cli cache-audit --universe-file data/universe/a_stock.csv --target-date 2026-10-08 --output-quarantine data/universe/cache_quarantine.csv
+```
+
+输出：
+
+- `reports/daily_cache_audit_*.csv`：每只股票的审计状态、复权基准跳变次数、异常收益次数和最后日期。
+- `data/universe/cache_quarantine.csv`：需要隔离的标的。日常全市场扫描会自动排除这份清单。
+
+隔离标的不能继续用多源增量数据覆盖。修复时必须选择一个来源完整重拉并替换旧缓存：
+
+```powershell
+python -m quant_a_stock.cli sync-stock-universe --universe-file data/universe/cache_quarantine.csv --since 2020-01-01 --until 2026-10-08 --stock-provider sina --adjust qfq --workers 1 --sleep 0.3 --retries 2 --no-skip-existing --replace-cache
+```
+
+修复后重新运行 `cache-audit`。夜间任务会自动执行这套“隔离、单源修复、复查”流程；只有复查通过的标的才会重新进入扫描，并用 `--force` 重建对应的 Parquet 行情分区。
+
+交易日解析使用官方日历缓存：
+
+```powershell
+python -m quant_a_stock.cli calendar-resolve --target-date 2026-10-07 --output data/reference/calendar_resolution.json
+```
+
+官方日历不可用时会明确标记 `weekday_fallback`，不会把降级结果伪装成官方确认。
 
 ## 研究仓库
 

@@ -60,11 +60,48 @@ def test_build_decision_signals_maps_core_and_watch_buckets() -> None:
     indexed = signals.set_index("symbol")
     assert indexed.loc["002137", "signal_type"] == "buy_watch"
     assert indexed.loc["002137", "confidence"] == "high"
-    assert indexed.loc["002137", "expected_horizon"] == "3-5d"
+    assert indexed.loc["002137", "expected_horizon"] == "1-5d"
+    assert indexed.loc["002137", "research_horizon"] == "1-10d"
+    assert indexed.loc["002137", "max_hold_days"] == 5
     assert indexed.loc["002137", "industry"] == "计算机、通信和其他电子设备制造业"
     assert indexed.loc["002137", "top_keywords"] == "半导体概念、存储芯片"
     assert indexed.loc["600999", "signal_type"] == "upgrade_watch"
-    assert indexed.loc["600999", "expected_horizon"] == "3-5d"
+    assert indexed.loc["600999", "expected_horizon"] == "1-3d"
+    assert indexed.loc["600999", "max_hold_days"] == 0
     assert indexed.loc["300000", "signal_type"] == "avoid"
     assert indexed.loc["300000", "decision_signal_version"] == DECISION_SIGNAL_VERSION
     assert indexed.loc["600000", "expected_horizon"] == "10-20d"
+    assert indexed.loc["600000", "research_horizon"] == "10-60d"
+    assert indexed.loc["600000", "tracking_window_days"] == 60
+    assert indexed.loc["600000", "revalidation_interval_days"] == 5
+    assert bool(indexed.loc["600000", "deep_research_eligible"]) is True
+
+
+def test_high_volatility_a3_is_observation_only() -> None:
+    candidates = pd.DataFrame(
+        [
+            {
+                "symbol": "300001",
+                "name": "高波动样本",
+                "research_tier": "A3",
+                "action_bucket": "短线-A3一三日确认",
+                "research_score": 70,
+                "risk_level": "低",
+            },
+            {
+                "symbol": "300002",
+                "name": "趋势延续样本",
+                "research_tier": "A3",
+                "action_bucket": "主攻-A3趋势延续",
+                "research_score": 70,
+                "risk_level": "低",
+            },
+        ]
+    )
+
+    signals = build_decision_signals(candidates, target_date="2026-07-31", plan_date="2026-08-03")
+    indexed = signals.set_index("symbol")
+
+    assert indexed.loc["300001", "signal_type"] == "hold_watch"
+    assert indexed.loc["300001", "decision_bucket"] == "高波动观察"
+    assert indexed.loc["300002", "signal_type"] == "buy_watch"

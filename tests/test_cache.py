@@ -66,3 +66,25 @@ def test_older_writer_cannot_remove_newer_cached_dates(tmp_path) -> None:
         "2026-07-14",
     ]
     assert loaded.loc[loaded["timestamp"] == pd.Timestamp("2026-07-13"), "close"].iloc[0] == 10
+
+
+def test_replace_existing_cache_discards_polluted_history(tmp_path) -> None:
+    cache_dir = tmp_path / "cache"
+    polluted = pd.DataFrame(
+        [
+            {"timestamp": "2026-07-12", "close": 5, "symbol": "000001"},
+            {"timestamp": "2026-07-13", "close": 20, "symbol": "000001"},
+        ]
+    )
+    rebuilt = pd.DataFrame(
+        [
+            {"timestamp": "2026-07-12", "close": 10, "symbol": "000001"},
+            {"timestamp": "2026-07-13", "close": 11, "symbol": "000001"},
+        ]
+    )
+
+    save_daily_cache(polluted, "000001", cache_dir=cache_dir)
+    save_daily_cache(rebuilt, "000001", cache_dir=cache_dir, replace_existing=True)
+    loaded = load_daily_cache("000001", cache_dir=cache_dir)
+
+    assert loaded["close"].tolist() == [10, 11]

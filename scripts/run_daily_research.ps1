@@ -392,6 +392,21 @@ function Test-MinReturn {
     }
 }
 
+function Test-WithinPrimaryWindow {
+    param(
+        [object]$DaysSinceEntry,
+        [object]$PrimaryHorizonDays
+    )
+
+    try {
+        $elapsed = [int]$DaysSinceEntry
+        $horizon = [int]$PrimaryHorizonDays
+        return ($horizon -gt 0 -and $elapsed -gt 0 -and $elapsed -le $horizon)
+    } catch {
+        return $false
+    }
+}
+
 function Format-PercentText {
     param([object]$Value)
 
@@ -623,7 +638,7 @@ function New-PreMarketPlanReport {
                 $_.status -eq "active" -and
                 $_.result_label -in @("pending", "neutral") -and
                 $_.current_action_bucket -in @("主攻-A2启动确认", "主攻-A3趋势延续") -and
-                $_.days_since_entry -gt 0 -and
+                (Test-WithinPrimaryWindow $_.days_since_entry $_.primary_horizon_days) -and
                 $_.risk_level -in @("低", "中") -and
                 (Test-MinReturn $_.ret_3d -0.06) -and
                 (Test-MinReturn $_.ret_5d -0.08)

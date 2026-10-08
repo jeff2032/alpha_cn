@@ -320,6 +320,65 @@ def test_ingest_latest_reports_requires_matching_target_date(tmp_path: Path) -> 
     assert cleared_rows == 0
 
 
+def test_historical_ingest_preserves_newer_rolling_review_partitions(tmp_path: Path) -> None:
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    warehouse_dir = tmp_path / "warehouse"
+
+    _write_csv(
+        reports_dir / "research_review_details_20260618_070000.csv",
+        [{"signal_date": "2026-06-17", "symbol": "002137", "next_ret": 0.10}],
+    )
+    _write_csv(
+        reports_dir / "research_review_missed_20260618_070000.csv",
+        [{"signal_date": "2026-06-17", "symbol": "300001", "next_ret": 0.12}],
+    )
+    ingest_latest_reports(
+        target_date="2026-06-18",
+        reports_dir=reports_dir,
+        warehouse_dir=warehouse_dir,
+        run_id="older-first",
+    )
+
+    _write_csv(
+        reports_dir / "research_review_details_20260619_070000.csv",
+        [
+            {"signal_date": "2026-06-17", "symbol": "002137", "next_ret": 0.20},
+            {"signal_date": "2026-06-18", "symbol": "600999", "next_ret": 0.08},
+        ],
+    )
+    _write_csv(
+        reports_dir / "research_review_missed_20260619_070000.csv",
+        [
+            {"signal_date": "2026-06-17", "symbol": "300001", "next_ret": 0.18},
+            {"signal_date": "2026-06-18", "symbol": "300002", "next_ret": 0.09},
+        ],
+    )
+    ingest_latest_reports(
+        target_date="2026-06-19",
+        reports_dir=reports_dir,
+        warehouse_dir=warehouse_dir,
+        run_id="newer",
+    )
+
+    recovery = ingest_latest_reports(
+        target_date="2026-06-18",
+        reports_dir=reports_dir,
+        warehouse_dir=warehouse_dir,
+        run_id="older-recovery",
+    )
+
+    outcomes = warehouse_query("research_outcome_daily", warehouse_dir=warehouse_dir)
+    missed = warehouse_query("missed_opportunity_daily", warehouse_dir=warehouse_dir)
+    assert set(outcomes["signal_date"]) == {"2026-06-17", "2026-06-18"}
+    assert outcomes.loc[outcomes["symbol"] == "002137", "next_ret"].iloc[0] == 0.20
+    assert set(missed["signal_date"]) == {"2026-06-17", "2026-06-18"}
+    assert missed.loc[missed["symbol"] == "300001", "next_ret"].iloc[0] == 0.18
+    statuses = recovery.ingested.set_index("report_type")["status"]
+    assert statuses["research_outcome_daily"] == "preserved_newer"
+    assert statuses["missed_opportunity_daily"] == "preserved_newer"
+
+
 def test_ingest_latest_reports_treats_zero_byte_csv_as_empty(tmp_path: Path) -> None:
     reports_dir = tmp_path / "reports"
     reports_dir.mkdir()
@@ -377,7 +436,7 @@ def test_backfill_snapshots_syncs_research_snapshot_tables(tmp_path: Path) -> No
     candidate_daily_rows = status.loc[status["table"] == "research_candidate_daily", "rows"].iloc[0]
     attitude_rows = status.loc[status["table"] == "stock_market_attitude_daily", "rows"].iloc[0]
     assert snapshot_rows == 1
-    assert index_rows == 9
+    assert index_rows == 10
     assert candidate_daily_rows == 1
     assert attitude_rows == 1
     empty_row = result.ingested[result.ingested["report_type"] == "snapshot_scan_trend_pullback_setups"].iloc[0]
@@ -523,7 +582,7 @@ def test_backfill_research_foundation_builds_signals_master_and_lifecycle_fields
     lifecycle_daily = warehouse_query("candidate_lifecycle_daily", limit=20, warehouse_dir=warehouse_dir)
     assert len(lifecycle_daily) == 2
     assert set(lifecycle_daily["candidate_model_version"]) == {"candidate-test-v2"}
-    assert set(lifecycle_daily["expected_horizon"]) == {"3-5d"}
+    assert set(lifecycle_daily["expected_horizon"]) == {"1-3d", "1-5d"}
 
 
 def test_sync_candidate_lifecycles_to_warehouse(tmp_path: Path) -> None:

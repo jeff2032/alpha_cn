@@ -29,6 +29,10 @@ FUNDAMENTAL_WATCHLIST_COLUMNS = [
     "action_bucket",
     "confidence",
     "expected_horizon",
+    "research_horizon",
+    "tracking_window_days",
+    "revalidation_interval_days",
+    "deep_research_eligible",
     "research_score",
     "risk_level",
     "reason_tags",
@@ -207,6 +211,10 @@ def _watchlist_row(row: pd.Series, *, target_date: str, plan_date: str) -> dict[
         "action_bucket": _text(row.get("action_bucket")),
         "confidence": _text(row.get("confidence")),
         "expected_horizon": _text(row.get("expected_horizon")),
+        "research_horizon": _text(row.get("research_horizon")) or _text(row.get("expected_horizon")),
+        "tracking_window_days": int(_float(row.get("tracking_window_days"))),
+        "revalidation_interval_days": int(_float(row.get("revalidation_interval_days"))),
+        "deep_research_eligible": _as_bool(row.get("deep_research_eligible", False)),
         "research_score": _round(row.get("research_score")),
         "risk_level": _text(row.get("risk_level")) or "未标注",
         "reason_tags": _text(row.get("reason_tags")),
@@ -261,7 +269,7 @@ def _suggested_skill(row: pd.Series, *, priority: str) -> str:
         return "thesis-tracker"
     if signal_type == "buy_watch" and priority == "high":
         return "investment-checklist"
-    if "A1" in action_bucket or horizon in {"10-20d", "10-30d"}:
+    if "A1" in action_bucket or horizon in {"10-20d", "10-30d", "10-60d"}:
         return "investment-research"
     if signal_type in {"upgrade_watch", "hold_watch"}:
         return "quality-screen"
@@ -316,6 +324,12 @@ def _holding_symbols(holdings: pd.DataFrame | None) -> set[str]:
     if holdings is None or holdings.empty or "symbol" not in holdings.columns:
         return set()
     return set(holdings["symbol"].astype(str).str.zfill(6).tolist())
+
+
+def _as_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"true", "1", "yes", "y", "是"}
 
 
 def _value_counts(frame: pd.DataFrame, column: str) -> dict[str, int]:

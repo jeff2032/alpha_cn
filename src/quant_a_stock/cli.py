@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import json
 from pathlib import Path
-from time import sleep
+from time import monotonic, sleep
 
 import pandas as pd
 
@@ -28,7 +28,11 @@ from quant_a_stock.cleaning.pipeline import clean_candles
 from quant_a_stock.config import BacktestConfig, DEFAULT_BACKTEST_CONFIG, DEFAULT_PATHS
 from quant_a_stock.data.akshare_client import fetch_daily
 from quant_a_stock.data.cache import daily_cache_path, load_daily_cache, save_daily_cache
+from quant_a_stock.data.cache_audit import AUDIT_COLUMNS
+from quant_a_stock.data.cache_audit import DailyCacheAuditConfig
+from quant_a_stock.data.cache_audit import audit_daily_cache
 from quant_a_stock.data.calendar import cached_trading_dates
+from quant_a_stock.data.calendar import resolve_official_trading_date
 from quant_a_stock.data.calendar import resolve_cached_trading_date
 from quant_a_stock.data.fundamentals import fetch_financial_indicators
 from quant_a_stock.data_lifecycle import build_data_loop_status
@@ -38,12 +42,17 @@ from quant_a_stock.data.universe import filter_universe
 from quant_a_stock.data.universe import load_universe_file
 from quant_a_stock.data.universe import merge_universe_frames
 from quant_a_stock.data.universe import save_universe_file
+from quant_a_stock.io_utils import atomic_write_csv
+from quant_a_stock.io_utils import atomic_write_text
 from quant_a_stock.research.candidates import ResearchCandidateConfig
 from quant_a_stock.research.candidates import build_research_candidates
 from quant_a_stock.research.candidates import fetch_company_profiles
 from quant_a_stock.research.candidates import fetch_risk_notices
 from quant_a_stock.research.candidates import load_cache_listing_info
 from quant_a_stock.research.candidates import load_report
+from quant_a_stock.research.berkshire_handoff import BERKSHIRE_HANDOFF_COLUMNS
+from quant_a_stock.research.berkshire_handoff import build_long_cycle_berkshire_handoff
+from quant_a_stock.research.berkshire_handoff import save_long_cycle_berkshire_context
 from quant_a_stock.research.context_pack import save_research_context_pack
 from quant_a_stock.research.decision_signal import build_decision_signals
 from quant_a_stock.research.decision_signal import load_candidates_for_decision_signals
@@ -69,6 +78,7 @@ from quant_a_stock.research.factor_evidence import analyze_factor_evidence
 from quant_a_stock.research.factor_evidence import save_factor_evidence
 from quant_a_stock.research.lifecycle import build_candidate_lifecycle_tracking
 from quant_a_stock.research.lifecycle import save_candidate_lifecycle_reports
+from quant_a_stock.research.observation_pool import evaluate_latent_catalyst_history
 from quant_a_stock.research.pipeline import ResearchPipelineConfig
 from quant_a_stock.research.pipeline import run_research_pipeline
 from quant_a_stock.research.report import save_research_candidates_markdown
@@ -80,10 +90,12 @@ from quant_a_stock.research.summary import build_market_temperature
 from quant_a_stock.research.summary import save_daily_research_summary_markdown
 from quant_a_stock.screening.patterns import AccumulationSetupConfig
 from quant_a_stock.screening.patterns import BaseBreakoutSetupConfig
+from quant_a_stock.screening.patterns import LatentCatalystSetupConfig
 from quant_a_stock.screening.patterns import QuietReversalSetupConfig
 from quant_a_stock.screening.patterns import TrendPullbackSetupConfig
 from quant_a_stock.screening.patterns import scan_accumulation_setups
 from quant_a_stock.screening.patterns import scan_base_breakout_setups
+from quant_a_stock.screening.patterns import scan_latent_catalyst_setups
 from quant_a_stock.screening.patterns import scan_quiet_reversal_setups
 from quant_a_stock.screening.patterns import scan_trend_pullback_setups
 from quant_a_stock.sentiment.report import save_market_theme_markdown
@@ -177,7 +189,15 @@ def _operational_cached_symbols() -> list[str]:
     if not universe_path.exists():
         return sorted(cached)
     universe = load_universe_file(universe_path)
-    return sorted(set(universe["symbol"].astype(str)) & cached)
+    selected = set(universe["symbol"].astype(str)) & cached
+    quarantine_path = DEFAULT_PATHS.root / "data" / "universe" / "cache_quarantine.csv"
+    if quarantine_path.exists():
+        try:
+            quarantine = pd.read_csv(quarantine_path, dtype={"symbol": str})
+            selected -= set(quarantine.get("symbol", pd.Series(dtype=str)).astype(str).str.zfill(6))
+        except (OSError, pd.errors.ParserError, pd.errors.EmptyDataError):
+            pass
+    return sorted(selected)
 
 
 def _filter_exact_cross_section(
@@ -531,7 +551,14 @@ def _align_adjusted_cache_basis(
     ratios = overlap["close_new"] / overlap["close_old"]
     factor = float(ratios.median())
     relative_spread = float((ratios / factor - 1).abs().median()) if factor else float("inf")
-    if not factor or abs(factor - 1.0) <= 1e-4 or relative_spread > 5e-3:
+    if not factor:
+        return cached
+    if relative_spread > 5e-3:
+        raise ValueError(
+            "前复权重叠区口径不一致，拒绝把不同数据源或异常复权基准写入同一缓存；"
+            f"中位缩放因子={factor:.6f}，相对离散度={relative_spread:.6f}"
+        )
+    if abs(factor - 1.0) <= 1e-4:
         return cached
     output = cached.copy()
     for column in ("open", "high", "low", "close"):
@@ -636,6 +663,8 @@ def _run_strategy_rows(
 
 def sync_daily(args: argparse.Namespace) -> None:
     DEFAULT_PATHS.ensure()
+    if args.incremental and args.replace_cache:
+        raise SystemExit("--replace-cache 不能与 --incremental 同时使用")
     failures: list[str] = []
     for symbol in args.symbols:
         try:
@@ -661,7 +690,11 @@ def sync_daily(args: argparse.Namespace) -> None:
             )
             if args.incremental:
                 candles = _merge_with_daily_cache(symbol, candles, adjust=args.adjust)
-            path = save_daily_cache(candles, symbol)
+            path = save_daily_cache(
+                candles,
+                symbol,
+                replace_existing=bool(getattr(args, "replace_cache", False)),
+            )
             prefix = "增量" if args.incremental else "全量"
             print(f"{symbol}: {prefix}保存 {len(candles)} 行 -> {path}")
         except Exception as exc:
@@ -785,6 +818,7 @@ def _sync_stock_universe_symbol(
     row: dict[str, object],
     args: argparse.Namespace,
 ) -> tuple[int, dict[str, object], str]:
+    started = monotonic()
     symbol = str(row["symbol"])
     name_value = row.get("name", "")
     name = "" if pd.isna(name_value) else str(name_value)
@@ -793,10 +827,22 @@ def _sync_stock_universe_symbol(
     if args.skip_existing and cache_path.exists() and not args.incremental:
         return (
             idx,
-            {"symbol": symbol, "name": name, "status": "已跳过", "rows": "", "error": ""},
+            {
+                "symbol": symbol,
+                "name": name,
+                "provider": args.stock_provider,
+                "target_date": args.until or "",
+                "requested_since": "",
+                "latest_date": "",
+                "status": "已跳过",
+                "rows": "",
+                "elapsed_seconds": 0.0,
+                "error": "",
+            },
             f"{prefix_text}: 已存在，跳过",
         )
 
+    since = args.since
     try:
         since = (
             _incremental_since(
@@ -819,22 +865,50 @@ def _sync_stock_universe_symbol(
         )
         if args.incremental:
             candles = _merge_with_daily_cache(symbol, candles, adjust=args.adjust)
-        path = save_daily_cache(candles, symbol)
+        path = save_daily_cache(
+            candles,
+            symbol,
+            replace_existing=bool(getattr(args, "replace_cache", False)),
+        )
         status = "增量保存" if args.incremental else "已保存"
+        target_date = pd.Timestamp(args.until).normalize() if args.until else None
+        latest_date = pd.to_datetime(candles["timestamp"], errors="coerce").max()
+        target_missing = (
+            target_date is not None
+            and (pd.isna(latest_date) or pd.Timestamp(latest_date).normalize() < target_date)
+        )
+        if target_missing:
+            status = "未到目标日"
+            last_text = "未知" if pd.isna(latest_date) else pd.Timestamp(latest_date).date().isoformat()
+            target_text = target_date.date().isoformat()
+            status_detail = f"最后日期 {last_text}，目标日期 {target_text}"
+        else:
+            status_detail = ""
         result = {
             "symbol": symbol,
             "name": name,
+            "provider": args.stock_provider,
+            "target_date": args.until or "",
+            "requested_since": since or "",
+            "latest_date": "" if pd.isna(latest_date) else pd.Timestamp(latest_date).date().isoformat(),
             "status": status,
             "rows": len(candles),
-            "error": "",
+            "elapsed_seconds": round(monotonic() - started, 3),
+            "error": status_detail,
         }
-        message = f"{prefix_text}: {status} {len(candles)} 行 -> {path}"
+        suffix = f"；{status_detail}" if status_detail else ""
+        message = f"{prefix_text}: {status} {len(candles)} 行{suffix} -> {path}"
     except Exception as exc:
         result = {
             "symbol": symbol,
             "name": name,
+            "provider": args.stock_provider,
+            "target_date": args.until or "",
+            "requested_since": since or "",
+            "latest_date": "",
             "status": "失败",
             "rows": 0,
+            "elapsed_seconds": round(monotonic() - started, 3),
             "error": str(exc),
         }
         message = f"{prefix_text}: 下载失败: {exc}"
@@ -845,7 +919,10 @@ def _sync_stock_universe_symbol(
 
 
 def sync_stock_universe(args: argparse.Namespace) -> None:
+    run_started = monotonic()
     DEFAULT_PATHS.ensure()
+    if args.incremental and args.replace_cache:
+        raise SystemExit("--replace-cache 不能与 --incremental 同时使用")
     universe = _symbols_from_batch_args(args)
     universe = filter_universe(
         universe,
@@ -870,8 +947,11 @@ def sync_stock_universe(args: argparse.Namespace) -> None:
         nonlocal consecutive_failures
         result["_order"] = idx
         rows.append(result)
-        print(f"{message}{suffix}")
-        if result.get("status") == "失败":
+        status = str(result.get("status", ""))
+        progress_every = max(1, int(getattr(args, "progress_every", 1)))
+        if status in {"失败", "未到目标日"} or len(rows) % progress_every == 0 or len(rows) == total:
+            print(f"{message}{suffix}")
+        if status in {"失败", "未到目标日"}:
             consecutive_failures += 1
         else:
             consecutive_failures = 0
@@ -913,6 +993,7 @@ def sync_stock_universe(args: argparse.Namespace) -> None:
     report_path = save_report(report_rows, report_type="sync_stock_universe")
     summary = pd.DataFrame(report_rows)["status"].value_counts().to_dict() if report_rows else {}
     print(f"汇总: {summary}")
+    print(f"总耗时: {monotonic() - run_started:.1f} 秒")
     print(f"报告: {report_path}")
     if stopped_early:
         raise SystemExit("sync-stock-universe 因连续失败过多提前停止")
@@ -968,6 +1049,69 @@ def cache_status(args: argparse.Namespace) -> None:
 
     if args.show_missing and not missing_rows.empty:
         print(missing_rows[["symbol", "name", "market"]].head(args.top).to_string(index=False))
+
+
+def calendar_resolve(args: argparse.Namespace) -> None:
+    resolved, source, error = resolve_official_trading_date(
+        args.target_date,
+        refresh=args.refresh,
+    )
+    payload = {
+        "requested_date": pd.Timestamp(args.target_date).date().isoformat(),
+        "resolved_date": resolved.date().isoformat(),
+        "source": source,
+        "refresh_error": error,
+    }
+    output_path = Path(args.output)
+    atomic_write_text(
+        output_path,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+    )
+    print(f"交易日历解析: {payload['requested_date']} -> {payload['resolved_date']}")
+    print(f"日历来源: {source}")
+    if error:
+        print(f"日历刷新警告: {error}")
+    print(f"解析结果: {output_path}")
+
+
+def cache_audit(args: argparse.Namespace) -> None:
+    universe = load_universe_file(Path(args.universe_file))
+    target_date = pd.Timestamp(args.target_date).normalize()
+    config = DailyCacheAuditConfig(
+        recent_days=args.recent_days,
+        basis_jump_threshold=args.basis_jump_threshold,
+        min_basis_jumps=args.min_basis_jumps,
+        extreme_return_threshold=args.extreme_return_threshold,
+        min_extreme_returns=args.min_extreme_returns,
+    )
+    result = audit_daily_cache(universe, target_date=target_date, config=config)
+    report_path = save_report(
+        result.to_dict("records"),
+        report_type="daily_cache_audit",
+        date_prefix=target_date.date().isoformat(),
+        columns=AUDIT_COLUMNS,
+    )
+    quarantine = result[result["quarantined"]].copy()
+    quarantine_path = Path(args.output_quarantine)
+    quarantine_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_csv(
+        quarantine[["symbol", "name", "last_date", "issue"]],
+        quarantine_path,
+        index=False,
+    )
+    summary = result["quality_status"].value_counts().to_dict()
+    print(f"缓存审计: {summary}")
+    print(f"隔离标的: {len(quarantine)}")
+    if not quarantine.empty:
+        print(
+            quarantine[
+                ["symbol", "name", "last_date", "basis_jump_count", "extreme_return_count", "issue"]
+            ]
+            .head(args.top)
+            .to_string(index=False)
+        )
+    print(f"审计报告: {report_path}")
+    print(f"隔离清单: {quarantine_path}")
 
 
 def cache_date_status(args: argparse.Namespace) -> None:
@@ -1150,6 +1294,7 @@ def scan_pattern(args: argparse.Namespace) -> None:
         "accumulation_setup",
         "trend_pullback_setup",
         "quiet_reversal_setup",
+        "latent_catalyst_setup",
     }
     if args.pattern not in supported_patterns:
         raise SystemExit(
@@ -1209,6 +1354,15 @@ def scan_pattern(args: argparse.Namespace) -> None:
             min_amount_ma20=args.min_amount_ma20,
         )
         report_type = "scan_quiet_reversal_setup"
+    elif args.pattern == "latent_catalyst_setup":
+        config = LatentCatalystSetupConfig()
+        result = scan_latent_catalyst_setups(
+            candles_by_symbol,
+            config=config,
+            min_score=args.min_score,
+            min_amount_ma20=args.min_amount_ma20,
+        )
+        report_type = "scan_latent_catalyst_setup"
     elif args.pattern == "accumulation_setup":
         accumulation_min_volume_ratio = (
             args.min_volume_ratio if args.min_volume_ratio is not None else 1.05
@@ -1298,6 +1452,20 @@ def scan_pattern(args: argparse.Namespace) -> None:
             max_volume_ratio=trend_max_volume_ratio,
         )
         report_type = "scan_trend_pullback_setup"
+    if report_type == "scan_latent_catalyst_setup" and args.top > 0:
+        result = result.head(args.top).copy()
+    if not result.empty and "symbol" in result.columns and args.universe_file:
+        universe_path = Path(args.universe_file)
+        if universe_path.exists():
+            universe = load_universe_file(universe_path)
+            name_map = dict(zip(universe["symbol"].astype(str).str.zfill(6), universe.get("name", "")))
+            result["symbol"] = result["symbol"].astype(str).str.zfill(6)
+            if "name" not in result.columns:
+                result.insert(1, "name", result["symbol"].map(name_map).fillna(""))
+            else:
+                result["name"] = result["name"].fillna("")
+                missing_name = result["name"].astype(str).str.strip().eq("")
+                result.loc[missing_name, "name"] = result.loc[missing_name, "symbol"].map(name_map).fillna("")
     report_path = save_report(
         result.to_dict("records"),
         report_type=report_type,
@@ -1308,6 +1476,46 @@ def scan_pattern(args: argparse.Namespace) -> None:
     else:
         print(result.head(args.top).to_string(index=False))
     print(f"报告: {report_path}")
+
+
+def latent_catalyst_review(args: argparse.Namespace) -> None:
+    symbols = args.symbols or _operational_cached_symbols()
+    if not symbols:
+        raise SystemExit("没有传入标的，也没有找到本地缓存 CSV。")
+    candles_by_symbol = _load_candles(symbols)
+    benchmark = _load_candles([args.benchmark_symbol]).get(args.benchmark_symbol)
+    candles_by_symbol.pop(args.benchmark_symbol, None)
+    names: dict[str, str] = {}
+    if args.universe_file:
+        universe = load_universe_file(Path(args.universe_file))
+        names = dict(zip(universe["symbol"].astype(str).str.zfill(6), universe.get("name", "")))
+    review = evaluate_latent_catalyst_history(
+        candles_by_symbol,
+        since=args.since,
+        until=args.until,
+        names=names,
+        benchmark=benchmark,
+        benchmark_symbol=args.benchmark_symbol,
+        min_score=args.min_score,
+        min_amount_ma20=args.min_amount_ma20,
+    )
+    details_path = save_report(
+        review.details.to_dict("records"),
+        report_type="latent_catalyst_review_details",
+        date_prefix=args.until,
+    )
+    summary_path = save_report(
+        review.summary.to_dict("records"),
+        report_type="latent_catalyst_review_summary",
+        date_prefix=args.until,
+    )
+    print(f"待催化信号: {len(review.details)}")
+    if not review.summary.empty:
+        print(review.summary.to_string(index=False))
+        promotable = review.summary[review.summary["eligible_for_promotion"]]
+        print(f"可进入下一轮窄化验证的分组: {len(promotable)}")
+    print(f"可执行收益明细: {details_path}")
+    print(f"分组证据汇总: {summary_path}")
 
 
 def _sentiment_watchlist_from_args(args: argparse.Namespace, *, target_date: str | None = None) -> pd.DataFrame:
@@ -1979,6 +2187,7 @@ def snapshot_research(args: argparse.Namespace) -> None:
         "scan_accumulation_setup": _latest_report_for_target("scan_accumulation_setup", target_date),
         "scan_trend_pullback_setup": _latest_report_for_target("scan_trend_pullback_setup", target_date),
         "scan_quiet_reversal_setup": _latest_report_for_target("scan_quiet_reversal_setup", target_date),
+        "scan_latent_catalyst_setup": _latest_report_for_target("scan_latent_catalyst_setup", target_date),
         "sentiment_watchlist": Path(args.sentiment_report)
         if args.sentiment_report
         else _latest_report_for_target("sentiment_watchlist", target_date),
@@ -1989,7 +2198,11 @@ def snapshot_research(args: argparse.Namespace) -> None:
         if args.research_report
         else _latest_report_for_target("research_candidates", target_date),
     }
-    snapshot_dir = save_research_snapshot(target_date=target_date, reports=reports)
+    snapshot_dir = save_research_snapshot(
+        target_date=target_date,
+        reports=reports,
+        rebuild_run_id=args.rebuild_run_id,
+    )
     print(f"研究快照目录: {snapshot_dir}")
     for name, path in reports.items():
         print(f"{name}: {path or '未找到'}")
@@ -2126,6 +2339,69 @@ def fundamental_watchlist(args: argparse.Namespace) -> None:
         print(display[[column for column in columns if column in display.columns]].to_string(index=False))
     print(f"基本面深研清单 CSV: {csv_path}")
     print(f"ai-berkshire 交接 JSON: {context.path}")
+
+
+def berkshire_handoff(args: argparse.Namespace) -> None:
+    resolved_target = _resolve_trading_date(args.target_date)
+    _announce_trading_date_resolution(args.target_date, resolved_target)
+    target_date = resolved_target.date().isoformat()
+    signal_path = (
+        Path(args.decision_signal_report)
+        if args.decision_signal_report
+        else _latest_report_for_exact_target("decision_signals", target_date)
+    )
+    lifecycle_path = (
+        Path(args.lifecycle_report)
+        if args.lifecycle_report
+        else _latest_report_for_exact_target("candidate_lifecycles", target_date)
+    )
+    if signal_path is None:
+        raise SystemExit(f"没有找到 {target_date} 的 decision_signals 报告。")
+    if lifecycle_path is None:
+        raise SystemExit(f"没有找到 {target_date} 的 candidate_lifecycles 报告，请先运行 track-candidates。")
+    signals = pd.read_csv(signal_path, dtype={"symbol": str})
+    lifecycles = pd.read_csv(lifecycle_path, dtype={"symbol": str})
+    plan_date = args.plan_date or _first_nonempty(signals, "plan_date") or target_date
+    handoff = build_long_cycle_berkshire_handoff(
+        signals,
+        lifecycles,
+        target_date=target_date,
+        plan_date=plan_date,
+        top=args.top,
+        min_days_observed=args.min_days_observed,
+        min_score=args.min_score,
+    )
+    csv_path = save_report(
+        handoff.to_dict("records"),
+        report_type="berkshire_long_cycle_queue",
+        date_prefix=target_date,
+        columns=BERKSHIRE_HANDOFF_COLUMNS,
+    )
+    context_path = save_long_cycle_berkshire_context(
+        handoff,
+        target_date=target_date,
+        plan_date=plan_date,
+        output_root=Path(args.output_root) if args.output_root else None,
+    )
+    if handoff.empty:
+        print("当前没有通过连续认证的长周期 A1 深研标的。")
+    else:
+        display = handoff.rename(
+            columns={
+                "symbol": "代码",
+                "name": "名称",
+                "handoff_priority": "优先级",
+                "days_observed": "认证次数",
+                "current_score": "当前分",
+                "research_horizon": "研究周期",
+                "primary_skill": "主技能",
+                "deep_research_reason": "深研原因",
+            }
+        )
+        columns = ["代码", "名称", "优先级", "认证次数", "当前分", "研究周期", "主技能", "深研原因"]
+        print(display[[column for column in columns if column in display.columns]].to_string(index=False))
+    print(f"长周期深研队列 CSV: {csv_path}")
+    print(f"伯克希尔技能交接 JSON: {context_path}")
 
 
 def fundamental_quality_screen(args: argparse.Namespace) -> None:
@@ -2856,9 +3132,22 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--until", default=None)
     sync.add_argument("--adjust", default="qfq")
     sync.add_argument("--asset-type", choices=["auto", "etf", "stock"], default="auto")
-    sync.add_argument("--etf-provider", choices=["eastmoney", "sina"], default="eastmoney")
-    sync.add_argument("--stock-provider", choices=["eastmoney", "sina"], default="eastmoney")
+    sync.add_argument(
+        "--etf-provider",
+        choices=["eastmoney", "sina", "tencent"],
+        default="eastmoney",
+    )
+    sync.add_argument(
+        "--stock-provider",
+        choices=["eastmoney", "sina", "tencent"],
+        default="eastmoney",
+    )
     sync.add_argument("--incremental", action="store_true", help="基于本地缓存增量补数")
+    sync.add_argument(
+        "--replace-cache",
+        action="store_true",
+        help="用本次完整下载原子替换旧缓存，仅用于质量修复，不要与 --incremental 同时使用",
+    )
     sync.add_argument("--lookback-days", type=int, default=60, help="增量补数时向前回看的自然日")
     sync.add_argument("--retries", type=int, default=3)
     sync.add_argument("--retry-wait", type=float, default=1.0)
@@ -2900,12 +3189,21 @@ def build_parser() -> argparse.ArgumentParser:
     sync_universe.add_argument("--since", default="2020-01-01")
     sync_universe.add_argument("--until", default=None)
     sync_universe.add_argument("--adjust", default="qfq")
-    sync_universe.add_argument("--stock-provider", choices=["eastmoney", "sina"], default="sina")
+    sync_universe.add_argument(
+        "--stock-provider",
+        choices=["eastmoney", "sina", "tencent"],
+        default="sina",
+    )
     sync_universe.add_argument("--limit", type=int, default=None)
     sync_universe.add_argument("--offset", type=int, default=0)
     sync_universe.add_argument("--sleep", type=float, default=1.0)
     sync_universe.add_argument("--workers", type=int, default=1, help="并行下载线程数，默认 1 表示顺序下载")
     sync_universe.add_argument("--incremental", action="store_true", help="基于本地缓存增量补数")
+    sync_universe.add_argument(
+        "--replace-cache",
+        action="store_true",
+        help="用单一数据源完整结果替换旧缓存，仅用于隔离标的修复",
+    )
     sync_universe.add_argument("--lookback-days", type=int, default=60, help="增量补数时向前回看的自然日")
     sync_universe.add_argument(
         "--max-consecutive-failures",
@@ -2920,7 +3218,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sync_universe.add_argument("--retries", type=int, default=2)
     sync_universe.add_argument("--retry-wait", type=float, default=1.0)
+    sync_universe.add_argument(
+        "--progress-every",
+        type=int,
+        default=1,
+        help="成功下载每隔多少只输出一次进度，失败和未达目标总是输出",
+    )
     sync_universe.set_defaults(func=sync_stock_universe)
+
+    calendar = subparsers.add_parser("calendar-resolve", help="用官方交易日历解析最近交易日")
+    calendar.add_argument("--target-date", required=True)
+    calendar.add_argument("--refresh", action="store_true")
+    calendar.add_argument(
+        "--output",
+        default="data/reference/calendar_resolution.json",
+    )
+    calendar.set_defaults(func=calendar_resolve)
 
     status = subparsers.add_parser("cache-status", help="查看日线缓存缺失情况")
     status.add_argument("--universe-file", default=None)
@@ -2931,6 +3244,18 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--top", type=int, default=20)
     status.add_argument("--output-missing", default=None)
     status.set_defaults(func=cache_status)
+
+    audit = subparsers.add_parser("cache-audit", help="审计日线缓存并隔离复权拼接异常标的")
+    audit.add_argument("--universe-file", default="data/universe/a_stock.csv")
+    audit.add_argument("--target-date", required=True)
+    audit.add_argument("--recent-days", type=int, default=190)
+    audit.add_argument("--basis-jump-threshold", type=float, default=0.15)
+    audit.add_argument("--min-basis-jumps", type=int, default=8)
+    audit.add_argument("--extreme-return-threshold", type=float, default=0.45)
+    audit.add_argument("--min-extreme-returns", type=int, default=1)
+    audit.add_argument("--output-quarantine", default="data/universe/cache_quarantine.csv")
+    audit.add_argument("--top", type=int, default=30)
+    audit.set_defaults(func=cache_audit)
 
     date_status = subparsers.add_parser(
         "cache-date-status",
@@ -2987,6 +3312,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan = subparsers.add_parser("scan-pattern", help="扫描缓存标的的形态")
     scan.add_argument("--pattern", default="base_breakout_setup")
     scan.add_argument("--symbols", nargs="+", default=None)
+    scan.add_argument("--universe-file", default="data/universe/a_stock.csv")
     scan.add_argument("--target-date", default=None)
     scan.add_argument("--top", type=int, default=20)
     scan.add_argument("--min-score", type=float, default=50.0)
@@ -3027,6 +3353,16 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--require-positive-trend-slope", action="store_true")
     _add_strategy_arguments(scan)
     scan.set_defaults(func=scan_pattern)
+
+    catalyst_review = subparsers.add_parser("latent-catalyst-review", help="按次日开盘可成交口径回填低位待催化池证据")
+    catalyst_review.add_argument("--since", required=True)
+    catalyst_review.add_argument("--until", required=True)
+    catalyst_review.add_argument("--symbols", nargs="+", default=None)
+    catalyst_review.add_argument("--universe-file", default="data/universe/a_stock.csv")
+    catalyst_review.add_argument("--min-score", type=float, default=45.0)
+    catalyst_review.add_argument("--min-amount-ma20", type=float, default=100_000_000)
+    catalyst_review.add_argument("--benchmark-symbol", default="510300")
+    catalyst_review.set_defaults(func=latent_catalyst_review)
 
     sentiment = subparsers.add_parser("sentiment-score", help="给候选股生成情绪面评分报告")
     sentiment.add_argument("--symbols", nargs="+", default=None)
@@ -3236,6 +3572,11 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--sentiment-report", default=None)
     snapshot.add_argument("--theme-report", default=None)
     snapshot.add_argument("--research-report", default=None)
+    snapshot.add_argument(
+        "--rebuild-run-id",
+        default=None,
+        help="保留冻结快照并把重建结果写入独立版本目录",
+    )
     snapshot.set_defaults(func=snapshot_research)
 
     daily_summary = subparsers.add_parser("daily-research-summary", help="生成每日市场选股复盘报告")
@@ -3265,6 +3606,17 @@ def build_parser() -> argparse.ArgumentParser:
     fundamental.add_argument("--display-top", type=int, default=20)
     fundamental.add_argument("--output-root", default=None)
     fundamental.set_defaults(func=fundamental_watchlist)
+
+    berkshire = subparsers.add_parser("berkshire-handoff", help="把连续认证的长周期 A1 交给伯克希尔深研技能")
+    berkshire.add_argument("--target-date", default=None)
+    berkshire.add_argument("--plan-date", default=None)
+    berkshire.add_argument("--decision-signal-report", default=None)
+    berkshire.add_argument("--lifecycle-report", default=None)
+    berkshire.add_argument("--top", type=int, default=5)
+    berkshire.add_argument("--min-days-observed", type=int, default=3)
+    berkshire.add_argument("--min-score", type=float, default=58.0)
+    berkshire.add_argument("--output-root", default=None)
+    berkshire.set_defaults(func=berkshire_handoff)
 
     quality = subparsers.add_parser("fundamental-quality-screen", help="用财务硬指标去劣并生成 AI Berkshire 深研队列")
     quality.add_argument("--target-date", default=None)

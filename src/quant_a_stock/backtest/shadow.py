@@ -22,7 +22,10 @@ SHADOW_PLAN_COLUMNS = [
     "action_bucket",
     "research_tier",
     "expected_horizon",
+    "research_horizon",
+    "min_hold_days",
     "max_hold_days",
+    "revalidation_interval_days",
     "industry",
     "research_score",
     "risk_level",
@@ -117,6 +120,12 @@ def freeze_shadow_plan(
     frame["_shadow_tier"] = frame.apply(_shadow_tier, axis=1)
     tier_limits = {"A1": max(0, int(max_a1)), "A2": max(0, int(max_a2)), "A3": max(0, int(max_a3))}
     frame = frame[frame["_shadow_tier"].isin(tier_limits)]
+    signal_type = frame.get("signal_type", pd.Series("", index=frame.index)).fillna("").astype(str)
+    executable = (
+        (frame["_shadow_tier"].eq("A1") & signal_type.isin(["watch", "buy_watch"]))
+        | (frame["_shadow_tier"].isin(["A2", "A3"]) & signal_type.eq("buy_watch"))
+    )
+    frame = frame[executable]
     frame["_priority"] = frame["_shadow_tier"].map({"A2": 1, "A1": 2, "A3": 3}).fillna(9)
     frame = frame[frame["_priority"] < 9].sort_values(
         ["_priority", "research_score"],
@@ -155,7 +164,19 @@ def freeze_shadow_plan(
                 "action_bucket": row.get("action_bucket", ""),
                 "research_tier": shadow_tier,
                 "expected_horizon": row.get("expected_horizon", ""),
-                "max_hold_days": _max_hold_days(row.get("expected_horizon", "")),
+                "research_horizon": row.get("research_horizon", row.get("expected_horizon", "")),
+                "min_hold_days": _int_or_default(
+                    row.get("min_hold_days"),
+                    _min_hold_days(row.get("expected_horizon", "")),
+                ),
+                "max_hold_days": _int_or_default(
+                    row.get("max_hold_days"),
+                    _max_hold_days(row.get("expected_horizon", "")),
+                ),
+                "revalidation_interval_days": _int_or_default(
+                    row.get("revalidation_interval_days"),
+                    1,
+                ),
                 "industry": industry,
                 "research_score": row.get("research_score", 0),
                 "risk_level": row.get("risk_level", ""),
@@ -335,7 +356,10 @@ def evaluate_shadow_portfolio(
     entry_index: dict[str, int] = {}
     max_hold = dict(zip(plans["symbol"], plans["max_hold_days"]))
     min_hold = {
-        str(row["symbol"]): _min_hold_days(row.get("expected_horizon", ""))
+        str(row["symbol"]): _int_or_default(
+            row.get("min_hold_days"),
+            _min_hold_days(row.get("expected_horizon", "")),
+        )
         for _, row in plans.iterrows()
     }
     last_exit_index: dict[str, int] = {}
@@ -561,7 +585,10 @@ def _stateful_desired(
     if daily_plan is not None and not daily_plan.empty:
         for _, row in daily_plan.iterrows():
             symbol = str(row["symbol"]).zfill(6)
-            min_hold[symbol] = _min_hold_days(row.get("expected_horizon", ""))
+            min_hold[symbol] = _int_or_default(
+                row.get("min_hold_days"),
+                _min_hold_days(row.get("expected_horizon", "")),
+            )
             max_hold[symbol] = int(row.get("max_hold_days", _max_hold_days(row.get("expected_horizon", ""))))
         if "market_total_cap" in daily_plan.columns:
             parsed_cap = pd.to_numeric(daily_plan["market_total_cap"], errors="coerce").dropna()
@@ -690,3 +717,12 @@ def _min_hold_days(value: object) -> int:
     text = str(value or "")
     numbers = [int(part) for part in text.replace("d", "").split("-") if part.isdigit()]
     return min(numbers) if numbers else 1
+
+
+def _int_or_default(value: object, default: int) -> int:
+    try:
+        if value is None or pd.isna(value) or str(value).strip() == "":
+            return int(default)
+        return int(float(value))
+    except (TypeError, ValueError):
+        return int(default)

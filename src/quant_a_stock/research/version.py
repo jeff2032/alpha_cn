@@ -2,10 +2,10 @@ from __future__ import annotations
 
 
 CANDIDATE_MODEL_VERSION = "candidate_model_v2026_07_23_risk_horizon_gate"
-FACTOR_SCHEMA_VERSION = "factor_schema_v2026_07_11_risk_decay"
-WAREHOUSE_SCHEMA_VERSION = "warehouse_schema_v2026_07_24_quality_outcomes"
-DECISION_SIGNAL_VERSION = "decision_signal_v2026_07_24_industry_handoff"
-FUNDAMENTAL_WATCHLIST_VERSION = "fundamental_watchlist_v2026_07_24_industry_handoff"
+FACTOR_SCHEMA_VERSION = "factor_schema_v2026_08_12_volume_shares"
+WAREHOUSE_SCHEMA_VERSION = "warehouse_schema_v2026_08_02_horizon_catalyst_handoff"
+DECISION_SIGNAL_VERSION = "decision_signal_v2026_08_02_tier_horizon"
+FUNDAMENTAL_WATCHLIST_VERSION = "fundamental_watchlist_v2026_08_02_research_horizon"
 FUNDAMENTAL_QUALITY_VERSION = "fundamental_quality_v2026_07_24_industry_routed"
 FUNDAMENTAL_VERDICT_VERSION = "fundamental_verdict_v2026_07_11_return_contract"
-FACTOR_EVIDENCE_VERSION = "factor_evidence_v2026_07_11_sample_gate"
+FACTOR_EVIDENCE_VERSION = "factor_evidence_v2026_08_12_schema_gate"

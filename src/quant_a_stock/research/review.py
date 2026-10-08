@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from quant_a_stock.backtest.engine import trade_block_reason
 from quant_a_stock.config import DEFAULT_PATHS
 from quant_a_stock.data.cache import load_daily_cache
 from quant_a_stock.data.universe import load_universe_file
@@ -201,6 +202,7 @@ def build_research_review(
                     "monthly_position_pct": _number(row.get("monthly_position_pct"), default=float("nan")),
                     "total_penalty": _number(row.get("total_penalty"), default=float("nan")),
                     "risk_event_score": _number(row.get("risk_event_score"), default=float("nan")),
+                    "factor_schema_version": row.get("factor_schema_version", ""),
                     "benchmark_symbol": benchmark_symbol,
                     **outcome,
                 }
@@ -1142,28 +1144,41 @@ def _forward_outcome(
     later_dates = [item for item in trade_dates if item > signal_date]
     if d0.empty or not later_dates:
         return None
-    prev_close = _number(d0.iloc[-1].get("close", 0.0))
-    if prev_close <= 0:
+    entry_date = later_dates[0]
+    entry_rows = frame[frame["_date"] == entry_date]
+    if entry_rows.empty:
         return None
 
-    outcome: dict[str, float | str] = {}
+    entry_index = int(entry_rows.index[-1])
+    entry_open = _number(frame.loc[entry_index].get("open", 0.0))
+    blocked_reason = trade_block_reason(frame, entry_index, side="buy")
+    if entry_open <= 0 or blocked_reason:
+        return None
+
+    outcome: dict[str, float | str | bool] = {
+        "entry_date": entry_date,
+        "entry_open": entry_open,
+        "executable": True,
+        "execution_basis": "next_open",
+        "blocked_reason": "",
+    }
     for horizon in horizons:
         if len(later_dates) < horizon:
             continue
         target_date = later_dates[horizon - 1]
         window_dates = set(later_dates[:horizon])
-        target = frame[frame["_date"] == target_date]
         window = frame[frame["_date"].isin(window_dates)]
-        if target.empty or window.empty:
+        if window.empty:
             continue
-        close = _number(target.iloc[-1].get("close", 0.0))
+        target = window.sort_values("timestamp").iloc[-1]
+        close = _number(target.get("close", 0.0))
         high = _number(window["high"].max(), close)
         low = _number(window["low"].min(), close)
         prefix = f"{horizon}d"
         outcome[f"target_date_{prefix}"] = target_date
-        outcome[f"ret_{prefix}"] = close / prev_close - 1
-        outcome[f"high_{prefix}_ret"] = high / prev_close - 1
-        outcome[f"low_{prefix}_ret"] = low / prev_close - 1
+        outcome[f"ret_{prefix}"] = close / entry_open - 1
+        outcome[f"high_{prefix}_ret"] = high / entry_open - 1
+        outcome[f"low_{prefix}_ret"] = low / entry_open - 1
 
     if "ret_1d" not in outcome:
         return None

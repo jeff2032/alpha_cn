@@ -11,6 +11,8 @@ import pandas as pd
 from quant_a_stock.config import DEFAULT_PATHS
 from quant_a_stock.data.cache import load_daily_cache
 from quant_a_stock.data.universe import load_universe_file
+from quant_a_stock.research.horizon import HORIZON_POLICY_VERSION
+from quant_a_stock.research.horizon import horizon_policy
 from quant_a_stock.research.snapshot import SNAPSHOT_ROOT
 
 
@@ -28,7 +30,7 @@ TRACKED_ACTION_BUCKETS = (
     "观察-B2b主题待确认",
 )
 TRACKED_TIERS = ("A1", "A2", "A3", "B2")
-FORWARD_HORIZONS = (1, 3, 5, 10, 15, 20, 30)
+FORWARD_HORIZONS = (1, 3, 5, 10, 15, 20, 30, 40, 60)
 DEFAULT_GAP_TRADE_DAYS = 3
 DEFAULT_STRATEGY_VERSION = "research_candidates_v1"
 
@@ -51,43 +53,6 @@ TIER_STAGE_RANK = {
     "A2": 3,
     "A3": 4,
 }
-
-PRIMARY_HORIZON_BY_BUCKET = {
-    "观察-A1低位潜伏": 20,
-    "A1": 20,
-    "主攻-A2启动确认": 5,
-    "A2": 5,
-    "短线-A3一三日确认": 3,
-    "主攻-A3趋势延续": 3,
-    "A3": 3,
-    "升级-B2三五日观察": 5,
-    "观察-B2a主线扩散待升级": 10,
-    "观察-B2s主线突发待确认": 5,
-    "补票-B2a主线扩散": 10,
-    "补票-主线突发": 5,
-    "补票-B2强主题": 10,
-    "观察-B2b主题待确认": 5,
-    "B2": 5,
-}
-
-TRACKING_WINDOW_BY_BUCKET = {
-    "观察-A1低位潜伏": 20,
-    "A1": 20,
-    "主攻-A2启动确认": 5,
-    "A2": 5,
-    "短线-A3一三日确认": 3,
-    "主攻-A3趋势延续": 3,
-    "A3": 3,
-    "升级-B2三五日观察": 5,
-    "观察-B2a主线扩散待升级": 10,
-    "观察-B2s主线突发待确认": 5,
-    "补票-B2a主线扩散": 10,
-    "补票-主线突发": 5,
-    "补票-B2强主题": 10,
-    "观察-B2b主题待确认": 5,
-    "B2": 5,
-}
-
 
 @dataclass(frozen=True)
 class CandidateLifecycleTracking:
@@ -230,7 +195,14 @@ def _build_lifecycle_rows(
         sequence = 1
         last_event: dict | None = None
         for event in events:
-            if last_event is None or _trade_gap(last_event["target_date"], event["target_date"], trade_dates) > gap_trade_days:
+            allowed_gap = max(
+                gap_trade_days,
+                horizon_policy(
+                    last_event.get("action_bucket", "") if last_event else event.get("action_bucket", ""),
+                    last_event.get("research_tier", "") if last_event else event.get("research_tier", ""),
+                ).revalidation_interval_days,
+            )
+            if last_event is None or _trade_gap(last_event["target_date"], event["target_date"], trade_dates) > allowed_gap:
                 if active_events:
                     rows.append(
                         _lifecycle_row(
@@ -296,6 +268,7 @@ def _build_lifecycle_daily_rows(
         symbol = str(lifecycle["symbol"]).zfill(6)
         first = str(lifecycle["first_entry_date"])
         last_seen = str(lifecycle["last_seen_date"])
+        allowed_gap = int(lifecycle.get("allowed_gap_trade_days", gap_trade_days) or gap_trade_days)
         lifecycle_dates = [
             date
             for date in snapshot_dates
@@ -310,7 +283,7 @@ def _build_lifecycle_daily_rows(
                 previous_observed = event
             else:
                 gap = _trade_gap(last_seen, date, trade_dates)
-                day_status = "removed" if date > last_seen and gap > gap_trade_days else "grace"
+                day_status = "removed" if date > last_seen and gap > allowed_gap else "grace"
             rows.append(
                 {
                     "lifecycle_id": lifecycle["lifecycle_id"],
@@ -375,8 +348,9 @@ def _lifecycle_row(
         cache_dir=cache_dir,
         daily_frames=daily_frames,
     )
-    primary_horizon = _primary_horizon(first_bucket)
-    max_window = _tracking_window(first_bucket)
+    policy = horizon_policy(first_bucket, first["research_tier"])
+    primary_horizon = policy.primary_horizon_days
+    max_window = policy.tracking_window_days
     elapsed = _trade_elapsed(first_date, target_date, trade_dates)
     last_gap = _trade_gap(last_seen, target_date, trade_dates)
     result_label = _result_label(outcome, primary_horizon=primary_horizon)
@@ -384,7 +358,7 @@ def _lifecycle_row(
         elapsed=elapsed,
         max_window=max_window,
         last_gap=last_gap,
-        gap_trade_days=gap_trade_days,
+        gap_trade_days=max(gap_trade_days, policy.revalidation_interval_days),
     )
     lifecycle_id = "_".join(
         [
@@ -415,9 +389,13 @@ def _lifecycle_row(
         "days_observed": len(events),
         "days_since_entry": elapsed,
         "gap_trade_days": last_gap,
+        "allowed_gap_trade_days": max(gap_trade_days, policy.revalidation_interval_days),
         "tracking_window_days": max_window,
         "primary_horizon_days": primary_horizon,
-        "expected_horizon": first.get("expected_horizon", "") or _expected_horizon(first_bucket, first["research_tier"]),
+        "expected_horizon": policy.execution_horizon,
+        "research_horizon": policy.research_horizon,
+        "revalidation_interval_days": policy.revalidation_interval_days,
+        "horizon_policy_version": HORIZON_POLICY_VERSION,
         "first_candidate_model_version": first.get("candidate_model_version", ""),
         "current_candidate_model_version": last.get("candidate_model_version", ""),
         "first_factor_schema_version": first.get("factor_schema_version", ""),
@@ -701,11 +679,11 @@ def _stage_rank(action_bucket: str, tier: str) -> int:
 
 
 def _primary_horizon(bucket_or_tier: str) -> int:
-    return PRIMARY_HORIZON_BY_BUCKET.get(bucket_or_tier, 10)
+    return horizon_policy(bucket_or_tier, "").primary_horizon_days
 
 
 def _tracking_window(bucket_or_tier: str) -> int:
-    return TRACKING_WINDOW_BY_BUCKET.get(bucket_or_tier, 10)
+    return horizon_policy(bucket_or_tier, "").tracking_window_days
 
 
 def _lifecycle_status(*, elapsed: int, max_window: int, last_gap: int, gap_trade_days: int) -> str:
@@ -751,13 +729,25 @@ def _summarize_lifecycles(lifecycles: pd.DataFrame) -> pd.DataFrame:
         "avg_ret_10d",
         "avg_ret_20d",
         "avg_ret_30d",
+        "avg_ret_40d",
+        "avg_ret_60d",
         "avg_high_5d",
         "avg_low_5d",
     ]
     if lifecycles.empty:
         return pd.DataFrame(columns=columns)
     lifecycles = lifecycles.copy()
-    for column in ["ret_3d", "ret_5d", "ret_10d", "ret_20d", "ret_30d", "high_5d_ret", "low_5d_ret"]:
+    for column in [
+        "ret_3d",
+        "ret_5d",
+        "ret_10d",
+        "ret_20d",
+        "ret_30d",
+        "ret_40d",
+        "ret_60d",
+        "high_5d_ret",
+        "low_5d_ret",
+    ]:
         if column not in lifecycles.columns:
             lifecycles[column] = math.nan
     output = (
@@ -773,6 +763,8 @@ def _summarize_lifecycles(lifecycles: pd.DataFrame) -> pd.DataFrame:
             avg_ret_10d=("ret_10d", "mean"),
             avg_ret_20d=("ret_20d", "mean"),
             avg_ret_30d=("ret_30d", "mean"),
+            avg_ret_40d=("ret_40d", "mean"),
+            avg_ret_60d=("ret_60d", "mean"),
             avg_high_5d=("high_5d_ret", "mean"),
             avg_low_5d=("low_5d_ret", "mean"),
         )
@@ -784,6 +776,8 @@ def _summarize_lifecycles(lifecycles: pd.DataFrame) -> pd.DataFrame:
         "avg_ret_10d",
         "avg_ret_20d",
         "avg_ret_30d",
+        "avg_ret_40d",
+        "avg_ret_60d",
         "avg_high_5d",
         "avg_low_5d",
     ]:
@@ -1008,7 +1002,8 @@ def _render_lifecycle_markdown(tracking: CandidateLifecycleTracking, *, top: int
             "",
             "- `active` 表示仍在观察窗口内，且最近消失不超过 3 个交易日。",
             "- `expired` 表示观察窗口已经走完，后续主要进入策略复盘。",
-            "- A3 只看 1/3 日，A2 看 3/5 日，A1 看 10/20/30 日，B2 统一只给 3/5 日升级窗口。",
+            "- A3 执行看 1/3 日，A2 看 1/5 日，B2 只给 1/3 日升级窗口；A1 执行看 10/20 日，研究跟踪延长到 60 日。",
+            "- A1 每 5 个交易日重新认证；延长研究跟踪不代表影子组合必须持有 60 日。",
             "- `strong_hit` / `hit` / `failed` 根据各分组主要观察窗口的最大浮盈和最大回撤打标。",
             "- 这份报告用于复盘和跟踪，不构成买卖建议。",
         ]
@@ -1028,6 +1023,8 @@ DISPLAY_COLUMN_NAMES = {
     "avg_ret_10d": "10日均值",
     "avg_ret_20d": "20日均值",
     "avg_ret_30d": "30日均值",
+    "avg_ret_40d": "40日均值",
+    "avg_ret_60d": "60日均值",
     "avg_high_5d": "5日最大浮盈",
     "avg_low_5d": "5日最大回撤",
     "symbol": "代码",
@@ -1053,6 +1050,8 @@ DISPLAY_COLUMN_NAMES = {
     "ret_15d": "15日收益",
     "ret_20d": "20日收益",
     "ret_30d": "30日收益",
+    "ret_40d": "40日收益",
+    "ret_60d": "60日收益",
     "high_5d_ret": "5日最大浮盈",
     "low_5d_ret": "5日最大回撤",
     "high_10d_ret": "10日最大浮盈",
@@ -1061,6 +1060,10 @@ DISPLAY_COLUMN_NAMES = {
     "low_20d_ret": "20日最大回撤",
     "high_30d_ret": "30日最大浮盈",
     "low_30d_ret": "30日最大回撤",
+    "high_40d_ret": "40日最大浮盈",
+    "low_40d_ret": "40日最大回撤",
+    "high_60d_ret": "60日最大浮盈",
+    "low_60d_ret": "60日最大回撤",
     "since_entry_ret": "入池以来收益",
     "since_entry_high_ret": "入池最大浮盈",
     "since_entry_low_ret": "入池最大回撤",
@@ -1166,18 +1169,7 @@ def _bucket_code(bucket_or_tier: str, tier: str) -> str:
 
 
 def _expected_horizon(action_bucket: str, tier: str) -> str:
-    bucket = action_bucket or tier
-    if "A1" in bucket or tier == "A1":
-        return "10-20d"
-    if "A2" in bucket or tier == "A2":
-        return "3-5d"
-    if "A3" in bucket or tier == "A3":
-        return "1-3d"
-    if "B2a" in bucket:
-        return "3-5d"
-    if "B2" in bucket or "主线突发" in bucket or tier.startswith("B"):
-        return "3-5d"
-    return "observe"
+    return horizon_policy(action_bucket, tier).execution_horizon
 
 
 def _safe_token(value: str) -> str:
@@ -1204,9 +1196,13 @@ def _lifecycle_columns() -> list[str]:
         "days_observed",
         "days_since_entry",
         "gap_trade_days",
+        "allowed_gap_trade_days",
         "tracking_window_days",
         "primary_horizon_days",
         "expected_horizon",
+        "research_horizon",
+        "revalidation_interval_days",
+        "horizon_policy_version",
         "first_candidate_model_version",
         "current_candidate_model_version",
         "first_factor_schema_version",

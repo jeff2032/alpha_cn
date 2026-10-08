@@ -6,6 +6,8 @@ import pandas as pd
 
 from quant_a_stock.config import DEFAULT_PATHS
 from quant_a_stock.research.snapshot import SNAPSHOT_ROOT
+from quant_a_stock.research.horizon import HORIZON_POLICY_VERSION
+from quant_a_stock.research.horizon import horizon_policy
 from quant_a_stock.research.version import CANDIDATE_MODEL_VERSION
 from quant_a_stock.research.version import DECISION_SIGNAL_VERSION
 
@@ -21,6 +23,13 @@ DECISION_SIGNAL_COLUMNS = [
     "research_tier",
     "confidence",
     "expected_horizon",
+    "research_horizon",
+    "primary_horizon_days",
+    "tracking_window_days",
+    "min_hold_days",
+    "max_hold_days",
+    "revalidation_interval_days",
+    "deep_research_eligible",
     "research_score",
     "risk_level",
     "reason_tags",
@@ -36,6 +45,7 @@ DECISION_SIGNAL_COLUMNS = [
     "setup_phase",
     "candidate_model_version",
     "decision_signal_version",
+    "horizon_policy_version",
 ]
 
 
@@ -86,7 +96,7 @@ def _signal_row(row: pd.Series, *, target_date: str, plan_date: str) -> dict:
     tier = _text(row.get("research_tier"))
     risk_level = _text(row.get("risk_level")) or "未标注"
     signal_type, decision_bucket = _signal_type_and_bucket(action_bucket, tier, risk_level)
-    horizon = _expected_horizon(action_bucket, tier)
+    policy = horizon_policy(action_bucket, tier)
     confidence = _confidence(row, signal_type=signal_type, risk_level=risk_level)
     return {
         "target_date": target_date,
@@ -98,7 +108,14 @@ def _signal_row(row: pd.Series, *, target_date: str, plan_date: str) -> dict:
         "action_bucket": action_bucket,
         "research_tier": tier,
         "confidence": confidence,
-        "expected_horizon": horizon,
+        "expected_horizon": policy.execution_horizon,
+        "research_horizon": policy.research_horizon,
+        "primary_horizon_days": policy.primary_horizon_days,
+        "tracking_window_days": policy.tracking_window_days,
+        "min_hold_days": policy.min_hold_days,
+        "max_hold_days": policy.max_hold_days,
+        "revalidation_interval_days": policy.revalidation_interval_days,
+        "deep_research_eligible": policy.deep_research_eligible and risk_level == "低",
         "research_score": _round(row.get("research_score")),
         "risk_level": risk_level,
         "reason_tags": _reason_tags(row),
@@ -114,6 +131,7 @@ def _signal_row(row: pd.Series, *, target_date: str, plan_date: str) -> dict:
         "setup_phase": _text(row.get("setup_phase")),
         "candidate_model_version": _text(row.get("candidate_model_version")) or CANDIDATE_MODEL_VERSION,
         "decision_signal_version": DECISION_SIGNAL_VERSION,
+        "horizon_policy_version": HORIZON_POLICY_VERSION,
     }
 
 
@@ -122,6 +140,8 @@ def _signal_type_and_bucket(action_bucket: str, tier: str, risk_level: str) -> t
         return "avoid", "移出推荐"
     if "回避" in action_bucket or risk_level in {"中高", "高"}:
         return "avoid", "风险回避"
+    if action_bucket.startswith("短线-A3") or "A3高波动" in action_bucket:
+        return "hold_watch", "高波动观察"
     if not action_bucket:
         if tier == "A2":
             return "buy_watch", "主攻"
@@ -144,26 +164,6 @@ def _signal_type_and_bucket(action_bucket: str, tier: str, risk_level: str) -> t
     if tier == "A1" or "A1" in action_bucket:
         return "watch", "潜伏观察"
     return "watch", "观察"
-
-
-def _expected_horizon(action_bucket: str, tier: str) -> str:
-    if tier == "A1" or "A1" in action_bucket:
-        return "10-20d"
-    if tier == "A2" or "A2" in action_bucket:
-        return "3-5d"
-    if tier == "A3" or "A3" in action_bucket:
-        return "1-3d"
-    if tier == "B2" or "B2" in action_bucket:
-        return "3-5d"
-    if tier == "B1":
-        return "0d"
-    if "B2a" in action_bucket:
-        return "3-10d"
-    if "B2s" in action_bucket or "主线突发" in action_bucket:
-        return "1-5d"
-    if "B2b" in action_bucket:
-        return "1-5d"
-    return "3-10d"
 
 
 def _confidence(row: pd.Series, *, signal_type: str, risk_level: str) -> str:
@@ -224,9 +224,9 @@ def _observe_condition(signal_type: str, action_bucket: str, tier: str) -> str:
     if signal_type == "buy_watch":
         return "看开盘承接、回踩不破、量能不过热，优先等分歧确认。"
     if signal_type == "upgrade_watch":
-        return "限定 3-5 日观察升级；看主题扩散、盘中承接和公告/情绪补足。"
+        return "限定 1-3 日观察升级；看主题扩散、盘中承接和公告/情绪补足。"
     if tier == "A1" or "A1" in action_bucket:
-        return "看 10-30 日内是否补量、补主题、升级到 A2/A3。"
+        return "每 5 个交易日重新认证；最长跟踪 60 日，看是否补量、补主题、升级到 A2/A3。"
     return "看是否维持形态、主题和风险三项不恶化。"
 
 
@@ -234,11 +234,11 @@ def _invalid_condition(signal_type: str, action_bucket: str, tier: str) -> str:
     if signal_type == "avoid":
         return "风险标签未消除前不恢复常规观察。"
     if tier == "A2" or "A2" in action_bucket:
-        return "跌回突破区间且放量转弱；高开后放量滞涨；主线明显转弱。"
+        return "1-5 日内跌回突破区间且放量转弱；高开后放量滞涨；主线明显转弱。"
     if tier == "A3" or "A3" in action_bucket:
         return "1-3 日未延续、趋势承接失败或连续冲高回落即退出。"
     if tier == "B2" or "B2" in action_bucket:
-        return "3-5 日未升级到 A2/A3，或主题热度消退且没有补量/承接，即移出。"
+        return "1-3 日未升级到 A2/A3，或主题热度消退且没有补量/承接，即移出。"
     if "B2s" in action_bucket or "主线突发" in action_bucket:
         return "1-5 日没有持续性或次日低开低走，降级为普通观察。"
     if "B2a" in action_bucket or "B2b" in action_bucket:

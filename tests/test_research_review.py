@@ -87,21 +87,25 @@ def test_build_research_review_summarizes_candidates_and_missed_movers(tmp_path,
     assert preferred["evaluation_horizon"] == "3d_5d_10d_15d"
     assert preferred["preferred_horizon"] == "5d"
     assert preferred["outcome_label"] == "hit"
-    assert preferred["benchmark_ret_1d"] == pytest.approx(0.2)
-    assert preferred["excess_ret_1d"] == pytest.approx(-0.1)
-    assert preferred["industry_ret_5d"] == pytest.approx(-0.25)
-    assert preferred["industry_excess_ret_5d"] == pytest.approx(0.75)
+    assert preferred["entry_open"] == pytest.approx(10.2)
+    assert preferred["execution_basis"] == "next_open"
+    assert preferred["benchmark_ret_1d"] == pytest.approx(36 / 30.6 - 1)
+    assert preferred["excess_ret_1d"] == pytest.approx((11 / 10.2 - 1) - (36 / 30.6 - 1))
+    assert preferred["industry_ret_5d"] == pytest.approx(15 / 20.4 - 1)
+    assert preferred["industry_excess_ret_5d"] == pytest.approx((15 / 10.2 - 1) - (15 / 20.4 - 1))
     a2 = review.by_tier[review.by_tier["tier"] == "A2"].iloc[0]
     assert a2["count"] == 1
-    assert a2["avg_ret"] == pytest.approx(0.1)
+    assert a2["avg_ret"] == pytest.approx(11 / 10.2 - 1)
     early_bucket = review.by_model_bucket[review.by_model_bucket["model_bucket"] == "A1/A2_early_setup"].iloc[0]
     assert early_bucket["count"] == 1
     assert not review.by_action_bucket.empty
     assert "主攻-A2启动确认" in set(review.by_action_bucket["action_bucket"])
     a2_horizon = review.by_tier_horizon[review.by_tier_horizon["tier"] == "A2"]
     assert set(a2_horizon["horizon"]) == {"1d", "3d", "5d"}
-    assert a2_horizon[a2_horizon["horizon"] == "5d"]["avg_ret"].iloc[0] == pytest.approx(0.5)
-    assert a2_horizon[a2_horizon["horizon"] == "5d"]["avg_excess_ret"].iloc[0] == pytest.approx(1 / 6)
+    assert a2_horizon[a2_horizon["horizon"] == "5d"]["avg_ret"].iloc[0] == pytest.approx(15 / 10.2 - 1)
+    assert a2_horizon[a2_horizon["horizon"] == "5d"]["avg_excess_ret"].iloc[0] == pytest.approx(
+        (15 / 10.2 - 1) - (40 / 30.6 - 1)
+    )
     model_horizon = review.by_model_bucket_horizon[
         review.by_model_bucket_horizon["model_bucket"] == "A1/A2_early_setup"
     ]
@@ -154,11 +158,12 @@ def test_outcome_path_tags_do_not_change_pretrade_risk_level() -> None:
 def _write_daily(path, symbol: str, closes: list[float]) -> None:
     rows = []
     dates = ["2026-06-12", "2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-19"]
-    for timestamp, close in zip(dates, closes):
+    for index, (timestamp, close) in enumerate(zip(dates, closes)):
+        open_price = close if index == 0 else closes[index - 1] * 1.02
         rows.append(
             {
                 "timestamp": timestamp,
-                "open": close,
+                "open": open_price,
                 "high": close,
                 "low": close,
                 "close": close,

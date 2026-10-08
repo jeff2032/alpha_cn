@@ -12,8 +12,10 @@ import pandas as pd
 
 from quant_a_stock.config import DEFAULT_PATHS
 from quant_a_stock.data.calendar import cached_trading_dates
+from quant_a_stock.data.normalization import normalize_a_share_volume
 from quant_a_stock.io_utils import exclusive_file_lock
 from quant_a_stock.research.decision_signal import build_decision_signals
+from quant_a_stock.research.horizon import horizon_policy
 from quant_a_stock.research.lifecycle import build_candidate_lifecycle_tracking
 from quant_a_stock.research.provenance import build_run_provenance
 from quant_a_stock.research.version import WAREHOUSE_SCHEMA_VERSION
@@ -29,6 +31,7 @@ CSV_REPORT_SPECS = {
     "fundamental_quality_review_summary": "fundamental_quality_review_summary_*.csv",
     "fundamental_research_queue": "fundamental_research_queue_*.csv",
     "fundamental_verdicts": "fundamental_verdicts_*.csv",
+    "berkshire_long_cycle_queue": "berkshire_long_cycle_queue_*.csv",
     "daily_research_candidates": "daily_research_candidates_*.csv",
     "sentiment_scores": "sentiment_watchlist_*.csv",
     "market_themes": "market_theme_*.csv",
@@ -38,6 +41,8 @@ CSV_REPORT_SPECS = {
     "research_review_details": "research_review_details_*.csv",
     "research_review_summary": "research_review_summary_*.csv",
     "missed_opportunities": "research_review_missed_*.csv",
+    "latent_catalyst_review_details": "latent_catalyst_review_details_*.csv",
+    "latent_catalyst_review_summary": "latent_catalyst_review_summary_*.csv",
 }
 
 SNAPSHOT_CSV_SPECS = {
@@ -48,6 +53,7 @@ SNAPSHOT_CSV_SPECS = {
     "snapshot_scan_accumulation_setups": "scan_accumulation_setup.csv",
     "snapshot_scan_trend_pullback_setups": "scan_trend_pullback_setup.csv",
     "snapshot_scan_quiet_reversal_setups": "scan_quiet_reversal_setup.csv",
+    "snapshot_scan_latent_catalyst_setups": "scan_latent_catalyst_setup.csv",
 }
 
 MARKDOWN_REPORT_SPECS = {
@@ -69,6 +75,9 @@ MIDDLE_LAYER_TABLES = [
     "fundamental_quality_outcome_daily",
     "fundamental_research_queue_daily",
     "fundamental_verdict_daily",
+    "berkshire_long_cycle_queue_daily",
+    "latent_catalyst_outcome_daily",
+    "latent_catalyst_diagnostics_daily",
     "stock_market_attitude_daily",
     "research_outcome_daily",
     "missed_opportunity_daily",
@@ -186,6 +195,8 @@ def _ingest_latest_reports_unlocked(
     ingested_at = datetime.now().isoformat(timespec="seconds")
     report_rows: list[dict] = []
     loaded_reports: dict[str, pd.DataFrame] = {}
+    latest_manifest_date = _latest_partition_date("run_manifest", warehouse_dir=warehouse_dir)
+    preserve_newer_rolling = bool(latest_manifest_date and latest_manifest_date > target_date)
 
     for table_name, pattern in CSV_REPORT_SPECS.items():
         path = _latest_file_for_date(reports_root, pattern, target_date)
@@ -240,6 +251,7 @@ def _ingest_latest_reports_unlocked(
             run_id=resolved_run_id,
             ingested_at=ingested_at,
             warehouse_dir=warehouse_dir,
+            preserve_newer_rolling=preserve_newer_rolling,
         )
     )
 
@@ -725,6 +737,7 @@ def sync_daily_candles_to_warehouse(
             )
             continue
         frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
+        frame = normalize_a_share_volume(frame)
         frame = frame.dropna(subset=["timestamp"]).sort_values("timestamp").drop_duplicates("timestamp")
         if since_ts is not None:
             frame = frame[frame["timestamp"] >= since_ts]
@@ -1157,6 +1170,7 @@ def _write_middle_layer_from_reports(
     run_id: str,
     ingested_at: str,
     warehouse_dir: Path | None,
+    preserve_newer_rolling: bool = False,
 ) -> list[dict]:
     rows: list[dict] = []
     candidates = frames.get("research_candidates")
@@ -1268,6 +1282,48 @@ def _write_middle_layer_from_reports(
             )
         )
 
+    berkshire_queue = frames.get("berkshire_long_cycle_queue")
+    if berkshire_queue is not None and not berkshire_queue.empty:
+        rows.append(
+            _write_middle_frame(
+                berkshire_queue,
+                "berkshire_long_cycle_queue_daily",
+                target_date=target_date,
+                run_id=run_id,
+                source_path="derived:berkshire_long_cycle_queue",
+                ingested_at=ingested_at,
+                warehouse_dir=warehouse_dir,
+            )
+        )
+
+    latent_details = frames.get("latent_catalyst_review_details")
+    if latent_details is not None and not latent_details.empty:
+        rows.append(
+            _write_middle_frame(
+                latent_details,
+                "latent_catalyst_outcome_daily",
+                target_date=target_date,
+                run_id=run_id,
+                source_path="derived:latent_catalyst_review_details",
+                ingested_at=ingested_at,
+                warehouse_dir=warehouse_dir,
+            )
+        )
+
+    latent_summary = frames.get("latent_catalyst_review_summary")
+    if latent_summary is not None and not latent_summary.empty:
+        rows.append(
+            _write_middle_frame(
+                latent_summary,
+                "latent_catalyst_diagnostics_daily",
+                target_date=target_date,
+                run_id=run_id,
+                source_path="derived:latent_catalyst_review_summary",
+                ingested_at=ingested_at,
+                warehouse_dir=warehouse_dir,
+            )
+        )
+
     risk_events = frames.get("risk_events")
     if risk_events is not None and not risk_events.empty:
         rows.append(
@@ -1312,35 +1368,59 @@ def _write_middle_layer_from_reports(
 
     details = frames.get("research_review_details")
     if details is not None and not details.empty:
-        _clear_target_partition("research_outcome_daily", target_date=target_date, warehouse_dir=warehouse_dir)
-        rows.extend(
-            _write_date_partitioned_middle_frame(
-                _build_research_outcome_daily(details, target_date=target_date),
-                "research_outcome_daily",
-                date_column="signal_date",
-                report_target_date=target_date,
-                run_id=run_id,
-                source_path="derived:research_review_details",
-                ingested_at=ingested_at,
-                warehouse_dir=warehouse_dir,
+        if preserve_newer_rolling:
+            rows.append(
+                _report_row(
+                    run_id,
+                    target_date,
+                    "research_outcome_daily",
+                    None,
+                    0,
+                    "preserved_newer",
+                    ingested_at,
+                )
             )
-        )
+        else:
+            rows.extend(
+                _write_date_partitioned_middle_frame(
+                    _build_research_outcome_daily(details, target_date=target_date),
+                    "research_outcome_daily",
+                    date_column="signal_date",
+                    report_target_date=target_date,
+                    run_id=run_id,
+                    source_path="derived:research_review_details",
+                    ingested_at=ingested_at,
+                    warehouse_dir=warehouse_dir,
+                )
+            )
 
     missed = frames.get("missed_opportunities")
     if missed is not None and not missed.empty:
-        _clear_target_partition("missed_opportunity_daily", target_date=target_date, warehouse_dir=warehouse_dir)
-        rows.extend(
-            _write_date_partitioned_middle_frame(
-                _build_missed_opportunity_daily(missed, target_date=target_date),
-                "missed_opportunity_daily",
-                date_column="signal_date",
-                report_target_date=target_date,
-                run_id=run_id,
-                source_path="derived:research_review_missed",
-                ingested_at=ingested_at,
-                warehouse_dir=warehouse_dir,
+        if preserve_newer_rolling:
+            rows.append(
+                _report_row(
+                    run_id,
+                    target_date,
+                    "missed_opportunity_daily",
+                    None,
+                    0,
+                    "preserved_newer",
+                    ingested_at,
+                )
             )
-        )
+        else:
+            rows.extend(
+                _write_date_partitioned_middle_frame(
+                    _build_missed_opportunity_daily(missed, target_date=target_date),
+                    "missed_opportunity_daily",
+                    date_column="signal_date",
+                    report_target_date=target_date,
+                    run_id=run_id,
+                    source_path="derived:research_review_missed",
+                    ingested_at=ingested_at,
+                    warehouse_dir=warehouse_dir,
+                )
+            )
 
     summary = frames.get("research_review_summary")
     if summary is not None and not summary.empty:
@@ -1830,6 +1910,15 @@ def _build_decision_signal_daily(frame: pd.DataFrame, *, target_date: str) -> pd
     output["tier"] = _column(frame, "research_tier", "tier", default="")
     output["confidence"] = _column(frame, "confidence", default="")
     output["expected_horizon"] = _column(frame, "expected_horizon", default="")
+    output["research_horizon"] = _column(frame, "research_horizon", default="")
+    output["primary_horizon_days"] = _numeric_column(frame, "primary_horizon_days")
+    output["tracking_window_days"] = _numeric_column(frame, "tracking_window_days")
+    output["min_hold_days"] = _numeric_column(frame, "min_hold_days")
+    output["max_hold_days"] = _numeric_column(frame, "max_hold_days")
+    output["revalidation_interval_days"] = _numeric_column(frame, "revalidation_interval_days")
+    output["deep_research_eligible"] = _column(frame, "deep_research_eligible", default=False).astype(str).str.lower().isin(
+        ["true", "1", "yes", "y", "是"]
+    )
     output["research_score"] = _numeric_column(frame, "research_score")
     output["risk_level"] = _column(frame, "risk_level", default="")
     output["reason_tags"] = _column(frame, "reason_tags", default="")
@@ -1844,6 +1933,7 @@ def _build_decision_signal_daily(frame: pd.DataFrame, *, target_date: str) -> pd
     output["setup_phase"] = _column(frame, "setup_phase", default="")
     output["candidate_model_version"] = _column(frame, "candidate_model_version", default="")
     output["decision_signal_version"] = _column(frame, "decision_signal_version", default="")
+    output["horizon_policy_version"] = _column(frame, "horizon_policy_version", default="")
     return output
 
 
@@ -1863,6 +1953,12 @@ def _build_fundamental_watchlist_daily(frame: pd.DataFrame, *, target_date: str)
     output["action_bucket"] = _column(frame, "action_bucket", default="")
     output["confidence"] = _column(frame, "confidence", default="")
     output["expected_horizon"] = _column(frame, "expected_horizon", default="")
+    output["research_horizon"] = _column(frame, "research_horizon", default="")
+    output["tracking_window_days"] = _numeric_column(frame, "tracking_window_days")
+    output["revalidation_interval_days"] = _numeric_column(frame, "revalidation_interval_days")
+    output["deep_research_eligible"] = _column(frame, "deep_research_eligible", default=False).astype(str).str.lower().isin(
+        ["true", "1", "yes", "y", "是"]
+    )
     output["research_score"] = _numeric_column(frame, "research_score")
     output["risk_level"] = _column(frame, "risk_level", default="")
     output["reason_tags"] = _column(frame, "reason_tags", default="")
@@ -2042,23 +2138,7 @@ def _candidate_model_bucket(tier: object, action_bucket: object) -> str:
 
 
 def _expected_horizon(tier: object, action_bucket: object) -> str:
-    tier_text = str(tier or "")
-    bucket_text = str(action_bucket or "")
-    if tier_text == "A1" or "A1" in bucket_text:
-        return "10-20d"
-    if tier_text == "A2" or "A2" in bucket_text:
-        return "3-5d"
-    if tier_text == "A3" or "A3" in bucket_text:
-        return "1-3d"
-    if "B2a" in bucket_text:
-        return "3-10d"
-    if "主线突发" in bucket_text:
-        return "1-5d"
-    if "B2b" in bucket_text:
-        return "1-5d"
-    if tier_text.startswith("B"):
-        return "3-5d"
-    return "observe"
+    return horizon_policy(action_bucket, tier).execution_horizon
 
 
 def _candidate_reason_tags(row: pd.Series) -> str:
@@ -2439,6 +2519,18 @@ def _clear_target_partition(table_name: str, *, target_date: str, warehouse_dir:
 def _target_partition_exists(table_name: str, *, target_date: str, warehouse_dir: Path | None) -> bool:
     output_dir = parquet_root(warehouse_dir) / table_name / f"target_date={target_date}"
     return output_dir.exists() and any(output_dir.glob("*.parquet"))
+
+
+def _latest_partition_date(table_name: str, *, warehouse_dir: Path | None) -> str | None:
+    table_root = parquet_root(warehouse_dir) / table_name
+    if not table_root.exists():
+        return None
+    dates = [
+        path.name.removeprefix("target_date=")
+        for path in table_root.glob("target_date=*")
+        if path.is_dir()
+    ]
+    return max(dates) if dates else None
 
 
 def _report_row(

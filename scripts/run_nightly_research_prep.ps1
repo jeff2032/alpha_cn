@@ -8,16 +8,21 @@
     [double]$SleepSeconds = 0.05,
     [int]$Workers = 6,
     [int]$LookbackDays = 60,
-    [string]$FallbackStockProvider = "eastmoney",
-    [int]$FallbackStockWorkers = 6,
+    [string]$FallbackStockProvider = "tencent",
+    [int]$FallbackStockWorkers = 4,
+    [string]$FinalStockProvider = "",
+    [int]$FinalStockWorkers = 4,
     [string[]]$IndexSymbols = @("510300", "510500", "159915"),
-    [string]$EtfProvider = "eastmoney",
-    [string]$FallbackEtfProvider = "sina",
+    [string]$EtfProvider = "sina",
+    [string]$FallbackEtfProvider = "tencent",
+    [string]$FinalEtfProvider = "",
     [int]$SentimentTop = 180,
     [int]$RiskDays = 180,
+    [int]$CacheRepairBatchSize = 30,
     [int]$MaxStaleAllowed = 30,
-    [int]$MaxSyncAttempts = 6,
-    [int]$RetryWaitMinutes = 30,
+    [double]$MinCoveragePct = 99.0,
+    [int]$MaxSyncAttempts = 3,
+    [int]$RetryWaitMinutes = 20,
     [switch]$Force
 )
 
@@ -66,15 +71,13 @@ function Invoke-QuantStep {
 function Invoke-ScriptStep {
     param(
         [string]$Name,
-        [string[]]$Arguments
+        [string]$ScriptPath,
+        [hashtable]$Parameters
     )
 
-    Write-Step ("${Name}: powershell.exe " + ($Arguments -join " "))
+    Write-Step ("${Name}: " + $ScriptPath)
     try {
-        & powershell.exe @Arguments
-        if ($LASTEXITCODE -ne 0) {
-            throw "Command failed, exit code: $LASTEXITCODE"
-        }
+        & $ScriptPath @Parameters
         Add-StepResult -Name $Name -Status "成功"
     } catch {
         Add-StepResult -Name $Name -Status "失败" -Detail $_.Exception.Message
@@ -89,6 +92,19 @@ function Get-CsvDataRowCount {
     }
     $lineCount = (Get-Content -LiteralPath $Path | Measure-Object -Line).Lines
     return [Math]::Max(0, $lineCount - 1)
+}
+
+function Get-CoveragePercentage {
+    param(
+        [int]$TotalCount,
+        [int]$StaleCount
+    )
+
+    if ($TotalCount -le 0) {
+        return 0.0
+    }
+    $freshCount = [Math]::Max(0, $TotalCount - $StaleCount)
+    return [Math]::Round(($freshCount * 100.0) / $TotalCount, 2)
 }
 
 function Get-PreviousWeekday {
@@ -306,6 +322,8 @@ function Save-PrepReport {
     $lines.Add("## 数据覆盖")
     $lines.Add("")
     $lines.Add("- 准备后过期标的数：$script:FinalStaleCount")
+    $lines.Add("- 全市场目标日覆盖率：$script:FinalCoveragePct%")
+    $lines.Add("- 缓存质量隔离标的数：$script:QuarantineCount")
     $lines.Add("- ETF/指数过期标的数：$script:FinalIndexStaleCount")
     $lines.Add("- 过期清单：data/universe/stale_after_nightly.csv")
     $lines.Add("")
@@ -336,16 +354,20 @@ function Save-PrepReport {
 }
 
 Set-Location $ProjectRoot
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
 
 $script:StepResults = @()
 $script:FinalStaleCount = "未知"
+$script:FinalCoveragePct = "未知"
 $script:FinalIndexStaleCount = "未知"
+$script:QuarantineCount = "未知"
 $script:ResolvedTargetDate = ""
 
 $logDir = Join-Path $ProjectRoot "logs/nightly_prep"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $script:LogPath = Join-Path $logDir ("nightly_prep_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
-Start-Transcript -Path $script:LogPath -Append | Out-Null
+Start-Transcript -Path $script:LogPath | Out-Null
 
 try {
     Write-Step "Nightly research prep started. ProjectRoot: $ProjectRoot"
@@ -355,7 +377,7 @@ try {
     if (-not $Force -and -not $hasExplicitTargetDate -and ($today.DayOfWeek -eq "Saturday" -or $today.DayOfWeek -eq "Sunday")) {
         $script:ResolvedTargetDate = Resolve-DefaultDataDate -CutoffTime $ReportCutoffTime
         Add-StepResult -Name "周末检查" -Status "跳过" -Detail "周末默认不跑，使用 -Force 可强制执行。"
-        Save-PrepReport -Status "跳过" -Detail "周末默认不跑。"
+        Save-PrepReport -Status "跳过" -Detail "周末默认不跑。" -CheckpointOnly
         return
     }
 
@@ -374,25 +396,71 @@ try {
     }
     $env:PYTHONPATH = (Join-Path $ProjectRoot "src") + [IO.Path]::PathSeparator + $env:PYTHONPATH
 
+    if (-not $hasExplicitTargetDate) {
+        $calendarResolutionPath = Join-Path $ProjectRoot "data/reference/calendar_resolution.json"
+        try {
+            Invoke-QuantStep -Name "官方交易日历解析" -Arguments @(
+                "calendar-resolve",
+                "--target-date", $script:ResolvedTargetDate,
+                "--output", "data/reference/calendar_resolution.json"
+            )
+            $calendarResolution = Get-Content -LiteralPath $calendarResolutionPath -Raw | ConvertFrom-Json
+            $calendarDate = Normalize-DateString -Value ([string]$calendarResolution.resolved_date)
+            $calendarSource = [string]$calendarResolution.source
+            if ($calendarDate -ne $script:ResolvedTargetDate) {
+                Write-Step "Target $script:ResolvedTargetDate is not an exchange trading date; use $calendarDate."
+                Add-StepResult -Name "交易日检查" -Status "回退" -Detail "$script:ResolvedTargetDate -> $calendarDate，来源：$calendarSource"
+                $script:ResolvedTargetDate = $calendarDate
+            } elseif ($calendarSource -eq "official_calendar") {
+                Add-StepResult -Name "交易日检查" -Status "通过" -Detail "官方交易日历确认 $calendarDate。"
+            } else {
+                Add-StepResult -Name "交易日检查" -Status "警告" -Detail "官方日历不可用，按工作日兜底：$calendarDate；$($calendarResolution.refresh_error)"
+            }
+        } catch {
+            Add-StepResult -Name "交易日检查" -Status "警告" -Detail "官方交易日历解析失败，保留目标日 $script:ResolvedTargetDate：$($_.Exception.Message)"
+            Write-Step ("Official calendar resolution failed; keep target date. " + $_.Exception.Message)
+        }
+    }
+
     $dataSyncScript = Join-Path $ProjectRoot "scripts/run_data_sync.ps1"
     $dataReady = $false
     $attemptLimit = [Math]::Max(1, $MaxSyncAttempts)
-    for ($attempt = 1; $attempt -le $attemptLimit; $attempt++) {
-        Invoke-ScriptStep -Name "补日线行情($attempt/$attemptLimit)" -Arguments @(
-            "-NoProfile",
-            "-ExecutionPolicy", "Bypass",
-            "-File", $dataSyncScript,
-            "-ProjectRoot", $ProjectRoot,
-            "-UniverseFile", $UniverseFile,
-            "-Since", $Since,
-            "-TargetDate", $script:ResolvedTargetDate,
-            "-StockProvider", $StockProvider,
-            "-FallbackStockProvider", $FallbackStockProvider,
-            "-Workers", $Workers.ToString([Globalization.CultureInfo]::InvariantCulture),
-            "-FallbackWorkers", $FallbackStockWorkers.ToString([Globalization.CultureInfo]::InvariantCulture),
-            "-SleepSeconds", $SleepSeconds.ToString([Globalization.CultureInfo]::InvariantCulture),
-            "-LookbackDays", $LookbackDays.ToString([Globalization.CultureInfo]::InvariantCulture)
-        )
+    Invoke-QuantStep -Name "数据覆盖预检" -Arguments @(
+        "cache-date-status",
+        "--universe-file", $UniverseFile,
+        "--target-date", $script:ResolvedTargetDate,
+        "--exact-target-date",
+        "--output-stale", "data/universe/stale_after_nightly.csv"
+    )
+    $script:FinalStaleCount = Get-CsvDataRowCount -Path (Join-Path $ProjectRoot "data/universe/stale_after_nightly.csv")
+    $universeCount = Get-CsvDataRowCount -Path (Join-Path $ProjectRoot $UniverseFile)
+    $script:FinalCoveragePct = Get-CoveragePercentage -TotalCount $universeCount -StaleCount ([int]$script:FinalStaleCount)
+    $coverageReady = $universeCount -gt 0 -and ([double]$script:FinalCoveragePct) -ge $MinCoveragePct
+    if (-not $Force -and (([int]$script:FinalStaleCount) -le $MaxStaleAllowed -or $coverageReady)) {
+        $dataReady = $true
+        Add-StepResult -Name "数据覆盖预检" -Status "通过" -Detail "缓存已满足门槛：过期 $script:FinalStaleCount 只，覆盖率 $script:FinalCoveragePct%；跳过重复下载。"
+    }
+
+    for ($attempt = 1; -not $dataReady -and $attempt -le $attemptLimit; $attempt++) {
+        $dataSyncParameters = @{
+            ProjectRoot = $ProjectRoot
+            UniverseFile = $UniverseFile
+            Since = $Since
+            TargetDate = $script:ResolvedTargetDate
+            StockProvider = $StockProvider
+            FallbackStockProvider = $FallbackStockProvider
+            Workers = $Workers
+            FallbackWorkers = $FallbackStockWorkers
+            FinalWorkers = $FinalStockWorkers
+            SleepSeconds = $SleepSeconds
+            LookbackDays = $LookbackDays
+            DisableTranscript = $true
+            SkipUniverseRefresh = ($attempt -gt 1)
+        }
+        if ($FinalStockProvider) {
+            $dataSyncParameters["FinalStockProvider"] = $FinalStockProvider
+        }
+        Invoke-ScriptStep -Name "补日线行情($attempt/$attemptLimit)" -ScriptPath $dataSyncScript -Parameters $dataSyncParameters
 
         Invoke-QuantStep -Name "数据覆盖复查($attempt/$attemptLimit)" -Arguments @(
             "cache-date-status",
@@ -404,13 +472,16 @@ try {
             "--output-stale", "data/universe/stale_after_nightly.csv"
         )
         $script:FinalStaleCount = Get-CsvDataRowCount -Path (Join-Path $ProjectRoot "data/universe/stale_after_nightly.csv")
-        if ($Force -or ([int]$script:FinalStaleCount) -le $MaxStaleAllowed) {
+        $universeCount = Get-CsvDataRowCount -Path (Join-Path $ProjectRoot $UniverseFile)
+        $script:FinalCoveragePct = Get-CoveragePercentage -TotalCount $universeCount -StaleCount ([int]$script:FinalStaleCount)
+        $coverageReady = $universeCount -gt 0 -and ([double]$script:FinalCoveragePct) -ge $MinCoveragePct
+        if ($Force -or ([int]$script:FinalStaleCount) -le $MaxStaleAllowed -or $coverageReady) {
             $dataReady = $true
             break
         }
 
         if ($attempt -lt $attemptLimit) {
-            $detail = "过期标的 $script:FinalStaleCount 只，超过阈值 $MaxStaleAllowed；等待 $RetryWaitMinutes 分钟后重试。"
+            $detail = "过期标的 $script:FinalStaleCount 只，覆盖率 $script:FinalCoveragePct%，未达到门槛（过期不超过 $MaxStaleAllowed 只或覆盖率至少 $MinCoveragePct%）；等待 $RetryWaitMinutes 分钟后重试。"
             Add-StepResult -Name "等待行情更新($attempt/$attemptLimit)" -Status "等待" -Detail $detail
             Save-PrepReport -Status "行情准备中" -Detail $detail -CheckpointOnly
             Write-Step $detail
@@ -419,14 +490,14 @@ try {
     }
 
     if (-not $dataReady) {
-        $detail = "重试 $attemptLimit 轮后仍有过期标的 $script:FinalStaleCount 只，超过阈值 $MaxStaleAllowed；跳过形态、情绪、公告和荐股报告，避免用不完整行情生成结论。"
+        $detail = "重试 $attemptLimit 轮后仍有过期标的 $script:FinalStaleCount 只，覆盖率 $script:FinalCoveragePct%，未达到门槛（过期不超过 $MaxStaleAllowed 只或覆盖率至少 $MinCoveragePct%）；跳过形态、情绪、公告和荐股报告，避免用不完整行情生成结论。"
         Add-StepResult -Name "慢准备门槛" -Status "跳过" -Detail $detail
         Save-PrepReport -Status "行情未就绪" -Detail $detail
         Write-Step $detail
         return
     }
     if (([int]$script:FinalStaleCount) -gt 0) {
-        Add-StepResult -Name "慢准备门槛" -Status "继续" -Detail "仍有 $script:FinalStaleCount 只标的无目标日K线（可能停牌、退市或源端缺失），未超过阈值 $MaxStaleAllowed；精确日期扫描会自动排除。"
+        Add-StepResult -Name "慢准备门槛" -Status "继续" -Detail "仍有 $script:FinalStaleCount 只标的无目标日K线，目标日覆盖率 $script:FinalCoveragePct%；已满足门槛（过期不超过 $MaxStaleAllowed 只或覆盖率至少 $MinCoveragePct%），精确日期扫描会自动排除缺失标的。"
     } else {
         Add-StepResult -Name "慢准备门槛" -Status "通过" -Detail "全市场缓存已到目标日期。"
     }
@@ -479,6 +550,29 @@ try {
             }
         }
 
+        $staleIndexSymbols = @(Get-IndexStaleSymbols -Symbols $IndexSymbols -TargetDate $script:ResolvedTargetDate)
+        if ($staleIndexSymbols.Count -gt 0 -and $FinalEtfProvider -and $FinalEtfProvider -notin @($EtfProvider, $FallbackEtfProvider)) {
+            $finalArgs = @(
+                "sync-daily",
+                "--symbols"
+            ) + $staleIndexSymbols + @(
+                "--since", $Since,
+                "--until", $script:ResolvedTargetDate,
+                "--asset-type", "etf",
+                "--etf-provider", $FinalEtfProvider,
+                "--adjust", "none",
+                "--incremental",
+                "--lookback-days", $LookbackDays.ToString([Globalization.CultureInfo]::InvariantCulture),
+                "--retries", "3",
+                "--retry-wait", "1"
+            )
+            try {
+                Invoke-QuantStep -Name "补ETF指数行情第三源" -Arguments $finalArgs
+            } catch {
+                Write-Step ("Final ETF provider failed: " + $_.Exception.Message)
+            }
+        }
+
         $finalIndexStale = @(Get-IndexStaleSymbols -Symbols $IndexSymbols -TargetDate $script:ResolvedTargetDate)
         $script:FinalIndexStaleCount = $finalIndexStale.Count
         if ($finalIndexStale.Count -gt 0) {
@@ -489,6 +583,69 @@ try {
     } else {
         $script:FinalIndexStaleCount = 0
         Add-StepResult -Name "ETF指数覆盖复查" -Status "跳过" -Detail "IndexSymbols 为空。"
+    }
+
+    $quarantinePath = Join-Path $ProjectRoot "data/universe/cache_quarantine.csv"
+    $repairAttemptPath = Join-Path $ProjectRoot "data/universe/cache_repair_attempt.csv"
+    $existingQuarantineCount = Get-CsvDataRowCount -Path $quarantinePath
+    if ($existingQuarantineCount -gt 0) {
+        Copy-Item -LiteralPath $quarantinePath -Destination $repairAttemptPath -Force
+        try {
+            Invoke-QuantStep -Name "单一数据源全量修复隔离缓存" -Arguments @(
+                "sync-stock-universe",
+                "--universe-file", "data/universe/cache_repair_attempt.csv",
+                "--since", $Since,
+                "--until", $script:ResolvedTargetDate,
+                "--stock-provider", $StockProvider,
+                "--adjust", "qfq",
+                "--limit", ([Math]::Max(1, $CacheRepairBatchSize)).ToString([Globalization.CultureInfo]::InvariantCulture),
+                "--workers", "1",
+                "--sleep", "0.3",
+                "--retries", "2",
+                "--retry-wait", "2",
+                "--max-consecutive-failures", "10",
+                "--no-skip-existing",
+                "--replace-cache"
+            )
+        } catch {
+            Add-StepResult -Name "单一数据源全量修复隔离缓存" -Status "警告" -Detail $_.Exception.Message
+            Write-Step ("Quarantine repair failed; keep symbols isolated. " + $_.Exception.Message)
+        }
+    }
+
+    Invoke-QuantStep -Name "审计并隔离异常日线缓存" -Arguments @(
+        "cache-audit",
+        "--universe-file", $UniverseFile,
+        "--target-date", $script:ResolvedTargetDate,
+        "--output-quarantine", "data/universe/cache_quarantine.csv",
+        "--top", "30"
+    )
+    $script:QuarantineCount = Get-CsvDataRowCount -Path (Join-Path $ProjectRoot "data/universe/cache_quarantine.csv")
+    if (Test-Path -LiteralPath $repairAttemptPath) {
+        $remainingSymbols = @{}
+        Import-Csv -LiteralPath $quarantinePath | ForEach-Object {
+            $remainingSymbols[[string]$_.symbol] = $true
+        }
+        $repairedRows = @(
+            Import-Csv -LiteralPath $repairAttemptPath | Where-Object {
+                -not $remainingSymbols.ContainsKey([string]$_.symbol)
+            }
+        )
+        if ($repairedRows.Count -gt 0) {
+            $repairedPath = Join-Path $ProjectRoot "data/universe/cache_repaired.csv"
+            $repairedRows | Export-Csv -LiteralPath $repairedPath -NoTypeInformation -Encoding UTF8
+            Invoke-QuantStep -Name "重建已修复标的行情数仓" -Arguments @(
+                "warehouse-sync-candles",
+                "--universe-file", "data/universe/cache_repaired.csv",
+                "--target-date", $script:ResolvedTargetDate,
+                "--force"
+            )
+        }
+    }
+    if ([int]$script:QuarantineCount -gt 0) {
+        Add-StepResult -Name "缓存质量门槛" -Status "警告" -Detail "已隔离 $script:QuarantineCount 只疑似复权拼接污染标的，日常扫描自动排除，待单一数据源全量重建。"
+    } else {
+        Add-StepResult -Name "缓存质量门槛" -Status "通过" -Detail "未发现需要隔离的缓存。"
     }
 
     Invoke-QuantStep -Name "扫描突破确认池" -Arguments @(
@@ -542,6 +699,14 @@ try {
         "--target-date", $script:ResolvedTargetDate,
         "--top", "80",
         "--min-score", "55",
+        "--min-amount-ma20", "100000000"
+    )
+    Invoke-QuantStep -Name "扫描低位待催化池" -Arguments @(
+        "scan-pattern",
+        "--pattern", "latent_catalyst_setup",
+        "--target-date", $script:ResolvedTargetDate,
+        "--top", "200",
+        "--min-score", "45",
         "--min-amount-ma20", "100000000"
     )
     Invoke-QuantStep -Name "情绪面缓存" -Arguments @(
@@ -641,6 +806,13 @@ try {
         "--universe-file", $UniverseFile,
         "--top", "50"
     )
+    Invoke-QuantStep -Name "长周期A1伯克希尔深研交接" -Arguments @(
+        "berkshire-handoff",
+        "--target-date", $script:ResolvedTargetDate,
+        "--top", "5",
+        "--min-days-observed", "3",
+        "--min-score", "58"
+    )
     Invoke-QuantStep -Name "股票池维表入库" -Arguments @(
         "warehouse-sync-universe",
         "--universe-file", $UniverseFile,
@@ -654,7 +826,13 @@ try {
     if ($IndexSymbols.Count -gt 0) {
         $closingStaleIndexSymbols = @(Get-IndexStaleSymbols -Symbols $IndexSymbols -TargetDate $script:ResolvedTargetDate)
         if ($closingStaleIndexSymbols.Count -gt 0) {
-            $closingProvider = if ($FallbackEtfProvider) { $FallbackEtfProvider } else { $EtfProvider }
+            $closingProvider = if ($FinalEtfProvider) {
+                $FinalEtfProvider
+            } elseif ($FallbackEtfProvider) {
+                $FallbackEtfProvider
+            } else {
+                $EtfProvider
+            }
             $closingIndexArgs = @(
                 "sync-daily",
                 "--symbols"
@@ -700,6 +878,10 @@ try {
         target_date = $script:ResolvedTargetDate
         stock_provider = $StockProvider
         fallback_stock_provider = $FallbackStockProvider
+        final_stock_provider = $FinalStockProvider
+        etf_provider = $EtfProvider
+        fallback_etf_provider = $FallbackEtfProvider
+        final_etf_provider = $FinalEtfProvider
         workers = $Workers
         lookback_days = $LookbackDays
         sentiment_top = $SentimentTop

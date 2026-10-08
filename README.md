@@ -33,10 +33,11 @@ AKShare 只在真实下载数据时需要。测试使用合成数据。
 python -m quant_a_stock.cli sync-daily --symbols 510300 159915 510500 --since 2020-01-01 --adjust qfq
 ```
 
-如果 AKShare 的东方财富接口临时不可用，可以显式使用 Sina ETF 备用源。这个源适合先跑通研究流程，但不支持 qfq/hfq 复权控制：
+夜间任务默认使用 Sina，若收盘后仍未发布目标日行情，再使用 Tencent 补齐。ETF 使用不复权数据；东方财富接口保留为手工备用，不再进入默认夜间链路：
 
 ```powershell
 python -m quant_a_stock.cli sync-daily --symbols 510300 159915 510500 --since 2020-01-01 --asset-type etf --etf-provider sina --adjust none
+python -m quant_a_stock.cli sync-daily --symbols 510300 159915 510500 --since 2020-01-01 --asset-type etf --etf-provider tencent --adjust none
 ```
 
 下载小股票池。Sina 个股接口支持 `qfq`，但不要无节制高频抓取：
@@ -161,6 +162,24 @@ python -m quant_a_stock.cli scan-pattern --pattern trend_pullback_setup --top 12
 ```
 
 `trend_pullback_setup` 用来补充 A3 候选：它不强求低位平台，而是寻找 60 日趋势已经走强、近 20 日不过热、离前高有适度回撤并重新企稳的票。
+
+扫描全市场“低位待催化”内部观察池：
+
+```powershell
+python -m quant_a_stock.cli scan-pattern --pattern latent_catalyst_setup --top 200 --min-score 45 --min-amount-ma20 100000000
+```
+
+这个池只扩大第一阶段召回，`target_weight` 固定为 0，不直接进入 A 档或影子组合。用次日开盘可成交口径回填证据：
+
+```powershell
+python -m quant_a_stock.cli latent-catalyst-review --since 2026-06-01 --until 2026-07-31 --universe-file data/universe/a_stock.csv --benchmark-symbol 510300
+```
+
+分层周期统一为：A3 执行 1-3 日、A2 执行 1-5 日、B2 只给 1-3 日升级窗口；A1 执行 10-20 日，但研究生命周期延长到 60 个交易日并每 5 日重新认证。连续认证的低风险 A1 可交给伯克希尔技能深研：
+
+```powershell
+python -m quant_a_stock.cli berkshire-handoff --target-date 2026-07-31 --top 5
+```
 
 把早期形态当成策略回测：
 

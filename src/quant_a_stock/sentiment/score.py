@@ -413,6 +413,7 @@ def build_market_theme(
         if frame.empty or "所属行业" not in frame.columns:
             continue
         data = frame.copy()
+        data["所属行业"] = data["所属行业"].map(_normalize_industry_name)
         data["来源"] = label
         frames.append(data)
 
@@ -463,3 +464,12 @@ def build_market_theme(
         ),
     }
     return theme, meta
+
+
+def _normalize_industry_name(value: object) -> str:
+    text = str(value or "").strip()
+    aliases = {
+        "房地产开": "房地产开发",
+        "汽车零部": "汽车零部件",
+    }
+    return aliases.get(text, text)

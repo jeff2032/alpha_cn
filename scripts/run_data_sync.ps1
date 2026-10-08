@@ -4,14 +4,17 @@
     [string]$Since = "2020-01-01",
     [string]$TargetDate = "",
     [string]$StockProvider = "sina",
-    [string]$FallbackStockProvider = "eastmoney",
+    [string]$FallbackStockProvider = "tencent",
+    [string]$FinalStockProvider = "",
     [string]$Adjust = "qfq",
     [int]$Workers = 6,
-    [int]$FallbackWorkers = 6,
+    [int]$FallbackWorkers = 4,
+    [int]$FinalWorkers = 4,
     [double]$SleepSeconds = 0.05,
     [int]$LookbackDays = 60,
     [switch]$SkipUniverseRefresh,
-    [switch]$NoFallback
+    [switch]$NoFallback,
+    [switch]$DisableTranscript
 )
 
 $ErrorActionPreference = "Stop"
@@ -54,17 +57,26 @@ function Get-CsvDataRowCount {
 function Get-EffectiveWorkers {
     param(
         [string]$Provider,
-        [int]$RequestedWorkers
+        [int]$RequestedWorkers,
+        [int]$SymbolCount
     )
 
     $effective = [Math]::Max(1, $RequestedWorkers)
-    if ($Provider -eq "sina" -and $effective -gt 1) {
-        Write-Step "Sina provider is not stable with high thread counts on this machine; clamp Workers from $effective to 1."
+    if ($Provider -eq "sina" -and $SymbolCount -le 100 -and $effective -gt 1) {
+        Write-Step "Sina small-batch retry uses one worker to avoid native provider crashes; clamp Workers from $effective to 1."
         return 1
+    }
+    if ($Provider -eq "sina" -and $effective -gt 3) {
+        Write-Step "Sina provider is not stable with high thread counts on this machine; clamp Workers from $effective to 3."
+        return 3
     }
     if ($Provider -eq "eastmoney" -and $effective -gt 2) {
         Write-Step "Eastmoney provider is unstable with large full-market bursts; clamp Workers from $effective to 2."
         return 2
+    }
+    if ($Provider -eq "tencent" -and $effective -gt 4) {
+        Write-Step "Tencent is a final fallback; clamp Workers from $effective to 4."
+        return 4
     }
     return $effective
 }
@@ -97,14 +109,16 @@ function Invoke-UniverseSync {
         [switch]$AllowFailure
     )
 
-    if ($Provider -notin @("sina", "eastmoney")) {
+    if ($Provider -notin @("sina", "eastmoney", "tencent")) {
         throw "Unsupported stock provider: $Provider"
     }
 
-    $effectiveWorkers = Get-EffectiveWorkers -Provider $Provider -RequestedWorkers $RequestedWorkers
+    $stalePath = Join-Path $ProjectRoot "data/universe/stale.csv"
+    $symbolCount = Get-CsvDataRowCount -Path $stalePath
+    $effectiveWorkers = Get-EffectiveWorkers -Provider $Provider -RequestedWorkers $RequestedWorkers -SymbolCount $symbolCount
     $effectiveSleep = [Math]::Max($SleepSeconds, 0.2)
     Write-Step "$Name. Provider: $Provider, Workers: $effectiveWorkers, SleepSeconds: $effectiveSleep, LookbackDays: $LookbackDays"
-    Invoke-Quant @(
+    $syncArguments = @(
         "sync-stock-universe",
         "--universe-file", "data/universe/stale.csv",
         "--since", $Since,
@@ -117,21 +131,32 @@ function Invoke-UniverseSync {
         "--retries", "3",
         "--retry-wait", "2",
         "--max-consecutive-failures", "40",
+        "--progress-every", "100",
         "--no-skip-existing"
-    ) -AllowFailure:$AllowFailure
+    )
+    if ($TargetDate) {
+        $syncArguments += @("--until", $TargetDate)
+    }
+    Invoke-Quant $syncArguments -AllowFailure:$AllowFailure
     $script:LastSyncSucceeded = $script:LastQuantSucceeded
 }
 
 Set-Location $ProjectRoot
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
 
 $logDir = Join-Path $ProjectRoot "logs/data_sync"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $logPath = Join-Path $logDir ("data_sync_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
-Start-Transcript -Path $logPath -Append | Out-Null
+$transcriptStarted = $false
+if (-not $DisableTranscript) {
+    Start-Transcript -Path $logPath | Out-Null
+    $transcriptStarted = $true
+}
 
 try {
     Write-Step "Data sync started. ProjectRoot: $ProjectRoot"
-    Write-Step "Primary provider: $StockProvider, fallback provider: $FallbackStockProvider, SleepSeconds: $SleepSeconds, LookbackDays: $LookbackDays"
+    Write-Step "Primary provider: $StockProvider, fallback provider: $FallbackStockProvider, final provider: $FinalStockProvider, SleepSeconds: $SleepSeconds, LookbackDays: $LookbackDays"
 
     $venvPython = Join-Path $ProjectRoot ".venv/Scripts/python.exe"
     if (Test-Path $venvPython) {
@@ -183,11 +208,27 @@ try {
     }
 
     Invoke-CacheDateStatus -OutputStale "data/universe/stale.csv" -Top "20"
+    $staleCount = Get-CsvDataRowCount -Path $stalePath
+    if (
+        $staleCount -gt 0 -and
+        -not $NoFallback -and
+        $FinalStockProvider -and
+        $FinalStockProvider -notin @($StockProvider, $FallbackStockProvider)
+    ) {
+        Invoke-UniverseSync -Name "Final daily sync" -Provider $FinalStockProvider -RequestedWorkers $FinalWorkers -AllowFailure
+        if (-not $script:LastSyncSucceeded) {
+            Write-Step "Final provider failed or crashed. Continue to final coverage check."
+        }
+    }
+
+    Invoke-CacheDateStatus -OutputStale "data/universe/stale.csv" -Top "20"
     $finalStaleCount = Get-CsvDataRowCount -Path $stalePath
     if ($finalStaleCount -gt 0) {
         Write-Step "Data sync finished with stale symbols remaining: $finalStaleCount. Nightly prep will decide whether to retry or continue."
     }
     Write-Step "Data sync finished. Log: $logPath"
 } finally {
-    Stop-Transcript | Out-Null
+    if ($transcriptStarted) {
+        Stop-Transcript | Out-Null
+    }
 }

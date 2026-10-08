@@ -14,6 +14,7 @@ from quant_a_stock.backtest.shadow import save_shadow_plan
 from quant_a_stock.backtest.walk_forward import run_walk_forward_validation
 from quant_a_stock.data.cache import save_daily_cache
 from quant_a_stock.research.factor_evidence import analyze_factor_evidence
+from quant_a_stock.research.version import FACTOR_SCHEMA_VERSION
 from quant_a_stock.research.fundamental_verdict import merge_fundamental_verdicts
 from quant_a_stock.research.fundamental_verdict import normalize_fundamental_verdicts
 
@@ -93,6 +94,7 @@ def test_factor_evidence_calculates_ic_quantiles_and_regimes() -> None:
                     "risk_event_score": 11 - rank,
                     "benchmark_ret_5d": 0.01,
                     "excess_ret_5d": rank / 100,
+                    "factor_schema_version": FACTOR_SCHEMA_VERSION,
                 }
             )
 
@@ -104,6 +106,25 @@ def test_factor_evidence_calculates_ic_quantiles_and_regimes() -> None:
     assert set(result.summary["weighting_status"]) == {"样本积累中"}
     assert set(result.quantiles["quantile"]) == {1, 2, 3, 4, 5}
     assert "震荡" in set(result.regimes["market_regime"])
+
+
+def test_factor_evidence_rejects_legacy_factor_schema() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "signal_date": "2026-08-12",
+                "symbol": f"{index:06d}",
+                "volume_ratio": float(index),
+                "excess_ret_5d": index / 100,
+                "factor_schema_version": "legacy-volume-unit",
+            }
+            for index in range(10)
+        ]
+    )
+
+    result = analyze_factor_evidence(frame, horizon="5d")
+
+    assert result.summary.empty
 
 
 def test_shadow_plan_freezes_caps_and_replays_open_fills(tmp_path: Path) -> None:
@@ -190,6 +211,43 @@ def test_shadow_plan_applies_market_position_gate() -> None:
     assert set(plan["market_total_cap"]) == {0.10}
     assert market_position_cap("震荡偏强") == 0.40
     assert market_position_cap("防守", market_score=20) == 0.0
+
+
+def test_shadow_plan_excludes_non_executable_high_volatility_a3() -> None:
+    signals = pd.DataFrame(
+        [
+            {
+                "symbol": "300001",
+                "name": "高波动观察",
+                "signal_type": "hold_watch",
+                "action_bucket": "短线-A3一三日确认",
+                "research_tier": "A3",
+                "expected_horizon": "1-3d",
+                "research_score": 80,
+                "risk_level": "低",
+            },
+            {
+                "symbol": "300002",
+                "name": "趋势延续",
+                "signal_type": "buy_watch",
+                "action_bucket": "主攻-A3趋势延续",
+                "research_tier": "A3",
+                "expected_horizon": "1-3d",
+                "research_score": 75,
+                "risk_level": "低",
+            },
+        ]
+    )
+
+    plan = freeze_shadow_plan(
+        signals,
+        target_date="2026-07-31",
+        plan_date="2026-08-03",
+        market_regime="强势",
+        market_score=80,
+    )
+
+    assert list(plan["symbol"]) == ["300002"]
 
 
 def test_fundamental_verdict_normalizes_and_filters_shadow_plan() -> None:

@@ -68,6 +68,21 @@ class QuietReversalSetupConfig:
     min_amount_ma20: float = 100_000_000
 
 
+@dataclass(frozen=True)
+class LatentCatalystSetupConfig:
+    base_window: int = 120
+    volume_window: int = 20
+    min_ret_5: float = -0.18
+    max_ret_5: float = 0.12
+    min_ret_20: float = -0.45
+    max_ret_20: float = 0.12
+    max_ret_60: float = 0.35
+    max_price_position: float = 0.55
+    min_volume_ratio: float = 0.45
+    max_volume_ratio: float = 1.65
+    min_amount_ma20: float = 100_000_000
+
+
 def _clip_score(value: float, low: float = 0.0, high: float = 100.0) -> float:
     if np.isnan(value):
         return 0.0
@@ -294,6 +309,130 @@ def scan_quiet_reversal_setups(
     if result.empty:
         return result
     return result.sort_values(["score", "price_position_pct"], ascending=[False, True]).reset_index(drop=True)
+
+
+def score_latent_catalyst_setup(
+    candles: pd.DataFrame,
+    *,
+    symbol: str,
+    config: LatentCatalystSetupConfig = LatentCatalystSetupConfig(),
+) -> dict[str, float | str | bool] | None:
+    features = build_latent_catalyst_feature_frame(candles, config=config)
+    if features.empty:
+        return None
+    latest = features.iloc[-1]
+    return {
+        "symbol": symbol,
+        "timestamp": str(pd.Timestamp(latest["timestamp"]).date()),
+        "stage": "latent_catalyst_watch",
+        "setup_phase": "低位待催化",
+        "catalyst_state": str(latest["catalyst_state"]),
+        "score": round(float(latest["score"]), 2),
+        "close": round(float(latest["close"]), 4),
+        "price_position_pct": round(float(latest["price_position_pct"]), 4),
+        "volume_ratio": round(float(latest["volume_ratio"]), 4),
+        "amount_ma20": round(float(latest["amount_ma20"]), 2),
+        "ret_5_pct": round(float(latest["ret_5_pct"]), 4),
+        "ret_20_pct": round(float(latest["ret_20_pct"]), 4),
+        "ret_60_pct": round(float(latest["ret_60_pct"]), 4),
+        "close_vs_ma5_pct": round(float(latest["close_vs_ma5_pct"]), 4),
+        "close_vs_ma20_pct": round(float(latest["close_vs_ma20_pct"]), 4),
+        "observation_only": True,
+        "target_weight": 0.0,
+        "catalyst_required": "公告/产业催化、主题扩散或资金确认后才可升级",
+    }
+
+
+def build_latent_catalyst_feature_frame(
+    candles: pd.DataFrame,
+    *,
+    config: LatentCatalystSetupConfig = LatentCatalystSetupConfig(),
+) -> pd.DataFrame:
+    frame = candles.copy()
+    if frame.empty:
+        return frame
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"])
+    frame = frame.sort_values("timestamp").reset_index(drop=True)
+    required_bars = max(config.base_window, config.volume_window, 60) + 21
+    if len(frame) < required_bars:
+        return pd.DataFrame()
+
+    close = pd.to_numeric(frame["close"], errors="coerce")
+    volume = pd.to_numeric(frame["volume"], errors="coerce")
+    amount = pd.to_numeric(frame["amount"], errors="coerce") if "amount" in frame.columns else close * volume
+    prior_high = close.shift(1).rolling(config.base_window, min_periods=config.base_window).max()
+    prior_low = close.shift(1).rolling(config.base_window, min_periods=config.base_window).min()
+    position = (close - prior_low) / (prior_high - prior_low).replace(0, np.nan)
+    ret_5 = close / close.shift(5) - 1
+    ret_20 = close / close.shift(20) - 1
+    ret_60 = close / close.shift(60) - 1
+    ma5 = close.rolling(5).mean()
+    ma20 = close.rolling(20).mean()
+    volume_ratio = volume / volume.rolling(config.volume_window).mean()
+    amount_ma20 = amount.rolling(config.volume_window).mean()
+
+    position_score = ((0.65 - position) / 0.65 * 35).clip(0, 35)
+    reset_score = ((0.12 - ret_20) / 0.57 * 20).clip(0, 20)
+    quiet_score = (20 - (volume_ratio - 0.90).abs() / 0.90 * 20).clip(0, 20)
+    repair_score = (close.ge(ma5).astype(float) * 8 + ((ret_5 + 0.10) / 0.18 * 7).clip(0, 7))
+    liquidity_score = (amount_ma20 / 500_000_000 * 10).clip(0, 10)
+    overheat_penalty = ((ret_5 - 0.08) / 0.10 * 15).clip(0, 15)
+    overheat_penalty += ((ret_60 - 0.25) / 0.20 * 15).clip(0, 15)
+
+    frame["price_position_pct"] = position
+    frame["ret_5_pct"] = ret_5
+    frame["ret_20_pct"] = ret_20
+    frame["ret_60_pct"] = ret_60
+    frame["volume_ratio"] = volume_ratio
+    frame["amount_ma20"] = amount_ma20
+    frame["close_vs_ma5_pct"] = close / ma5 - 1
+    frame["close_vs_ma20_pct"] = close / ma20 - 1
+    frame["score"] = (position_score + reset_score + quiet_score + repair_score + liquidity_score - overheat_penalty).clip(0, 100)
+    frame["catalyst_state"] = np.select(
+        [
+            ret_20.le(-0.15) & position.le(0.30),
+            close.ge(ma5) & ret_5.gt(0),
+        ],
+        ["深度回落", "早期修复"],
+        default="低位盘整",
+    )
+    return frame
+
+
+def scan_latent_catalyst_setups(
+    candles_by_symbol: dict[str, pd.DataFrame],
+    *,
+    config: LatentCatalystSetupConfig = LatentCatalystSetupConfig(),
+    min_score: float = 45.0,
+    min_amount_ma20: float | None = None,
+) -> pd.DataFrame:
+    rows = []
+    for symbol, candles in candles_by_symbol.items():
+        row = score_latent_catalyst_setup(candles, symbol=symbol, config=config)
+        if row is None:
+            continue
+        if not (config.min_ret_5 <= float(row["ret_5_pct"]) <= config.max_ret_5):
+            continue
+        if not (config.min_ret_20 <= float(row["ret_20_pct"]) <= config.max_ret_20):
+            continue
+        if float(row["ret_60_pct"]) > config.max_ret_60:
+            continue
+        if float(row["price_position_pct"]) > config.max_price_position:
+            continue
+        if not (config.min_volume_ratio <= float(row["volume_ratio"]) <= config.max_volume_ratio):
+            continue
+        amount_floor = min_amount_ma20 if min_amount_ma20 is not None else config.min_amount_ma20
+        if float(row["amount_ma20"]) < amount_floor:
+            continue
+        if float(row["score"]) >= min_score:
+            rows.append(row)
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+    return result.sort_values(
+        ["score", "price_position_pct", "volume_ratio"],
+        ascending=[False, True, False],
+    ).reset_index(drop=True)
 
 
 def score_accumulation_setup(
@@ -578,6 +717,7 @@ def score_trend_pullback_setup(
     range_position_60 = (close - low_60) / (high_60 - low_60)
     volume_ratio = volume / volume.rolling(config.volume_window, min_periods=config.volume_window).mean()
     amount_ma20 = amount.rolling(config.volume_window, min_periods=config.volume_window).mean()
+    mtf = _multi_timeframe_metrics(frame, config=AccumulationSetupConfig())
 
     idx = frame.index[-1]
     latest = frame.loc[idx]
@@ -640,6 +780,9 @@ def score_trend_pullback_setup(
         + _clip_score((metrics["range_position_60"] - 0.92) / 0.25 * 10, high=10)
     )
     score = _clip_score(trend_score + pullback_score + resume_score - overheat_penalty)
+    monthly_score = _monthly_setup_score(mtf)
+    weekly_score = _weekly_setup_score(mtf)
+    mtf_score = _clip_score(score * 0.45 + weekly_score * 0.30 + monthly_score * 0.25)
 
     stage = "trend_pullback"
     setup_phase = "强趋势回踩"
@@ -653,6 +796,10 @@ def score_trend_pullback_setup(
         "stage": stage,
         "setup_phase": setup_phase,
         "score": round(score, 2),
+        "mtf_score": round(mtf_score, 2),
+        "daily_score": round(score, 2),
+        "weekly_score": round(weekly_score, 2),
+        "monthly_score": round(monthly_score, 2),
         "trend_score": round(trend_score, 2),
         "pullback_score": round(pullback_score, 2),
         "resume_score": round(resume_score, 2),
@@ -668,6 +815,13 @@ def score_trend_pullback_setup(
         "drawdown_from_high_pct": round(metrics["drawdown_from_high"], 4),
         "pullback_depth_pct": round(metrics["pullback_depth"], 4),
         "range_position_60_pct": round(metrics["range_position_60"], 4),
+        "monthly_position_pct": round(mtf["monthly_position"], 4),
+        "monthly_range_pct": round(mtf["monthly_range"], 4),
+        "monthly_ma_slope_pct": round(mtf["monthly_ma_slope"], 4),
+        "weekly_position_pct": round(mtf["weekly_position"], 4),
+        "weekly_range_pct": round(mtf["weekly_range"], 4),
+        "weekly_trend_slope_pct": round(mtf["weekly_trend_slope"], 4),
+        "weekly_volume_ratio": round(mtf["weekly_volume_ratio"], 4),
         "volume_ratio": round(metrics["volume_ratio"], 4),
         "amount_ma20": round(metrics["amount_ma20"], 2),
     }

@@ -18,7 +18,7 @@ from quant_a_stock.research.summary import save_daily_research_summary_markdown
 from quant_a_stock.warehouse import ingest_latest_reports
 
 
-PIPELINE_VERSION = "research_pipeline_v2026_07_14_immutable_rerun"
+PIPELINE_VERSION = "research_pipeline_v2026_08_02_horizon_catalyst_handoff"
 
 
 @dataclass(frozen=True)
@@ -171,6 +171,7 @@ def _latest_research_reports(target_date: str, *, reports_dir: Path) -> dict[str
         "scan_accumulation_setup": _latest_file_for_target(reports_dir, "scan_accumulation_setup_*.csv", target_date),
         "scan_trend_pullback_setup": _latest_file_for_target(reports_dir, "scan_trend_pullback_setup_*.csv", target_date),
         "scan_quiet_reversal_setup": _latest_file_for_target(reports_dir, "scan_quiet_reversal_setup_*.csv", target_date),
+        "scan_latent_catalyst_setup": _latest_file_for_target(reports_dir, "scan_latent_catalyst_setup_*.csv", target_date),
         "sentiment_watchlist": _latest_file_for_target(reports_dir, "sentiment_watchlist_*.csv", target_date),
         "market_theme": _latest_file_for_target(reports_dir, "market_theme_*.csv", target_date),
         "research_candidates": _latest_file_for_target(reports_dir, "research_candidates_*.csv", target_date),

@@ -8,6 +8,7 @@ import pandas as pd
 
 from quant_a_stock.config import DEFAULT_PATHS
 from quant_a_stock.research.version import FACTOR_EVIDENCE_VERSION
+from quant_a_stock.research.version import FACTOR_SCHEMA_VERSION
 
 
 FACTOR_COLUMNS = {
@@ -44,6 +45,11 @@ def analyze_factor_evidence(
     if outcomes.empty or target_col not in outcomes.columns:
         return FactorEvidenceResult(pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
     base = outcomes.copy()
+    if "factor_schema_version" not in base.columns:
+        return FactorEvidenceResult(pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+    base = base[base["factor_schema_version"].astype(str) == FACTOR_SCHEMA_VERSION].copy()
+    if base.empty:
+        return FactorEvidenceResult(pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
     point_in_time_column = next(
         (column for column in ("point_in_time", "sentiment_point_in_time") if column in base.columns),
         None,
@@ -181,6 +187,7 @@ def _render_markdown(result: FactorEvidenceResult, *, horizon: str) -> str:
         f"# 因子证据报告 {horizon}",
         "",
         "只使用已经进入历史复盘事实表的字段，不接入新增网站。IC、分组收益、换手和市场环境稳定性需要共同判断。",
+        f"只纳入因子口径 `{FACTOR_SCHEMA_VERSION}`；旧成交量单位快照不会与新口径混算。",
         f"少于 {MIN_FACTOR_WEIGHTING_DATES} 个完整截面日期不得调权；达到 {RECOMMENDED_FACTOR_WEIGHTING_DATES} 个日期后才进入正式调权评审。",
         "",
         "## 汇总",

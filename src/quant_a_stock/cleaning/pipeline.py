@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from quant_a_stock.data.cache import STANDARD_COLUMNS
+from quant_a_stock.data.normalization import normalize_a_share_volume
 
 
 PRICE_COLUMNS = ["open", "high", "low", "close"]
@@ -34,6 +35,8 @@ def clean_candles(
         else:
             frame[column] = 0.0
 
+    frame = normalize_a_share_volume(frame)
+
     if "symbol" not in frame.columns:
         frame["symbol"] = symbol or ""
     if symbol is not None:
@@ -53,4 +56,3 @@ def clean_candles(
         column for column in frame.columns if column not in STANDARD_COLUMNS
     ]
     return frame.loc[:, ordered].reset_index(drop=True)
-

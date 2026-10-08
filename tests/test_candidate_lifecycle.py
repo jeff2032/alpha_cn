@@ -139,6 +139,11 @@ def test_candidate_lifecycle_tracks_upgrade_and_hit(tmp_path: Path) -> None:
     assert bool(lifecycle["has_upgrade"]) is True
     assert lifecycle["result_label"] == "strong_hit"
 
+    a1_lifecycle = tracking.lifecycles.loc[tracking.lifecycles["symbol"] == "600999"].iloc[0]
+    assert a1_lifecycle["tracking_window_days"] == 60
+    assert a1_lifecycle["research_horizon"] == "10-60d"
+    assert a1_lifecycle["allowed_gap_trade_days"] == 5
+
     daily = tracking.daily[tracking.daily["symbol"] == "002137"]
     assert "upgraded" in set(daily["day_status"])
 

@@ -5,6 +5,7 @@ import pandas as pd
 
 from quant_a_stock.screening.patterns import scan_accumulation_setups
 from quant_a_stock.screening.patterns import scan_base_breakout_setups
+from quant_a_stock.screening.patterns import scan_latent_catalyst_setups
 from quant_a_stock.screening.patterns import scan_quiet_reversal_setups
 from quant_a_stock.screening.patterns import scan_trend_pullback_setups
 
@@ -203,3 +204,32 @@ def test_quiet_reversal_scanner_keeps_depressed_low_volume_setup_observational()
     assert result.loc[0, "setup_phase"] == "静默反转观察"
     assert -0.25 <= result.loc[0, "ret_20_pct"] <= -0.10
     assert result.loc[0, "volume_ratio"] <= 1.10
+
+
+def test_latent_catalyst_scanner_keeps_broad_low_position_pool_observational() -> None:
+    decline = np.linspace(20, 14, 170)
+    base = np.linspace(14, 12.2, 20)
+    repair = np.array([12.15, 12.20, 12.24, 12.30, 12.36])
+    close = pd.Series(np.concatenate([decline, base, repair]))
+    volume = pd.Series(np.full(len(close), 1_200_000.0))
+    volume.iloc[-1] = 1_350_000
+    candles = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2025-01-01", periods=len(close), freq="B"),
+            "open": close,
+            "high": close * 1.01,
+            "low": close * 0.99,
+            "close": close,
+            "volume": volume,
+            "amount": close * volume * 100,
+            "symbol": "000001",
+        }
+    )
+
+    result = scan_latent_catalyst_setups({"000001": candles}, min_score=35)
+
+    assert not result.empty
+    assert result.loc[0, "stage"] == "latent_catalyst_watch"
+    assert result.loc[0, "setup_phase"] == "低位待催化"
+    assert bool(result.loc[0, "observation_only"]) is True
+    assert result.loc[0, "target_weight"] == 0.0

@@ -26,3 +26,21 @@ def test_clean_candles_sorts_deduplicates_and_filters_bad_prices() -> None:
     ]
     assert clean["symbol"].tolist() == ["510300", "510300"]
     assert bool(clean.loc[0, "is_suspended"]) is True
+
+
+def test_clean_candles_normalizes_mixed_lot_and_share_volume() -> None:
+    raw = pd.DataFrame(
+        {
+            "timestamp": ["2026-08-10", "2026-08-11"],
+            "open": [10.0, 10.0],
+            "high": [10.2, 10.2],
+            "low": [9.8, 9.8],
+            "close": [10.0, 10.0],
+            "volume": [100_000, 10_000_000],
+            "amount": [100_000_000, 100_000_000],
+        }
+    )
+
+    clean = clean_candles(raw, symbol="000001")
+
+    assert clean["volume"].tolist() == [10_000_000, 10_000_000]

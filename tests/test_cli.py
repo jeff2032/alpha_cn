@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pandas as pd
+import pytest
 
 from quant_a_stock.cli import _filter_exact_cross_section
 from quant_a_stock.cli import build_parser
@@ -10,6 +13,41 @@ from quant_a_stock.cli import _balanced_scan_selection
 from quant_a_stock.cli import _incremental_start_from_last
 from quant_a_stock.config import ProjectPaths
 import quant_a_stock.cli as cli_module
+
+
+def test_sync_stock_universe_marks_rows_that_do_not_reach_target_date(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    cache_path = tmp_path / "000001.csv"
+    candles = pd.DataFrame({"timestamp": pd.to_datetime(["2026-10-08"]), "close": [10.0]})
+    monkeypatch.setattr(cli_module, "daily_cache_path", lambda symbol: cache_path)
+    monkeypatch.setattr(cli_module, "fetch_daily", lambda *args, **kwargs: candles)
+    monkeypatch.setattr(cli_module, "_merge_with_daily_cache", lambda *args, **kwargs: candles)
+    monkeypatch.setattr(cli_module, "save_daily_cache", lambda *args, **kwargs: cache_path)
+    args = SimpleNamespace(
+        skip_existing=False,
+        incremental=True,
+        since="2020-01-01",
+        lookback_days=60,
+        until="2026-10-09",
+        adjust="qfq",
+        stock_provider="sina",
+        retries=1,
+        retry_wait=0,
+        sleep=0,
+    )
+
+    _, result, message = cli_module._sync_stock_universe_symbol(
+        0,
+        1,
+        {"symbol": "000001", "name": "平安银行"},
+        args,
+    )
+
+    assert result["status"] == "未到目标日"
+    assert result["error"] == "最后日期 2026-10-08，目标日期 2026-10-09"
+    assert "未到目标日" in message
 
 
 def test_compare_command_parses_strategy_arguments() -> None:
@@ -406,6 +444,52 @@ def test_adjusted_incremental_cache_aligns_old_price_basis() -> None:
     assert aligned["volume"].tolist() == [100, 200, 300]
 
 
+def test_adjusted_incremental_cache_rejects_unstable_overlap() -> None:
+    cached = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-01-01", periods=4),
+            "close": [10.0, 10.0, 10.0, 10.0],
+        }
+    )
+    downloaded = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-01-01", periods=4),
+            "close": [5.0, 10.0, 5.0, 10.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="前复权重叠区口径不一致"):
+        _align_adjusted_cache_basis(cached, downloaded, adjust="qfq")
+
+
+def test_cache_audit_command_parses_arguments() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "cache-audit",
+            "--target-date",
+            "2026-10-08",
+            "--output-quarantine",
+            "data/universe/cache_quarantine.csv",
+        ]
+    )
+
+    assert args.command == "cache-audit"
+    assert args.min_basis_jumps == 8
+
+
+def test_calendar_resolve_command_parses_arguments() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        ["calendar-resolve", "--target-date", "2026-10-07", "--refresh"]
+    )
+
+    assert args.command == "calendar-resolve"
+    assert args.refresh is True
+
+
 def test_cache_status_command_parses_arguments() -> None:
     parser = build_parser()
 
@@ -629,6 +713,15 @@ def test_snapshot_research_command_parses_arguments() -> None:
     assert args.command == "snapshot-research"
     assert args.target_date == "2026-06-12"
     assert args.scan_report == "reports/scan.csv"
+
+
+def test_snapshot_research_accepts_rebuild_run_id() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        ["snapshot-research", "--target-date", "2026-08-12", "--rebuild-run-id", "volume-v2"]
+    )
+
+    assert args.rebuild_run_id == "volume-v2"
 
 
 def test_daily_research_summary_command_parses_arguments() -> None:

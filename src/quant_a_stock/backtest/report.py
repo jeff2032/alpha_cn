@@ -15,6 +15,7 @@ def save_report(
     report_type: str,
     reports_dir: Path | None = None,
     date_prefix: str | None = None,
+    columns: Iterable[str] | None = None,
 ) -> Path:
     root = reports_dir or DEFAULT_PATHS.reports
     root.mkdir(parents=True, exist_ok=True)
@@ -23,5 +24,5 @@ def save_report(
     else:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = root / f"{report_type}_{stamp}.csv"
-    pd.DataFrame(list(rows)).to_csv(path, index=False)
+    pd.DataFrame(list(rows), columns=list(columns) if columns is not None else None).to_csv(path, index=False)
     return path
